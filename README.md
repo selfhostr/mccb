@@ -1,27 +1,32 @@
-<p align="center"><img src="docs/logo.svg" alt="mccb logo" width="72" height="72"></p>
+<div align="center">
 
-<h1 align="center">mccb</h1>
+<a href="https://github.com/yetysw/mccb"><img src=".github/assets/banner.svg" alt="mccb: migrate Outlook PST files to IMAP, CalDAV and CardDAV" width="100%"></a>
 
-<p align="center">PST Migrator — bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</p>
+<h3>Bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</h3>
 
-<p align="center">
-  <a href="https://github.com/yetysw/mccb/releases"><img src="https://img.shields.io/github/v/release/yetysw/mccb" alt="Latest release"></a>
-  <a href="https://github.com/yetysw/mccb/actions/workflows/docker.yml"><img src="https://github.com/yetysw/mccb/actions/workflows/docker.yml/badge.svg" alt="Docker image"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
-  <a href="https://github.com/yetysw/mccb/pkgs/container/mccb"><img src="https://img.shields.io/badge/ghcr.io-yetysw%2Fmccb-informational?logo=docker" alt="GHCR image"></a>
-</p>
+<br><br>
 
-<p align="center"><img src="docs/screenshot.png" alt="mccb accounts page" width="800"></p>
+[![Docker image](https://github.com/yetysw/mccb/actions/workflows/docker.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/docker.yml)
+[![Tests](https://github.com/yetysw/mccb/actions/workflows/tests.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Features
+<br><br>
 
-- Migrate PST files to **IMAP** mail, **CalDAV** calendars and **CardDAV** contacts, from a web dashboard.
-- **Resumable uploads**, built for 50 GB+ PSTs.
-- Every message is **verified**; every language and charset is preserved.
-- **Pause, resume and retry** with no duplicates.
-- **Newest-first import** across all folders (calendar by start date, contacts by last modification).
-- **Auto or manual tuning** of builders and IMAP connections per server (auto by default); see [OPERATIONS](docs/OPERATIONS.md#tuning-builders-and-imap-connections).
-- **Version** shown in the UI and at `/api/version`; see [OPERATIONS](docs/OPERATIONS.md#version).
+<img src="docs/assets/screenshot.png" alt="mccb accounts page" width="100%">
+
+</div>
+
+[Website](https://www.yety.ch) · [Documentation](docs/index.md) · [Releases](https://github.com/yetysw/mccb/releases)
+
+## Overview
+
+mccb imports Outlook PST (and OST) files into the mailboxes you host: mail over IMAP, appointments over CalDAV, contacts over CardDAV.
+
+- **Built for batches.** Add a server, add accounts one by one or by CSV, attach a PST to each, run them all and read one report per mailbox.
+- **Built for big files.** Resumable uploads of 50 GB and more, with a preview of accents and attachments before anything is written.
+- **Safe to interrupt.** Pause, stop, crash or restart: a resume checks the server and never duplicates a message.
+
+Free, for good. MIT licence, no paid edition.
 
 ## Quick start
 
@@ -32,62 +37,49 @@ docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
 
-Pin a version by replacing `latest` with `1.1.1` in `docker-compose.yml`. To update: `docker compose pull && docker compose up -d`.
+1. Open `http://<host>:22362` and sign in with the printed password (shown once).
+2. Add a server, then accounts, upload a PST, assign it, run.
+3. Put it behind a reverse proxy with HTTPS: port 22362 speaks plain HTTP.
 
-Open **http://\<host\>:22362** and sign in with the printed password. Change it under **Settings**, or set the `ADMIN_PASSWORD` environment variable.
+Back up `./data`, including `secret.key`: without it the stored mailbox passwords cannot be decrypted. Details: [install](docs/install.md), [backup](docs/backup.md), [upgrading](docs/upgrading.md).
 
-## Usage
+## Features
 
-1. **Add a server**: IMAP host, security, and optional CalDAV/CardDAV URLs.
-2. **Add accounts**, one by one or by CSV (`email;password[;login]`).
-3. **Upload a PST** and check it with **Preview** (accents, attachments, images).
-4. **Assign** the PST to an account.
-5. **Run**, then read the report.
+- Mail to **IMAP**, calendars to **CalDAV**, contacts to **CardDAV**, with automatic DAV discovery.
+- Every message is verified, and every language and charset is preserved.
+- Newest-first import across all folders.
+- Auto or manual tuning of message builders and IMAP connections per server.
+- Live progress, log and JSON report per mailbox.
+- Account import by CSV (`email;password[;login]`).
 
-## Configuration
+## Architecture
 
-All variables are optional (set them in `.env`, see [`.env.example`](.env.example)).
+One image, two services: `web` (FastAPI and a static UI, port 22362) and `worker` (job queue). Every job and every PST analysis runs in its own subprocess, so a crash of the native PST library cannot take the worker down. State is SQLite and files in `./data`. See [specification](docs/specification.md).
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ADMIN_PASSWORD` | generated | UI password; always wins when set |
-| `SECRET_KEY` | generated in `data/secret.key` | Encrypts mailbox passwords, signs sessions |
-| `WORKER_CONCURRENCY` | auto | Mailboxes migrated in parallel (auto: from CPUs and free memory) |
-| `BUILD_PROCESSES` | auto | Forces the message-builder processes per mailbox in both tuning modes (`0` = build in the job process) |
-| `UPLOAD_CHUNK_SIZE` | `33554432` | Upload chunk size in bytes; keep constant during a migration |
-| `COOKIE_SECURE` | `0` | `1` behind an HTTPS reverse proxy |
+## Limits
 
-Everything else, including data layout and resuming internals: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- One administrator and SQLite on a local disk: one host, no high availability.
+- A PST that is corrupted can crash the native library; affected items are skipped and reported.
+- Encrypted or password-protected PSTs have no dedicated handling.
+- Items with no charset information may decode imperfectly in some languages.
+- Results depend on the target IMAP and DAV server.
 
-## Reverse proxy
+More in [known limitations](docs/limits.md).
 
-Port 22362 speaks plain HTTP; do not expose it directly. Disable request buffering, allow chunk-sized bodies and use long timeouts.
+## Status
 
-```nginx
-client_max_body_size 64m;
-proxy_request_buffering off;
-proxy_read_timeout 3600s;
-proxy_send_timeout 3600s;
-```
+Version 1.1.x. Every change is listed in the [changelog](CHANGELOG.md).
 
-Also disable buffering for `/api/events` (SSE). Full nginx, Caddy and Traefik notes are in [docs/OPERATIONS.md](docs/OPERATIONS.md#behind-a-reverse-proxy).
+## Contributing
 
-## Development
-
-```bash
-git clone https://github.com/yetysw/mccb.git && cd mccb
-docker compose up -d --build
-docker compose -f docker-compose.test.yml run --rm --build tests
-```
-
-API reference and specification: [docs/SPEC.md](docs/SPEC.md). Release history: [CHANGELOG.md](CHANGELOG.md).
-
-## Limitations
-
-- Single administrator, SQLite on a local disk: one host, no high availability.
-- Items with no charset information at all may decode imperfectly for some languages (e.g. Baltic); items that declare their codepage are preserved in every script.
-- A corrupted PST can crash libpff; affected items are skipped and reported.
+Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) (Docker only, no host toolchain). Security issues: [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE)
+MIT, see [LICENSE](LICENSE). mccb is provided "as is", without warranty of any kind. Validate a migration on a test mailbox before running it on production data.
+
+## Support mccb
+
+mccb is free. If it saves you time, you can support its development:
+
+[Sponsor us on GitHub](https://github.com/sponsors/yetysw), recurring or one-off.

@@ -1,4 +1,4 @@
-"""ENGINE: PST -> EML / vCard / ICS (pure, no network). Contract: docs/SPEC.md."""
+"""ENGINE: PST -> EML / vCard / ICS (pure, no network). Contract: docs/specification.md."""
 from .pst import BuiltMessage, DavObject, FolderInfo, ItemError, PstError, PstFile, check_pst_signature
 from .verify import verify_message
 

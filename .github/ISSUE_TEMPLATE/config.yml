@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/yetysw/mccb/blob/main/docs/index.md
+    about: Installation, usage, configuration, troubleshooting.
+  - name: Security issue
+    url: https://github.com/yetysw/mccb/security/advisories/new
+    about: Report privately; never in a public issue.

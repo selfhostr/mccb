@@ -1,4 +1,4 @@
-"""API FastAPI (Contrat API de docs/SPEC.md) + SPA statique. Run: python -m app.server.web"""
+"""API FastAPI (Contrat API de docs/specification.md) + SPA statique. Run: python -m app.server.web"""
 from __future__ import annotations
 
 import asyncio

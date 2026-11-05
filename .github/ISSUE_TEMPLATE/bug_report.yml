@@ -1,0 +1,43 @@
+name: Bug report
+description: Something does not work as described.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems go to
+        https://github.com/yetysw/mccb/security/advisories/new instead, not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in the sidebar footer, or `curl http://localhost:22362/api/version`.
+      placeholder: 1.1.1
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target server
+      description: IMAP and DAV server software and version, if known.
+      placeholder: Dovecot 2.3, Radicale 3.3
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `docker compose logs --tail=200 web worker`, or the job log. Redact addresses, hostnames and passwords.
+      render: text
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Host OS and architecture, Docker version, approximate PST size.
