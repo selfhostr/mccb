@@ -23,7 +23,7 @@ function shell() {
   const content = h('main', { id: 'content' });
   const dot = h('span', { class: 'live', id: 'live', title: 'Live updates' });
   const side = h('aside', { class: 'side' },
-    h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('check', 18)), h('div', null, h('b', null, 'PST Migrator'), h('small', null, 'PST → IMAP / DAV'))),
+    h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('logo', 18)), h('div', null, h('b', null, 'PST Migrator'), h('small', null, 'PST → IMAP / DAV'))),
     h('nav', null, nav.map(([k, t, i, href]) => h('a', { href, 'data-nav': k }, icon(i), h('span', null, t)))),
     h('div', { class: 'side-foot' }, dot, h('span', { id: 'livetxt' }, 'Connecting…'),
       h('span', { class: 'sp' }),
@@ -71,7 +71,7 @@ function showLogin(msg) {
     try { await post('/login', { password: pw.value }, { noAuthRedirect: true }); await boot(); }
     catch (x) { err.textContent = x.status === 401 || x.status === 403 ? 'Incorrect password.' : x.message; pw.select(); }
   } },
-    h('div', { class: 'logo big' }, icon('check', 26)), h('h1', null, 'PST Migrator'),
+    h('div', { class: 'logo big' }, icon('logo', 28)), h('h1', null, 'PST Migrator'),
     h('p', { class: 'muted' }, 'Migrate PST mailboxes to IMAP, CalDAV and CardDAV'), pw, err,
     btn('Sign in', { kind: 'primary', type: 'submit' }));
   app.append(h('div', { class: 'login' }, form));

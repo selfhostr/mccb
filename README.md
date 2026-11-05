@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="PST Migrator logo" width="72" height="72"></p>
+
 # PST → IMAP / CalDAV / CardDAV
 
 Web tool (Docker) to mass-migrate Outlook/POP mailboxes (PST files) to an IMAP server

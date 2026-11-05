@@ -1,5 +1,5 @@
-"""CSV import of accounts: `email;password[;login]`, `;` or `,` separator, optional header,
-UTF-8 encoding (with or without BOM) or cp1252."""
+"""CSV import of accounts: `email;password[;login]`, `;`, `,` or tab separator, optional header,
+UTF-8 (with or without BOM), UTF-16 (with or without BOM: Excel "Unicode text") or cp1252."""
 from __future__ import annotations
 
 import csv
@@ -11,20 +11,42 @@ HEADER_WORDS = {"email", "e-mail", "mail", "adresse", "courriel", "login", "iden
                 "mot de passe", "motdepasse", "mdp", "pass"}
 
 
+def _utf16_without_bom(data: bytes) -> str | None:
+    """Excel "Unicode text" without BOM: ASCII-heavy UTF-16, NULs on one side."""
+    if len(data) < 4 or len(data) % 2:
+        return None
+    even, odd = data[0::2], data[1::2]
+    for zeros, enc in ((odd, "utf-16-le"), (even, "utf-16-be")):
+        if zeros.count(0) >= len(zeros) * 0.3:
+            try:
+                return data.decode(enc)
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
 def decode_bytes(data: bytes) -> str:
     if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", "replace")
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        data = data[3:]
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16")
+    elif b"\x00" in data:
+        t = _utf16_without_bom(data)
+        if t is not None:
+            return t
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        return data.decode("cp1252", "replace")
+        # cp1252 (Excel "CSV" on a Western Windows); latin-1 for its 5 undefined bytes
+        return "".join(chr(b) if b in (0x81, 0x8D, 0x8F, 0x90, 0x9D) else bytes([b]).decode("cp1252")
+                       for b in data)
 
 
 def sniff_delimiter(text: str) -> str:
     for line in text.splitlines():
         if line.strip():
+            if line.count("\t") > max(line.count(";"), line.count(",")):
+                return "\t"
             return ";" if line.count(";") >= line.count(",") and ";" in line else ("," if "," in line else ";")
     return ";"
 

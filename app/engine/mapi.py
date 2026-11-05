@@ -11,7 +11,7 @@ import struct
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from .charset import decode_bytes, codec_for_cpid
+from .charset import ansi_for, codec_for_cpid, decode_bytes, guess_codec, is_unicode_codec
 
 # --- MAPI property types -------------------------------------------------
 PT_SHORT = 0x0002
@@ -89,6 +89,7 @@ PR_ATTACHMENT_CONTACTPHOTO = 0x7FFF
 PR_SMTP_ADDRESS = 0x39FE
 PR_INTERNET_CPID = 0x3FDE
 PR_MESSAGE_CODEPAGE = 0x3FFD
+PR_CODE_PAGE_ID = 0x66C3
 PR_SENDER_SMTP_ADDRESS = 0x5D01
 PR_SENT_REPRESENTING_SMTP_ADDRESS = 0x5D02
 PR_RECIPIENT_FLAGS = 0x5FFD
@@ -336,10 +337,59 @@ class PropBag:
         self.props = props
         self.namemap = namemap or NameMap()
         self.default_codepage = default_codepage
-        self.codepage = codepage
-        if self.codepage is None:
+        self._codepage = codepage
+        self._cp_known = codepage is not None
+
+    # PT_STRING8 codepage ------------------------------------------------
+    @property
+    def codepage(self) -> str | None:
+        """Codec of this item's PT_STRING8 values.
+
+        PR_MESSAGE_CODEPAGE when set (and not a Unicode codepage, which makes
+        no sense for 8-bit strings); otherwise the ANSI codepage matching
+        PR_INTERNET_CPID, checked against (and if clearly implausible,
+        replaced by) a detection over all the item's 8-bit strings; None when
+        they are all ASCII (callers then use ``default_codepage``)."""
+        if not self._cp_known:
+            self._cp_known = True
             cp = self.int(PR_MESSAGE_CODEPAGE)
-            self.codepage = codec_for_cpid(cp) if cp else None
+            c = codec_for_cpid(cp) if cp else None
+            if c is None or is_unicode_codec(c):
+                c = self._guess_codepage()
+            self._codepage = c
+        return self._codepage
+
+    @codepage.setter
+    def codepage(self, value: str | None) -> None:
+        self._codepage = value
+        self._cp_known = True
+
+    def _guess_codepage(self) -> str | None:
+        icp = self.int(PR_INTERNET_CPID)
+        inet = codec_for_cpid(icp) if icp else None
+        hints = [c for c in (ansi_for(inet), inet) if c and not is_unicode_codec(c)]
+        samples, total = [], 0
+        for p in self.props.values():
+            if p.vtype not in (PT_STRING8, PT_MV_STRING8):
+                continue
+            try:
+                d = p.data
+            except Exception:  # noqa: BLE001
+                continue
+            if not d:
+                continue
+            d = bytes(d)
+            pieces = [c.split(b"\x00", 1)[0] for c in split_mv(d)] if p.vtype == PT_MV_STRING8 \
+                else [d.split(b"\x00", 1)[0]]
+            for piece in pieces:
+                if piece and not piece.isascii():
+                    samples.append(piece)
+                    total += min(len(piece), 8192)
+            if total > 32768:
+                break
+        if not samples:
+            return hints[0] if hints else None
+        return guess_codec(samples, hints, self.default_codepage)
 
     # construction -----------------------------------------------------
     @classmethod

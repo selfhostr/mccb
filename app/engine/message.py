@@ -1,6 +1,8 @@
 """PST message -> RFC 5322 (UTF-8 clean, QP/base64, RFC 2047/2231)."""
 from __future__ import annotations
 
+import base64
+import binascii
 import email.header
 import email.policy
 import email.utils
@@ -82,7 +84,6 @@ def clean_subject(s: str | None) -> str:
 
 def extract_bodies(bag, warnings: list) -> tuple[str | None, str | None]:
     text = html = None
-    cps = [bag.codepage, mapi.PR_INTERNET_CPID]
     icp = bag.int(mapi.PR_INTERNET_CPID)
     mcp = bag.int(mapi.PR_MESSAGE_CODEPAGE)
     hraw = bag.raw(mapi.PR_HTML)
@@ -90,7 +91,7 @@ def extract_bodies(bag, warnings: list) -> tuple[str | None, str | None]:
         if bag.vtype(mapi.PR_HTML) == PT_UNICODE:
             html = decode_utf16(hraw)
         else:
-            html, _cs = decode_html(bytes(hraw).rstrip(b"\x00"), icp or mcp)
+            html, _cs = decode_html(bytes(hraw).rstrip(b"\x00"), icp or mcp, bag.codepage)
         if not html.strip():
             html = None
     braw = bag.raw(mapi.PR_BODY)
@@ -104,7 +105,6 @@ def extract_bodies(bag, warnings: list) -> tuple[str | None, str | None]:
                                 [bag.codepage, codec_for_cpid(icp), bag.default_codepage])
         if not text.strip():
             text = None
-    del cps
     if text is not None:
         text = text.replace("\x00", "")
     if html is not None:
@@ -114,12 +114,12 @@ def extract_bodies(bag, warnings: list) -> tuple[str | None, str | None]:
         if rtfc:
             try:
                 rtf = decompress(bytes(rtfc))
-                h = rtf_to_html(rtf)
+                h = rtf_to_html(rtf, bag.codepage)
                 if h and h.strip():
                     html = h
                     warnings.append("rtf-converted")
                 elif text is None:
-                    t = rtf_to_text(rtf)
+                    t = rtf_to_text(rtf, bag.codepage)
                     if t.strip():
                         text = t
                         warnings.append("rtf-converted")
@@ -192,33 +192,64 @@ def parse_transport_headers(s: str | None) -> list[list[str]]:
     return out
 
 
-def decode_header_value(v: str) -> str:
-    """RFC 2047 decode with charset repair; never introduces U+FFFD."""
-    if "=?" in v:
+_EW = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?]*)\?=")
+
+
+def _ew_bytes(enc: str, payload: str) -> bytes:
+    if enc in "Bb":
+        p = re.sub(r"[^A-Za-z0-9+/]", "", payload)
+        p = p[:len(p) - len(p) % 4] if len(p) % 4 == 1 else p + "=" * (-len(p) % 4)
         try:
-            parts = email.header.decode_header(v)
-        except Exception:  # noqa: BLE001
-            parts = [(v, None)]
-        out = []
-        prev_encoded = False
-        for chunk, cs in parts:
-            if isinstance(chunk, bytes):
-                if cs:
-                    txt = decode_bytes(chunk, [normalize(cs), "utf-8", "cp1252"])
-                    enc = True
-                else:
-                    txt = decode_bytes(chunk, ["utf-8", "cp1252"])
-                    enc = False
-            else:
-                txt, enc = chunk, cs is not None
-            if out and not (prev_encoded and enc):
-                # decode_header strips the whitespace around encoded words
-                if not out[-1].endswith((" ", "\t")) and not txt.startswith((" ", "\t")):
-                    out.append(" ")
-            out.append(txt)
-            prev_encoded = enc
-        v = "".join(out)
-    v = fix_mojibake(v)
+            return base64.b64decode(p)
+        except (binascii.Error, ValueError):
+            return payload.encode("ascii", "replace")
+    raw = payload.replace("_", " ").encode("latin-1", "replace")
+    return re.sub(rb"=([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
+
+
+def _decode_plain(seg: str) -> str:
+    if "\x1b" in seg and seg.isascii():
+        # raw ISO-2022-JP/KR (7-bit, stateful) sent without encoded words
+        return decode_bytes(seg.encode("ascii"), [])
+    return seg
+
+
+def decode_header_value(v: str) -> str:
+    """RFC 2047 decode with charset repair; never introduces U+FFFD.
+
+    Unencoded text is kept as is (email.header.decode_header would turn
+    non-Latin-1 characters into ``\\uXXXX`` escapes); adjacent encoded words
+    in the same charset are joined before decoding (a multi-byte or stateful
+    sequence may be split across them); whitespace between encoded words is
+    dropped (RFC 2047 §6.2)."""
+    out: list[str] = []
+    pend_cs, pend = None, bytearray()
+
+    def flush():
+        nonlocal pend_cs
+        if pend_cs is not None:
+            out.append(decode_bytes(bytes(pend), [normalize(pend_cs), "utf-8", "cp1252"]))
+            pend.clear()
+            pend_cs = None
+
+    pos = 0
+    prev_ew = False
+    for m in _EW.finditer(v):
+        gap = v[pos:m.start()]
+        if gap and not (prev_ew and not gap.strip()):
+            flush()
+            out.append(_decode_plain(gap))
+        cs = m.group(1).split("*", 1)[0].lower()
+        if pend_cs is not None and cs != pend_cs:
+            flush()
+        pend_cs = cs
+        pend += _ew_bytes(m.group(2), m.group(3))
+        pos = m.end()
+        prev_ew = True
+    flush()
+    if pos < len(v):
+        out.append(_decode_plain(v[pos:]))
+    v = fix_mojibake("".join(out))
     return re.sub(r"[\r\n]+", " ", v).strip()
 
 
@@ -263,12 +294,43 @@ def _fold_unicode(name: str, value: str) -> str:
 
 
 def header_line(name: str, raw: str | None, decoded: str | None = None) -> str:
-    if raw is not None and raw.isascii() and "=?" not in raw:
+    if raw is not None and raw.isascii() and "=?" not in raw and "\x1b" not in raw:
         return _fold_ascii(name, raw)
-    value = decoded if decoded is not None else decode_header_value(raw or "")
+    if decoded is not None:
+        value = decoded
+    elif name.lower() in _ADDR_HEADERS:
+        value = decode_address_header(raw or "")
+    else:
+        value = decode_header_value(raw or "")
     if value.isascii():
         return _fold_ascii(name, value)
     return _fold_unicode(name, value)
+
+
+def decode_address_header(raw: str) -> str:
+    """Decode the display names of an address list one by one.
+
+    Decoding the whole header first would expose a comma (or ``<``, ``"``...)
+    hidden inside an encoded word ("=?koi8-r?Q?...=2C...?=") and split one
+    address into two; re-quoting each decoded name keeps the structure."""
+    if "=?" not in raw and "\x1b" not in raw:
+        return decode_header_value(raw)
+    words: list[str] = []
+
+    def hide(m):
+        words.append(m.group(0))
+        return "xEWx%dx" % (len(words) - 1)
+    # encoded words may (illegally but commonly) carry specials such as ":" or ","
+    masked = _EW.sub(hide, raw)
+    try:
+        pairs = email.utils.getaddresses([masked])
+    except Exception:  # noqa: BLE001
+        pairs = []
+    if not pairs or any(not a or "@" not in a or "xEWx" in a for _n, a in pairs):
+        return decode_header_value(raw)
+    unhide = re.compile(r"xEWx(\d+)x")
+    return ", ".join(format_addr(decode_header_value(unhide.sub(lambda m: words[int(m.group(1))], n)), a)
+                     for n, a in pairs)
 
 
 _SPECIALS = re.compile(r'[()<>\[\]:;@\\,."]')

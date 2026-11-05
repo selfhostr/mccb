@@ -113,11 +113,22 @@ def is_html_rtf(rtf: bytes) -> bool:
     return b"\\fromhtml" in rtf[:1024]
 
 
-def _parse(rtf: bytes, html_mode: bool) -> str:
+_DBCS = {"cp932", "cp936", "gbk", "gb18030", "cp949", "cp950", "big5hkscs", "johab", "shift_jis",
+         "euc_jp", "euc_kr", "gb2312"}
+
+
+def _join_surrogates(s: str) -> str:
+    """\\uN escapes of a non-BMP character come as a UTF-16 surrogate pair."""
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        return s
+    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
+def _parse(rtf: bytes, html_mode: bool, default_codec: str | None = None) -> str:
     out: list[str] = []
     pending = bytearray()          # \'hh bytes awaiting decode
     pending_codec = [None]
-    ansicpg = "cp1252"
+    ansicpg = default_codec or "cp1252"
     fonts: dict[int, str | None] = {}
     deff = None
     st = _State()
@@ -255,6 +266,11 @@ def _parse(rtf: bytes, html_mode: bool) -> str:
             if uc_skip:
                 uc_skip -= 1
                 continue
+            if sym in (b"\\", b"{", b"}") and pending and pending_codec[0] in _DBCS \
+                    and emit_ok(st) and codec_of(st) == pending_codec[0]:
+                # escaped trail byte of a double-byte character (0x5C / 0x7B / 0x7D)
+                pending.append(sym[0])
+                continue
             flush()
             if sym == b"*":
                 expect_dest = True
@@ -291,18 +307,20 @@ def _parse(rtf: bytes, html_mode: bool) -> str:
                 pending.extend(text)
             continue
     flush()
-    return "".join(out)
+    return _join_surrogates("".join(out))
 
 
-def rtf_to_html(rtf: bytes) -> str | None:
-    """Extract HTML encapsulated in RTF (\\fromhtml1); None if not encapsulated."""
+def rtf_to_html(rtf: bytes, default_codec: str | None = None) -> str | None:
+    """Extract HTML encapsulated in RTF (\\fromhtml1); None if not encapsulated.
+
+    ``default_codec`` (the message codepage) is used when the RTF has no \\ansicpg."""
     if not is_html_rtf(rtf):
         return None
-    return _parse(rtf, html_mode=True).replace("\x00", "")
+    return _parse(rtf, html_mode=True, default_codec=default_codec).replace("\x00", "")
 
 
-def rtf_to_text(rtf: bytes) -> str:
-    text = _parse(rtf, html_mode=False).replace("\x00", "")
+def rtf_to_text(rtf: bytes, default_codec: str | None = None) -> str:
+    text = _parse(rtf, html_mode=False, default_codec=default_codec).replace("\x00", "")
     text = text.replace("\r\n", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip("\n") + "\n" if text.strip() else ""

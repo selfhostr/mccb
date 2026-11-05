@@ -9,7 +9,7 @@ from typing import Iterator
 import pypff
 
 from . import mapi
-from .charset import normalize
+from .charset import ansi_for, codec_for_cpid, normalize
 from .contact import build_contact as _build_contact
 from .event import build_event as _build_event, deterministic_uid
 from .message import (BuildError, MessageBuilder, clean_subject, internaldate_of, is_mail_class,
@@ -160,6 +160,18 @@ class PstFile:
         except Exception:  # noqa: BLE001
             store = mapi.PropBag({}, nm)
         self._store = store
+        if default_codepage is None:
+            # a codepage recorded on the store beats pypff's built-in windows-1252
+            for tag in (mapi.PR_MESSAGE_CODEPAGE, mapi.PR_CODE_PAGE_ID, mapi.PR_INTERNET_CPID):
+                try:
+                    c = codec_for_cpid(store.int(tag))
+                except Exception:  # noqa: BLE001
+                    c = None
+                c = ansi_for(c)
+                if c:
+                    self._ctx.default_codepage = c
+                    store.default_codepage = c
+                    break
         self.store_key = bytes(store.raw(mapi.PR_RECORD_KEY) or b"") or os.path.basename(path).encode()
 
     # context manager -------------------------------------------------------
