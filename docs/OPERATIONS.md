@@ -18,12 +18,12 @@ Long-form reference moved out of the README (admin password, all environment var
 
 ## Quick start
 
-A prebuilt image is published at `ghcr.io/yetysw/psttoimap` (linux/amd64). No configuration is
+A prebuilt image is published at `ghcr.io/yetysw/mccb` (linux/amd64). No configuration is
 required: no `.env`, no build.
 
 ```bash
-mkdir psttoimap && cd psttoimap
-curl -fsSLO https://raw.githubusercontent.com/yetysw/psttoimap/main/docker-compose.yml
+mkdir mccb && cd mccb
+curl -fsSLO https://raw.githubusercontent.com/yetysw/mccb/main/docker-compose.yml
 docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
@@ -34,8 +34,8 @@ the UI under **Settings**.
 ### Build from source
 
 ```bash
-git clone https://github.com/yetysw/psttoimap.git
-cd psttoimap
+git clone https://github.com/yetysw/mccb.git
+cd mccb
 docker compose up -d --build
 docker compose logs web      # read the generated admin password
 curl http://localhost:22362/api/health

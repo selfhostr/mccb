@@ -5,9 +5,9 @@
 <p align="center">Bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</p>
 
 <p align="center">
-  <a href="https://github.com/yetysw/psttoimap/actions/workflows/docker.yml"><img src="https://github.com/yetysw/psttoimap/actions/workflows/docker.yml/badge.svg" alt="Docker image"></a>
+  <a href="https://github.com/yetysw/mccb/actions/workflows/docker.yml"><img src="https://github.com/yetysw/mccb/actions/workflows/docker.yml/badge.svg" alt="Docker image"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
-  <a href="https://github.com/yetysw/psttoimap/pkgs/container/psttoimap"><img src="https://img.shields.io/badge/ghcr.io-yetysw%2Fpsttoimap-informational?logo=docker" alt="GHCR image"></a>
+  <a href="https://github.com/yetysw/mccb/pkgs/container/mccb"><img src="https://img.shields.io/badge/ghcr.io-yetysw%2Fmccb-informational?logo=docker" alt="GHCR image"></a>
 </p>
 
 ## Features
@@ -20,8 +20,8 @@
 ## Quick start
 
 ```bash
-mkdir psttoimap && cd psttoimap
-curl -fsSLO https://raw.githubusercontent.com/yetysw/psttoimap/main/docker-compose.yml
+mkdir mccb && cd mccb
+curl -fsSLO https://raw.githubusercontent.com/yetysw/mccb/main/docker-compose.yml
 docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
@@ -66,7 +66,7 @@ Also disable buffering for `/api/events` (SSE). Full nginx, Caddy and Traefik no
 ## Development
 
 ```bash
-git clone https://github.com/yetysw/psttoimap.git && cd psttoimap
+git clone https://github.com/yetysw/mccb.git && cd mccb
 docker compose up -d --build
 docker compose -f docker-compose.test.yml run --rm --build tests
 ```

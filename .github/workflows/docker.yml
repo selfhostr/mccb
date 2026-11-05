@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/yetysw/psttoimap
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build:
@@ -41,14 +41,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
-            org.opencontainers.image.title=psttoimap
+            org.opencontainers.image.title=mccb
             org.opencontainers.image.description=Web tool to migrate Outlook PST/OST mailboxes to IMAP, CalDAV and CardDAV
-            org.opencontainers.image.source=https://github.com/yetysw/psttoimap
-            org.opencontainers.image.url=https://github.com/yetysw/psttoimap
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
           annotations: |
             org.opencontainers.image.description=Web tool to migrate Outlook PST/OST mailboxes to IMAP, CalDAV and CardDAV
-            org.opencontainers.image.source=https://github.com/yetysw/psttoimap
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
       - uses: docker/build-push-action@v6
