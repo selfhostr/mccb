@@ -144,7 +144,7 @@ Clean exceptions, never a process crash on a corrupted item (the error bubbles u
 Bounded memory: never load the whole PST; read attachments in blocks if possible.
 
 ## UI
-Pages: Dashboard (running jobs, global stats) · Servers · Accounts (table: email, test state 🟢/🔴,
+Pages: Dashboard (running jobs, global stats) · Servers · Accounts (table: email, test state ok/failed,
 associated PST + status, mail/calendar/contacts options, progress, actions) · Uploads · Job detail (progress per phase,
 current folder, rate, ETA, live log, errors, report). Multi-select + "Run". PST drag-and-drop.
 Resumable upload after a refresh (key `filename+size+lastModified`), 3 parallel chunks, auto retry.

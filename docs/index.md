@@ -2,8 +2,6 @@
 
 mccb migrates Outlook PST files to IMAP mailboxes, CalDAV calendars and CardDAV address books, from a web dashboard. It is built for batches of mailboxes and very large PST files (resumable uploads).
 
-![mccb accounts page](assets/screenshot.png)
-
 Start here:
 
 - [Install mccb](install.md) with Docker Compose and sign in.
