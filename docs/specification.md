@@ -53,7 +53,7 @@ Each item has a stable `item_key` = pypff node identifier (`msg.identifier`) + f
 real key and the fallback row is deleted). Each mail carries the header `X-PST-Import-Id: <pst_sha-item_key>`
 (value **delimited by `<>`**: no id is a prefix of another). `items` table (account_id, **pst_key**, kind,
 item_key, status pending|inflight|ok|error|skipped, error, …): `pst_key` = `psts.pst_sha` (block fingerprint +
-size), **not the PST id** — deleting then re-uploading the same file recovers the state (automatic migration of
+size), **not the PST id**, deleting then re-uploading the same file recovers the state (automatic migration of
 old `pst_id` rows at startup; `kv` `pst:<pst_sha>:crash_skips`). Folder key: path joined by `/`,
 `/` and `\` in names escaped; unique target IMAP names (deterministic suffix ` (2)`, ` (3)`… on collision
 after sanitizing). Mail lookup: `UID SEARCH HEADER X-PST-Import-Id <sha-key>` (substring) then

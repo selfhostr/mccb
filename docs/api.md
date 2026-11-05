@@ -3,7 +3,7 @@
 JSON over HTTP, `/api` prefix, session cookie. `/docs`, `/redoc` and `/openapi.json` are disabled.
 
 - `POST /api/login {password}` ; `POST /api/logout` ; `GET /api/me`
-- `POST /api/password {current, new}` — change the admin password (`new` ≥ 8 characters). Requires a valid session and a correct
+- `POST /api/password {current, new}`, change the admin password (`new` ≥ 8 characters). Requires a valid session and a correct
   `current`. Returns **409** if the `ADMIN_PASSWORD` env var is set (the env var always wins, so the password cannot be changed
   through the API). On success, the new hash is stored in `data/admin.json`, **all other sessions are invalidated** and a
   fresh session cookie is returned for the caller.
