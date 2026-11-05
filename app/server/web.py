@@ -178,7 +178,7 @@ def _srv_values(s: ServerIn, current=None) -> tuple:
     elif current is not None:
         tuning = current["tuning"] or "auto"
     else:
-        tuning = "manual" if "workers" in given and s.workers != db.DEFAULT_WORKERS else "auto"
+        tuning = "manual" if "workers" in given and s.workers not in db.DEFAULT_WORKERS_LEGACY else "auto"
     builders = s.builders if ("builders" in given or current is None) else current["builders"]
     return (s.name.strip(), s.imap_host.strip(), s.imap_port, s.imap_security, int(s.verify_tls),
             (s.root_folder or "").strip() or None, (s.caldav_url or "").strip() or None,

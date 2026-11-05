@@ -39,8 +39,14 @@ def default_processes() -> int:
 
 
 def machine_default() -> int:
-    """Builder count without BUILD_PROCESSES: min(cpu_count - 1, 8), at least 1."""
-    return max(1, min((os.cpu_count() or 2) - 1, 8))
+    """Builder count without BUILD_PROCESSES (manual mode with `builders` unset): the auto-tuner's static
+    choice on a cheap machine probe (no benchmark) - usable cores (cgroup quota, affinity, cpu_count) - 1,
+    bounded by the available memory (cgroup-aware), at most 8, at least 1."""
+    from . import tuner
+    try:
+        return tuner.choose_builders(tuner.probe_machine())
+    except Exception:  # noqa: BLE001 - probe failure: the former default
+        return max(1, min((os.cpu_count() or 2) - 1, 8))
 
 
 def byte_budget() -> int:
@@ -72,6 +78,13 @@ class BuildEvent:
     task: BuildTask               # or any task with run() (ordering.IndexTask)
     result: dict | None = None    # see build_one()
     crashed: int | None = None    # exit code of the builder that died holding this task (< 0: signal)
+    note: str | None = None       # set when the pool itself killed the builder (e.g. broken pipe): why
+
+
+def is_oom_kill(ev: BuildEvent) -> bool:
+    """The builder holding this task was SIGKILLed by someone else than the pool: on Linux that is the
+    kernel OOM killer (cgroup memory limit) in practice - not a libpff crash of the item."""
+    return ev.crashed == -signal.SIGKILL and ev.note is None
 
 
 # ------------------------------------------------------------------ builder process side
@@ -95,6 +108,7 @@ def build_one(eng, pst, folders, task: BuildTask) -> dict:
     # same test hooks as JobRunner._mark(key) used to fire before the libpff read of an item
     crash.maybe_delay()
     crash.maybe_crash(task.key, "*")
+    crash.maybe_oom(task.key)
     try:
         built = pst.build_message(handle, task.import_id)
     except Exception as e:  # noqa: BLE001
@@ -166,9 +180,10 @@ class BuilderError(Exception):
 
 
 class _Slot:
-    __slots__ = ("proc", "conn", "task", "ready", "retire")
+    __slots__ = ("proc", "conn", "task", "ready", "retire", "kill_note")
 
     def __init__(self):
+        self.kill_note: str | None = None  # the pool killed this builder itself (reported with the crash)
         self.proc = None
         self.conn = None
         self.task: BuildTask | None = None
@@ -205,7 +220,7 @@ class BuilderPool:
                              daemon=True)
         p.start()
         child.close()
-        s.proc, s.conn, s.task, s.ready = p, parent, None, False
+        s.proc, s.conn, s.task, s.ready, s.kill_note = p, parent, None, False, None
 
     def _reap(self, s: _Slot) -> int | None:
         try:
@@ -331,13 +346,27 @@ class BuilderPool:
             self._service(s, events)
         return events
 
+    def _kill(self, s: _Slot, why: str) -> None:
+        """The pipe of a live builder is unusable: kill it, so that the code below reports it as a crash
+        holding its task (instead of a task held forever and wait() returning at once in a loop)."""
+        if s.proc.is_alive():
+            s.kill_note = why
+            s.proc.kill()
+            s.proc.join(5)
+
     def _service(self, s: _Slot, events: list[BuildEvent]) -> None:
         while True:
             try:
                 if not s.conn.poll():
                     break
                 msg = s.conn.recv()
-            except (EOFError, OSError, Exception):  # noqa: BLE001 - truncated message = died mid-send
+            except EOFError:  # the builder closed its end: it is exiting (or already dead)
+                s.proc.join(2.0)
+                self._kill(s, "pipe closed but process still alive")
+                break
+            except Exception as e:  # noqa: BLE001 - truncated/corrupt message, OSError...
+                s.proc.join(0.5)  # died mid-send: its real exit code is kept
+                self._kill(s, f"result unreadable ({type(e).__name__}: {e})")
                 break
             if isinstance(msg, dict) and "fatal" in msg:
                 raise BuilderError(f"builder cannot open the PST: {msg['fatal']}")
@@ -351,7 +380,7 @@ class BuilderPool:
             rc = self._reap(s)
             task, s.task = s.task, None
             if task is not None:
-                events.append(BuildEvent(task, crashed=rc))
+                events.append(BuildEvent(task, crashed=rc, note=s.kill_note))
             elif not s.retire:
                 self.idle_deaths += 1
                 if self.idle_deaths > 3 * len(self.slots) + 3:

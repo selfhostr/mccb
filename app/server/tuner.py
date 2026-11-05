@@ -251,20 +251,36 @@ def manual_settings(settings: dict, env_override: str | int | None = None, defau
 
 
 # --------------------------------------------------------------------------------- error classification
-TRANSIENT_PATTERNS = ("[LIMIT]", "[UNAVAILABLE]", "[INUSE]", "[SERVERBUG]", "TOO MANY CONNECTIONS",
+TRANSIENT_PATTERNS = ("[LIMIT]", "[UNAVAILABLE]", "[INUSE]", "[SERVERBUG]", "[CONTACTADMIN]", "TOO MANY CONNECTIONS",
                       "TOO MANY SIMULTANEOUS", "MAXIMUM NUMBER OF CONNECTIONS", "CONNECTION LIMIT", "BYE",
                       "CONNECTION REFUSED", "CONNECTION RESET", "TRY AGAIN", "TEMPORAR", "THROTTL",
                       "TIMED OUT", "TIMEOUT", "BROKEN PIPE", "EOF")
+
+
+@dataclass(frozen=True)
+class ErrorNote:
+    """An error as recorded for the tuner: its classified ``kind`` (imap.ImapError: temp, perm, fatal...) and
+    message. Keeps the classification that ``str(err)`` would lose (``[Errno 113] No route to host`` or
+    ``NO [CONTACTADMIN]`` are ``temp`` without matching any text pattern)."""
+    kind: str | None
+    message: str
+
+    @classmethod
+    def of(cls, err) -> "ErrorNote":
+        return cls(getattr(err, "kind", None), str(err)[:300])
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def classify_error(exc_or_message) -> bool:
     """True if the error is transient / a server limit (-> back off the connection count)."""
     if exc_or_message is None:
         return False
+    kind = getattr(exc_or_message, "kind", None)
+    if kind == "temp":
+        return True
     if isinstance(exc_or_message, BaseException):
-        kind = getattr(exc_or_message, "kind", None)
-        if kind == "temp":
-            return True
         if isinstance(exc_or_message, (ConnectionError, TimeoutError, EOFError)):
             return True
         text = f"{type(exc_or_message).__name__}: {exc_or_message}"
@@ -276,7 +292,7 @@ def classify_error(exc_or_message) -> bool:
 
 def _reason_of(err) -> str:
     up = str(err).upper()
-    for code in ("[LIMIT]", "[UNAVAILABLE]", "[INUSE]", "[SERVERBUG]"):
+    for code in ("[LIMIT]", "[UNAVAILABLE]", "[INUSE]", "[SERVERBUG]", "[CONTACTADMIN]"):
         if code in up:
             return f"server said {code}"
     if "TOO MANY" in up or "CONNECTION LIMIT" in up or "MAXIMUM NUMBER OF CONNECTIONS" in up:
@@ -287,6 +303,8 @@ def _reason_of(err) -> str:
         return "connection refused"
     if "TIMEOUT" in up or "TIMED OUT" in up:
         return "timeout"
+    if "UNREACHABLE" in up or "NO ROUTE" in up:
+        return "server unreachable"
     return "temporary error"
 
 
@@ -311,10 +329,38 @@ class Sample:
     bytes_appended: int                   # bytes APPENDed during the window
     duration_s: float                     # window length
     queue_state: str = BALANCED           # backlog | starved | balanced (see module doc / queue_state())
-    append_latency_s: float | None = None  # mean APPEND latency over the window
+    append_latency_s: float | None = None  # mean APPEND latency over the window (message size unknown)
     builder_util: float | None = None     # mean builder busy fraction 0..1
     cpu_headroom: float | None = None     # idle cores on the machine (cgroup-aware)
-    errors: list = field(default_factory=list)  # exceptions or messages seen during the window
+    errors: list = field(default_factory=list)  # exceptions, ErrorNotes or messages seen during the window
+    # APPEND latencies by message size bucket (size_bucket()): {bucket: (sum of seconds, count)}. Preferred to
+    # append_latency_s: a window holding one large attachment is not compared with the baseline of small mails
+    append_buckets: dict | None = None
+
+    def latency_buckets(self) -> dict:
+        out = dict(self.append_buckets or {})
+        if self.append_latency_s is not None and self.append_latency_s > 0 and UNSIZED not in out:
+            out[UNSIZED] = (float(self.append_latency_s), 1)
+        return out
+
+
+UNSIZED = -1  # bucket of latencies given without message size (Sample.append_latency_s)
+
+
+def size_bucket(size: int | None) -> int:
+    """Message size bucket for latency comparison: 0 = < 16 KiB, then one bucket per factor 4 (16-64 KiB: 1,
+    64-256 KiB: 2, 256 KiB-1 MiB: 3, ...), at most 9."""
+    if size is None or size < 16384:
+        return 0
+    return min(9, ((int(size) // 16384).bit_length() + 1) // 2)
+
+
+def merge_buckets(a: dict | None, b: dict | None) -> dict:
+    out = dict(a or {})
+    for k, (t, n) in (b or {}).items():
+        t0, n0 = out.get(k, (0.0, 0))
+        out[k] = (t0 + t, n0 + n)
+    return out
 
 
 @dataclass(frozen=True)
@@ -338,11 +384,17 @@ class AutoTuner:
     Rules, evaluated once per window of at least ``min_window_s`` (shorter samples are merged):
 
     1. Transient/limit error in the window (:func:`classify_error`: temp error, refused connection, BYE,
-       [LIMIT], [UNAVAILABLE], too many connections...) or APPEND latency > ``latency_factor`` x best
-       observed baseline -> connections halved immediately (min 1). The ceiling becomes the highest count
-       that ran error-free and is below the failing count (never exceeded again).
+       [LIMIT], [UNAVAILABLE], too many connections...) -> connections halved immediately (min 1).
+       Latency: APPEND latencies are compared per message size bucket (:func:`size_bucket`) with a smoothed
+       (EWMA) baseline of that bucket; a back-off needs the latency excess (> ``latency_factor`` x baseline)
+       for ``latency_windows`` consecutive windows AND the bytes throughput down by >= ``latency_drop``
+       from its smoothed reference (one window holding a large attachment never backs off).
+       The ceiling becomes the highest count that ran error-free and is below the failing count (never
+       exceeded again).
     2. Repeated trouble (>= ``fallback_after`` back-offs within ``fallback_windows`` windows, or an error
-       while already at 1 connection) -> fallback to 2 builders, 2 connections, latched for the job.
+       while already at 1 connection) -> fallback mode, latched for the job: min(``fallback_builders``,
+       current) builders, min(``fallback_connections``, ceiling, current) connections (never an increase).
+       In fallback mode nothing grows any more, but errors / latency still back the connections off.
     3. After a change: ``cooldown_windows`` windows ignored (settling), then the throughput at the new
        level is compared with the previous level; an increase that brought < ``min_gain`` is reverted
        and that level becomes a plateau (no further growth).
@@ -359,6 +411,7 @@ class AutoTuner:
                  min_gain: float = 0.05, latency_factor: float = 1.5, min_window_s: float = 5.0,
                  streak: int = 2, cooldown_windows: int = 1, fallback_after: int = 3, fallback_windows: int = 10,
                  builder_busy: float = 0.85, fallback_builders: int = 2, fallback_connections: int = 2,
+                 latency_windows: int = 2, latency_drop: float = 0.15, latency_alpha: float = 0.2,
                  log: Callable[[str], None] | None = None):
         self.cap = max(1, cap)
         self.max_builders = max(1, max_builders)
@@ -369,12 +422,16 @@ class AutoTuner:
         self.fallback_after, self.fallback_windows = fallback_after, fallback_windows
         self.builder_busy = builder_busy
         self.fallback_builders, self.fallback_connections = fallback_builders, fallback_connections
+        self.latency_windows, self.latency_drop, self.latency_alpha = max(1, latency_windows), latency_drop, \
+            latency_alpha
         self._log = log
         self.ceiling = self.cap
         self.plateau: int | None = None
         self.fallback = False
         self.window = 0                       # evaluated windows
-        self.baseline_latency: float | None = None
+        self.baseline: dict[int, float] = {}  # size bucket -> smoothed APPEND latency (s)
+        self._ref_rate: float | None = None   # smoothed bytes/s of windows without latency excess
+        self._lat_streak = 0
         self._good: set[int] = set()          # connection counts that ran a window without error
         self._backoffs: list[int] = []        # window indices of back-offs
         self._since_change = 0
@@ -396,21 +453,18 @@ class AutoTuner:
         if s is None:
             return self._same()
         self.window += 1
-        if self.fallback:
-            return self._same()
         rate = s.bytes_appended / s.duration_s if s.duration_s > 0 else 0.0
         errs = [e for e in s.errors if classify_error(e)]
         if errs:
+            self._lat_streak = 0
             return self._back_off(_reason_of(errs[0]))
-        lat = s.append_latency_s
-        if lat is not None and lat > 0 and self.baseline_latency is not None \
-                and lat > self.latency_factor * self.baseline_latency:
-            return self._back_off(f"APPEND latency {lat:.1f}s > {self.latency_factor:g}× baseline "
-                                  f"{self.baseline_latency:.1f}s")
+        why = self._latency_check(s, rate)
+        if why is not None:
+            return self._back_off(why)
+        if self.fallback:  # latched: back-offs only, never any growth
+            return self._same()
         # error-free window
         self._good.add(self.connections)
-        if lat is not None and lat > 0:
-            self.baseline_latency = lat if self.baseline_latency is None else min(self.baseline_latency, lat)
         self._since_change += 1
         if self._since_change <= self.cooldown_windows:
             return self._same()
@@ -456,6 +510,42 @@ class AutoTuner:
         self._build_streak = 0
         return self._same()
 
+    @property
+    def baseline_latency(self) -> float | None:
+        """Smoothed latency of the smallest size bucket observed (display / compatibility)."""
+        return self.baseline[min(self.baseline)] if self.baseline else None
+
+    def _latency_check(self, s: Sample, rate: float) -> str | None:
+        """Updates the latency baselines / throughput reference; returns a back-off reason when the latency
+        excess has lasted ``latency_windows`` windows together with a throughput drop, else None."""
+        buckets = {k: (t / n) for k, (t, n) in s.latency_buckets().items() if n > 0 and t > 0}
+        weights = {k: n for k, (t, n) in s.latency_buckets().items() if n > 0 and t > 0}
+        known = [k for k in buckets if k in self.baseline and self.baseline[k] > 0]
+        ratio = None
+        if known:
+            w = sum(weights[k] for k in known)
+            ratio = sum(weights[k] * buckets[k] / self.baseline[k] for k in known) / w
+        excess = ratio is not None and ratio > self.latency_factor
+        dropped = self._ref_rate is not None and self._ref_rate > 0 and rate < (1 - self.latency_drop) * self._ref_rate
+        a = self.latency_alpha
+        # baselines: new buckets start at their first value; a window in excess barely moves them (a lasting
+        # shift is still absorbed slowly, a transient one is not)
+        for k, v in buckets.items():
+            b = self.baseline.get(k)
+            self.baseline[k] = v if b is None else b + (a if not excess else a / 4) * (v - b)
+        if not excess:
+            self._ref_rate = rate if self._ref_rate is None else self._ref_rate + a * (rate - self._ref_rate)
+        if excess and dropped:
+            self._lat_streak += 1
+        else:
+            self._lat_streak = 0
+        if self._lat_streak < self.latency_windows:
+            return None
+        drop = rate / self._ref_rate - 1
+        self._lat_streak = 0
+        return (f"APPEND latency {ratio:.1f}× baseline for {self.latency_windows} windows, "
+                f"throughput {drop * 100:+.0f}%")
+
     # ------------------------------------------------------------------------------ internals
     def _merge(self, s: Sample) -> Sample | None:
         p = self._pending
@@ -466,7 +556,8 @@ class AutoTuner:
                        max(lats) if lats else None,
                        s.builder_util if s.builder_util is not None else p.builder_util,
                        s.cpu_headroom if s.cpu_headroom is not None else p.cpu_headroom,
-                       list(p.errors) + list(s.errors))
+                       list(p.errors) + list(s.errors),
+                       merge_buckets(p.append_buckets, s.append_buckets) or None)
         if s.duration_s < self.min_window_s and not any(classify_error(e) for e in s.errors):
             self._pending = s
             return None
@@ -492,6 +583,13 @@ class AutoTuner:
 
     def _back_off(self, reason: str) -> Decision:
         old = self.connections
+        if self.fallback:  # already latched: keep backing off (min 1), the ceiling follows
+            if old <= 1:
+                return self._same()
+            new = max(1, old // 2)
+            self.ceiling = min(self.ceiling, new)
+            return self._change(self.builders, new, reason, f"Auto-tune: IMAP connections {old}→{new} ({reason})",
+                                fallback=True)
         recent = [w for w in self._backoffs if self.window - w < self.fallback_windows]
         recent.append(self.window)
         self._backoffs = recent
@@ -508,9 +606,12 @@ class AutoTuner:
         return self._change(self.builders, new, reason, f"Auto-tune: IMAP connections {old}→{new} ({reason})")
 
     def _enter_fallback(self) -> Decision:
-        b = max(1, min(self.fallback_builders, self.max_builders))
-        c = max(1, min(self.fallback_connections, self.cap))
+        """Never an increase: an error at 1 connection stays at 1 connection."""
+        b = max(1, min(self.fallback_builders, self.max_builders, self.builders))
+        c = max(1, min(self.fallback_connections, self.cap, self.ceiling, self.connections))
         self.fallback = True
         self.ceiling = c
+        self._prev_level = self._prev_rate = None
+        self._last_gain = None
         return self._change(b, c, "repeated errors",
-                            f"Auto-tune: repeated errors, falling back to {b} builders, {c} IMAP connections", fallback=True)
+                            f"Auto-tune: repeated errors, falling back to {b} builder(s), {c} IMAP connection(s)", fallback=True)

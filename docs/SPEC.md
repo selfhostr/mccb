@@ -151,7 +151,7 @@ Bounded memory: never load the whole PST; read attachments in blocks if possible
   Server = `{id,name,imap_host,imap_port,imap_security:'ssl'|'starttls'|'none',verify_tls,`
   `root_folder:str|null,caldav_url:str|null,carddav_url:str|null,dav_enabled:bool,workers:int,notes,`
   `tuning:'auto'|'manual',builders:int|null}` (manual: `workers` IMAP connections, `builders` builder processes, null =
-  machine default; `tuning` omitted on creation = `manual` if `workers` ≠ 4 else `auto`, omitted on update = unchanged)
+  machine default; `tuning` omitted on creation = `manual` if `workers` is not 2 or 4 (earlier defaults) else `auto`, omitted on update = unchanged)
   (`caldav_url`/`carddav_url`: empty = `.well-known` auto-discovery, otherwise a template with `{email}`, `{user}`, `{domain}`)
 - Accounts: `GET /api/accounts?server_id=`, `POST /api/accounts {server_id,email,password,login?}`,
   `PUT/DELETE /api/accounts/{id}`, `POST /api/accounts/{id}/test` → `{imap:{ok,msg,quota},caldav:{ok,msg},carddav:{ok,msg}}`,

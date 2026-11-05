@@ -181,7 +181,8 @@ class AppendPool:
         self.threads: list[threading.Thread] = []
         self._lat_sum = 0.0
         self._lat_n = 0
-        self._errors: list[str] = []         # transient errors seen (tuner input), retried or not
+        self._lat_buckets: dict = {}         # size bucket -> (sum of seconds, count): tuner input
+        self._errors: list = []              # transient errors seen (tuner.ErrorNote), retried or not
         self.resize(max(1, n))
 
     @property
@@ -215,19 +216,27 @@ class AppendPool:
         with self.cond:
             return self._busy
 
-    def take_stats(self) -> tuple[float | None, list[str]]:
-        """(mean APPEND latency, transient errors) since the previous call."""
+    def take_stats(self) -> tuple[float | None, list]:
+        """(mean APPEND latency, transient errors as tuner.ErrorNote) since the previous call."""
+        lat, errs, _b = self.take_stats_full()
+        return lat, errs
+
+    def take_stats_full(self) -> tuple[float | None, list, dict]:
+        """(mean APPEND latency, transient errors, latencies by size bucket) since the previous call."""
         with self.cond:
             lat = self._lat_sum / self._lat_n if self._lat_n else None
             errs, self._errors = self._errors, []
+            buckets, self._lat_buckets = self._lat_buckets, {}
             self._lat_sum, self._lat_n = 0.0, 0
-        return lat, errs
+        return lat, errs, buckets
 
     def _note_error(self, err) -> None:
-        from .tuner import classify_error
+        """Keeps the classified kind (ImapError.kind) with the message: `[Errno 113]` or `NO [CONTACTADMIN]`
+        are `temp` for wrap_exc without matching any text pattern of the tuner."""
+        from .tuner import ErrorNote, classify_error
         if classify_error(err):
             with self.cond:
-                self._errors.append(str(err)[:300])
+                self._errors.append(ErrorNote.of(err))
 
     def _stopping(self) -> bool:
         if self.abort.is_set():
@@ -275,9 +284,13 @@ class AppendPool:
                         except Exception as e:  # pragma: no cover - safety
                             r = AppendResult(t.item_id, False, "temp", f"{type(e).__name__}: {e}")
                         if r.ok:
+                            dt = time.monotonic() - t0
+                            b = tuner.size_bucket(t.size if t.size else len(t.raw or b""))
                             with self.cond:
-                                self._lat_sum += time.monotonic() - t0
+                                self._lat_sum += dt
                                 self._lat_n += 1
+                                st, sn = self._lat_buckets.get(b, (0.0, 0))
+                                self._lat_buckets[b] = (st + dt, sn + 1)
                     self.results.put(r)  # reported BEFORE this thread may retire
                 finally:
                     with self.cond:
@@ -383,7 +396,8 @@ def initial_tuning(srv: dict, running_jobs: int = 1, probe: "tuner.MachineProbe 
     BUILD_PROCESSES, when set, forces the builder count in both modes (`forced`)."""
     forced = tuner.parse_env_builders(os.environ.get("BUILD_PROCESSES"))
     if not tuner.is_auto(srv):
-        m = tuner.manual_settings(srv, forced, default_builders=builders.machine_default())
+        need_default = forced is None and srv.get("builders") is None  # probe only when actually needed
+        m = tuner.manual_settings(srv, forced, default_builders=builders.machine_default() if need_default else 1)
         m.update(max_builders=m["builders"], forced=forced is not None)
         return m
     if probe is None:
@@ -831,13 +845,13 @@ class JobRunner:
         dur = now - self._tune_t0
         if dur < self.tune_interval and not (pool._errors and dur >= min(0.5, self.tune_interval)):
             return
-        lat, errs = pool.take_stats()
+        lat, errs, lat_buckets = pool.take_stats_full()
         util = bpool.take_utilisation() if bpool is not None else None
         state = tuner.queue_state(pool.pending, pool.n, sum(self._inflight_bytes.values()), self.byte_budget,
                                   idle_appenders=max(0, pool.alive() - pool.busy()))
         sample = tuner.Sample(bytes_appended=self._bytes_done - self._tune_b0, duration_s=dur, queue_state=state,
-                              append_latency_s=lat, builder_util=util, cpu_headroom=self._cpu_headroom(),
-                              errors=errs)
+                              append_buckets=lat_buckets or None, builder_util=util,
+                              cpu_headroom=self._cpu_headroom(), errors=errs)
         self._tune_t0, self._tune_b0 = now, self._bytes_done
         self._apply_decision(self.tuner.feed(sample), pool)
 
@@ -1280,10 +1294,14 @@ class JobRunner:
         seq_next = seq_rec = 0
         ready: dict[int, builders.BuildEvent] = {}
         ready_bytes = 0
+        retry: list[builders.BuildTask] = []  # OOM-killed builds, rebuilt once with fewer builders
+        oom_retried: set[int] = set()
         while True:
             self.check()
             self._handle_results(pool.drain())
             self._tune_tick(pool)
+            while retry and bpool.can_dispatch():
+                bpool.dispatch(retry.pop(0))
             # reorder buffer bounded to 2 x the CURRENT builder count (resized by the auto-tuner)
             while entries and bpool.can_dispatch() and len(ready) < 2 * bpool.size and \
                     sum(self._inflight_bytes.values()) + ready_bytes < self.byte_budget:
@@ -1294,6 +1312,11 @@ class JobRunner:
                                                   meta=(seq_next, folder_key(f.path), targets[fi], fb)))
                 seq_next += 1
             for ev in bpool.wait(0.2):
+                if builders.is_oom_kill(ev) and ev.task.meta[0] not in oom_retried:
+                    oom_retried.add(ev.task.meta[0])
+                    self._on_oom_kill(ev.task, bpool)
+                    retry.append(ev.task)
+                    continue
                 ready[ev.task.meta[0]] = ev
                 ready_bytes += len((ev.result or {}).get("raw") or b"")
             while seq_rec in ready:
@@ -1301,13 +1324,37 @@ class JobRunner:
                 seq_rec += 1
                 ready_bytes -= len((ev.result or {}).get("raw") or b"")
                 self._on_built(ev, pool)
-            if not entries and not bpool.busy() and not ready:
+            if not entries and not bpool.busy() and not ready and not retry:
                 return
+
+    def _on_oom_kill(self, t: builders.BuildTask, bpool: builders.BuilderPool) -> None:
+        """A builder was SIGKILLed while building `t` (the kernel OOM killer, in practice): not a libpff crash.
+        One builder fewer (for the rest of the job; the auto-tuner never grows back above it), the item is
+        rebuilt once."""
+        old = bpool.size
+        new = max(1, old - 1)
+        if new < old:
+            bpool.resize(new)
+            self.build_procs = new
+            if self.tuner is not None:
+                self.tuner.builders = min(self.tuner.builders, new)
+                self.tuner.max_builders = max(1, min(self.tuner.max_builders, new))
+            self._save_tuning()
+        self.log(f"Builder process killed by SIGKILL while building item {t.key} (folder '{t.meta[1]}', "
+                 f"no. {t.index}) — probably out of memory: retrying it once with {new} builder(s)"
+                 + ("" if new < old else " (already the minimum)"), "warning")
 
     def _on_built(self, ev: builders.BuildEvent, pool: AppendPool) -> None:
         t = ev.task
         _seq, fkey, target, fb = t.meta
         self.current_folder = fkey
+        if builders.is_oom_kill(ev):  # killed again on its retry: an error for this item, not a libpff crash
+            marker = {"a": self.account_id, "p": self.pst_id, "s": self.pst_key, "kind": "mail", "folder": fkey,
+                      "idx": t.index, "key": t.key}
+            desc = crash.record_builder_oom(self.job_id, marker)
+            self.log(f"Builder process killed by SIGKILL again (probably out of memory): {desc} — marked as error "
+                     f"'{crash.OOM_MSG}', continuing", "error")
+            return
         if ev.crashed is not None:
             marker = {"a": self.account_id, "p": self.pst_id, "s": self.pst_key, "kind": "mail", "folder": fkey,
                       "idx": t.index, "key": t.key}

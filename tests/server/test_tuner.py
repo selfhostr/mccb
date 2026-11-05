@@ -242,12 +242,73 @@ def test_error_in_short_window_acts_immediately():
 
 
 def test_latency_backoff():
+    """Sustained latency excess (2 consecutive windows) together with a throughput drop -> back-off."""
     t = AutoTuner(builders=2, max_builders=2, connections=8)
-    assert not t.feed(Sample(MB, 10.0, tuner.BALANCED, append_latency_s=1.0)).changed
-    assert not t.feed(Sample(MB, 10.0, tuner.BALANCED, append_latency_s=1.4)).changed
-    d = t.feed(Sample(MB, 10.0, tuner.BALANCED, append_latency_s=1.6))
+    for _ in range(3):
+        assert not t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.0)).changed
+    assert not t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.4)).changed  # < 1.5x
+    assert not t.feed(Sample(5 * MB, 10.0, tuner.BALANCED, append_latency_s=2.0)).changed  # 1st window
+    d = t.feed(Sample(5 * MB, 10.0, tuner.BALANCED, append_latency_s=2.0))
     assert d.connections == 4
-    assert d.log == "Auto-tune: IMAP connections 8→4 (APPEND latency 1.6s > 1.5× baseline 1.0s)"
+    assert d.log.startswith("Auto-tune: IMAP connections 8→4 (APPEND latency ") and "for 2 windows" in d.log
+    assert "throughput -" in d.log
+
+
+def test_latency_single_large_attachment_window_does_not_back_off():
+    """Regression: one window holding a large attachment (raw mean latency x20) latched the job to 2
+    connections. Latencies are compared per size bucket, the excess must persist and throughput drop."""
+    t = AutoTuner(builders=2, max_builders=2, connections=8)
+    small = {tuner.size_bucket(20_000): (0.2 * 50, 50)}
+    for _ in range(5):
+        t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_buckets=small))
+    big = {tuner.size_bucket(20_000): (0.2 * 10, 10), tuner.size_bucket(40 * MB): (25.0, 1)}
+    for _ in range(3):  # big attachment windows: new bucket, no baseline, bytes throughput up
+        d = t.feed(Sample(48 * MB, 10.0, tuner.BALANCED, append_buckets=big))
+        assert not d.changed, d.log
+    # a raw mean of the same windows (old behaviour input) still does not latch: excess without throughput drop
+    t2 = AutoTuner(builders=2, max_builders=2, connections=8)
+    for _ in range(5):
+        t2.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=0.2))
+    for _ in range(3):
+        assert not t2.feed(Sample(48 * MB, 10.0, tuner.BALANCED, append_latency_s=2.4)).changed
+    assert t.connections == t2.connections == 8 and not t.fallback
+
+
+def test_latency_excess_in_one_window_only_is_ignored():
+    t = AutoTuner(builders=2, max_builders=2, connections=8)
+    for _ in range(4):
+        t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.0))
+    for _ in range(4):  # alternating: never 2 consecutive windows in excess
+        assert not t.feed(Sample(4 * MB, 10.0, tuner.BALANCED, append_latency_s=3.0)).changed
+        assert not t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.0)).changed
+
+
+def test_latency_baseline_is_smoothed_not_all_time_min():
+    t = AutoTuner(builders=2, max_builders=2, connections=8)
+    t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=0.1))  # one lucky window
+    for _ in range(40):
+        t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.0))
+    assert 0.9 < t.baseline_latency <= 1.0  # an all-time minimum would stay at 0.1
+    assert t.connections == 8
+
+
+def test_size_bucket():
+    assert tuner.size_bucket(None) == tuner.size_bucket(100) == tuner.size_bucket(16383) == 0
+    assert tuner.size_bucket(16384) == 1 and tuner.size_bucket(65535) == 1 and tuner.size_bucket(65536) == 2
+    assert tuner.size_bucket(1 << 20) == 4 and tuner.size_bucket(1 << 40) == 9
+
+
+def test_error_kind_is_honoured_without_text_pattern():
+    """Regression: the runner stored str(err), losing ImapError.kind ('[Errno 113] No route to host',
+    'NO [CONTACTADMIN]' never backed off)."""
+    for note in (tuner.ErrorNote("temp", "IMAP connection: [Errno 113] No route to host"),
+                 tuner.ErrorNote("temp", "NO [CONTACTADMIN] contact your administrator")):
+        t = AutoTuner(builders=2, max_builders=2, connections=8)
+        d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=[note]))
+        assert (d.prev_connections, d.connections) == (8, 4), note
+    assert not tuner.classify_error(tuner.ErrorNote("perm", "NO [CANNOT] message too big"))
+    assert tuner.classify_error("NO [CONTACTADMIN]")
+    assert tuner.ErrorNote.of(FakeImapError("x" * 400, "temp")).kind == "temp"
 
 
 def test_ceiling_respected_after_backoff():
@@ -273,18 +334,46 @@ def test_fallback_after_repeated_errors():
     out = [t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [UNAVAILABLE]"])) for _ in range(3)]
     assert [d.connections for d in out] == [8, 4, 2]
     assert out[-1].fallback and out[-1].builders == 2
-    assert lines[-1] == "Auto-tune: repeated errors, falling back to 2 builders, 2 IMAP connections"
+    assert lines[-1] == "Auto-tune: repeated errors, falling back to 2 builder(s), 2 IMAP connection(s)"
     assert t.current() == {"builders": 2, "connections": 2, "mode": "auto", "fallback": True}
-    # latched: no further change whatever happens
+    # latched: no growth whatever happens
     hist, logs = run_sim(t, saturating(100), windows=30)
     assert set(hist) == {2} and logs == []
-    assert not t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"])).changed
+    # ... but server errors still back off (regression: they were ignored once in fallback)
+    d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"]))
+    assert (d.prev_connections, d.connections, d.fallback) == (2, 1, True)
+    assert d.log == "Auto-tune: IMAP connections 2→1 (server said [LIMIT])"
+    assert not t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"])).changed  # already at 1
+    hist, logs = run_sim(t, saturating(100), windows=30)
+    assert set(hist) == {1} and logs == []
 
 
 def test_fallback_on_error_at_minimum():
+    """Regression: an error at 1 connection raised the count to 2 (fallback default)."""
     t = AutoTuner(builders=3, max_builders=7, connections=1)
     d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["* BYE"]))
-    assert d.fallback and (d.builders, d.connections) == (2, 2)
+    assert d.fallback and (d.builders, d.connections) == (2, 1)
+    hist, _ = run_sim(t, saturating(100), windows=20)
+    assert set(hist) == {1}
+
+
+def test_fallback_never_increases():
+    t = AutoTuner(builders=1, max_builders=7, connections=16, fallback_builders=2, fallback_connections=4)
+    t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"]))     # 16 -> 8, ceiling 8
+    t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"]))     # 8 -> 4
+    d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"]))  # 3rd: fallback
+    assert d.fallback and d.builders == 1 and d.connections <= 4 and t.ceiling == d.connections
+
+
+def test_latency_backoff_still_applies_in_fallback():
+    t = AutoTuner(builders=2, max_builders=2, connections=4, fallback_after=1)
+    for _ in range(3):
+        t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, append_latency_s=1.0))
+    t.feed(Sample(10 * MB, 10.0, tuner.BALANCED, errors=["NO [LIMIT]"]))
+    assert t.fallback and t.connections == 2
+    t.feed(Sample(3 * MB, 10.0, tuner.BALANCED, append_latency_s=3.0))
+    d = t.feed(Sample(3 * MB, 10.0, tuner.BALANCED, append_latency_s=3.0))
+    assert (d.prev_connections, d.connections) == (2, 1)
 
 
 def test_spaced_errors_do_not_trigger_fallback():

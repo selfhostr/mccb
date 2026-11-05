@@ -19,6 +19,7 @@ SCHEMA_100 = Path(__file__).resolve().parents[1] / "fixtures" / "schema-1.0.0.sq
 INBOX = (["Boîte de réception"], "mail", "IPF.Note", "inbox", 40)
 SUB = (["Boîte de réception", "Projets"], "mail", "IPF.Note", None, 20)
 T0 = 1_700_000_000
+MB_ = 1024 * 1024
 SRV = {"name": "Prod", "imap_host": "imap.example.test", "imap_port": 993, "imap_security": "ssl",
        "verify_tls": True, "root_folder": None, "caldav_url": None, "carddav_url": None,
        "dav_enabled": False, "workers": 4, "notes": ""}
@@ -63,19 +64,24 @@ def test_schema_100_fixture_is_the_old_layout():
 
 def test_migration_tuning_manual_kept_for_non_default_workers(env):
     from app.server import db
-    _db_100(env.db_path, [4, 2, 8, 4])
+    _db_100(env.db_path, [4, 2, 8, 4, 1, 3])
     db.reset()
     rows = db.q("SELECT name, workers, tuning, builders FROM servers ORDER BY id")
+    # 2 (1.0.0 UI default) and 4 (schema default) -> auto; any other value -> manual, value kept
     assert [(r["workers"], r["tuning"], r["builders"]) for r in rows] == [
-        (4, "auto", None), (2, "manual", None), (8, "manual", None), (4, "auto", None)]
+        (4, "auto", None), (2, "auto", None), (8, "manual", None), (4, "auto", None), (1, "manual", None),
+        (3, "manual", None)]
     cols = {r[1] for r in db.q("PRAGMA table_info(jobs)")}
     assert {"tuning", "rate_bytes"} <= cols
     # idempotent: a second migration changes nothing (a server switched to auto stays auto)
-    db.ex("UPDATE servers SET tuning='auto' WHERE name='s1'")
+    db.ex("UPDATE servers SET tuning='auto' WHERE name='s2'")
+    db.ex("UPDATE servers SET tuning='manual' WHERE name='s1'")
     c = sqlite3.connect(env.db_path, isolation_level=None)
     db._migrate(c)
+    db._migrate(c)
     c.close()
-    assert db.q1("SELECT tuning FROM servers WHERE name='s1'")["tuning"] == "auto"
+    assert db.q1("SELECT tuning FROM servers WHERE name='s2'")["tuning"] == "auto"
+    assert db.q1("SELECT tuning FROM servers WHERE name='s1'")["tuning"] == "manual"
     # new servers (fresh schema): default auto
     db.ex("INSERT INTO servers(name, imap_host, workers, created_at) VALUES ('n', 'h', 2, 1)")
     assert db.q1("SELECT tuning FROM servers WHERE name='n'")["tuning"] == "auto"
@@ -123,7 +129,8 @@ def test_api_tuning_round_trip(client):
     assert [x["tuning"] for x in client.get("/api/servers").json()] == ["auto"]
     # creation without `tuning`: auto, except a non-default `workers` (clients of earlier versions)
     assert client.post("/api/servers", json=SRV).json()["tuning"] == "auto"
-    assert client.post("/api/servers", json=dict(SRV, workers=2)).json()["tuning"] == "manual"
+    assert client.post("/api/servers", json=dict(SRV, workers=2)).json()["tuning"] == "auto"  # 1.0.0 UI default
+    assert client.post("/api/servers", json=dict(SRV, workers=3)).json()["tuning"] == "manual"
     assert client.post("/api/servers", json={k: v for k, v in SRV.items() if k != "workers"}).json()["tuning"] == "auto"
     assert client.post("/api/servers", json=dict(SRV, tuning="turbo")).status_code == 422
     assert client.post("/api/servers", json=dict(SRV, builders=-1)).status_code == 422
@@ -305,8 +312,39 @@ def test_append_pool_records_transient_errors_and_latency(env, fake_imap, monkey
     res = pool.drain(block=True, timeout=5)
     lat, errs = pool.take_stats()
     pool.close()
-    assert res[0].ok and len(errs) == 1 and "[UNAVAILABLE]" in errs[0] and lat is not None
+    assert res[0].ok and len(errs) == 1 and "[UNAVAILABLE]" in str(errs[0]) and lat is not None
+    assert errs[0].kind == "temp"
     assert pool.take_stats() == (None, [])
+
+
+def test_append_pool_keeps_error_kind_for_the_tuner(env, fake_imap, monkeypatch):
+    """`[Errno 113] No route to host` / `NO [CONTACTADMIN]` match no text pattern: only their classified kind
+    (temp) makes the tuner back off - it must survive the trip through the pool."""
+    from app.server import runner, tuner
+    from app.server.imap import ImapError
+    calls = []
+
+    def flaky(self, name, raw, flags, dt):
+        calls.append(raw)
+        if len(calls) == 1:
+            raise OSError(113, "No route to host")
+        if len(calls) == 2:
+            raise ImapError("NO [CONTACTADMIN] please wait", "temp")
+        return "1"
+
+    monkeypatch.setattr(_FakeConn, "append", flaky)
+    pool = runner.AppendPool(_params(), 1, None, lambda: False, base_delay=0.01)
+    pool.submit(runner.AppendTask(1, "INBOX", b"m" * 100, [], None, 100, "<x-1>"))
+    res = pool.drain(block=True, timeout=5)
+    lat, errs, buckets = pool.take_stats_full()
+    pool.close()
+    assert res[0].ok and len(errs) == 2 and all(e.kind == "temp" for e in errs), errs
+    assert buckets and sum(n for _t, n in buckets.values()) == 1
+    t = tuner.AutoTuner(builders=2, max_builders=2, connections=8)
+    for e in errs:
+        t2 = tuner.AutoTuner(builders=2, max_builders=2, connections=8)
+        assert t2.feed(tuner.Sample(MB_, 10.0, tuner.BALANCED, errors=[e])).connections == 4, e
+    assert t.feed(tuner.Sample(MB_, 10.0, tuner.BALANCED, errors=[str(errs[0])])).connections == 8  # text alone
 
 
 # ================================================================== BuilderPool resize (fake engine)
@@ -422,13 +460,17 @@ def test_decisions_resize_pools_mid_run_exactly_once_in_order(client, env, monke
 def test_repeated_errors_fall_back_and_log(client, env, monkeypatch):
     from app.server import runner
     monkeypatch.setenv("AUTOTUNE_INTERVAL", "0.05")
-    real = runner.AppendPool.take_stats
+    real = runner.AppendPool.take_stats_full
+    calls = []
 
     def noisy(self):
-        lat, errs = real(self)
-        return lat, errs + ["NO [UNAVAILABLE] too many connections"]
+        lat, errs, b = real(self)
+        calls.append(1)
+        if len(calls) <= 4:  # first call = window start (discarded), then 3 windows with an error
+            errs = errs + ["NO [UNAVAILABLE] too many connections"]
+        return lat, errs, b
 
-    monkeypatch.setattr(runner.AppendPool, "take_stats", noisy)
+    monkeypatch.setattr(runner.AppendPool, "take_stats_full", noisy)
     fake_engine.CONFIG.update(folders=[INBOX], dates=_dates(INBOX), delay=0.05)
     aid, email = setup_account(client, env, tuning="auto")
     jid = run(client, aid)
@@ -439,8 +481,11 @@ def test_repeated_errors_fall_back_and_log(client, env, monkeypatch):
     assert "Auto-tune: IMAP connections 4→2 (server said [UNAVAILABLE])" in log
     fb = [l for l in lines if "falling back to" in l["msg"]]
     assert fb and fb[0]["level"] == "warning", log
-    assert "repeated errors, falling back to 2 builders, 2 IMAP connections" in fb[0]["msg"]
-    assert j["tuning"] == {"mode": "auto", "builders": 2, "connections": 2, "fallback": True}
+    # 4 -> 2 -> 1, then an error at 1 connection: fallback that never raises the count
+    assert "Auto-tune: IMAP connections 2→1 (server said [UNAVAILABLE])" in log
+    assert "repeated errors, falling back to" in fb[0]["msg"] and fb[0]["msg"].endswith(" 1 IMAP connection(s)")
+    tun = j["tuning"]
+    assert (tun["mode"], tun["connections"], tun["fallback"]) == ("auto", 1, True) and tun["builders"] <= 2
     ids = server_import_ids(email)
     assert len(ids) == INBOX[4] and set(ids.values()) == {1}
 
@@ -467,7 +512,14 @@ def test_manual_mode_honoured(client, env, monkeypatch, forced):
     monkeypatch.setattr(runner.AppendPool, "__init__", a_init)
     monkeypatch.setattr(builders.BuilderPool, "__init__", b_init)
     probe = []
-    monkeypatch.setattr(runner.tuner, "probe_machine", lambda *a, **k: probe.append(1))
+    real_probe = runner.tuner.probe_machine
+
+    def no_bench_probe(*a, **k):  # manual mode: cheap probe allowed (builders default), never the benchmark
+        if k.get("benchmark"):
+            probe.append(1)
+        return real_probe(*a, **{**k, "benchmark": None})
+
+    monkeypatch.setattr(runner.tuner, "probe_machine", no_bench_probe)
     fake_engine.CONFIG.update(folders=[INBOX], dates=_dates(INBOX))
     aid, email = setup_account(client, env, tuning="manual", workers=2, builders=1)
     jid = run(client, aid)

@@ -18,6 +18,8 @@ from .config import settings
 CRASH_MSG = "libpff crash"
 VALIDATE_CRASH_MSG = "libpff crash during analysis"
 TEST_CRASH_ENV = "PSTMIG_TEST_CRASH"
+TEST_OOM_ENV = "PSTMIG_TEST_OOM"  # builder SIGKILLed on these item keys ("key" always, "key@/flag" once)
+OOM_MSG = "builder process killed (SIGKILL, probably out of memory)"
 TEST_DELAY_ENV = "PSTMIG_TEST_ITEM_DELAY"  # seconds of pause before each item (e2e tests: pause/stop/kill)
 PARENT_PID_ENV = "PSTMIG_PARENT_PID"
 IN_CHILD = False  # set by child.main()
@@ -40,6 +42,26 @@ def maybe_crash(*tokens: str) -> None:
     if any(t in wanted for t in tokens if t):
         log.warning("%s : simulated SIGSEGV (%s)", TEST_CRASH_ENV, tokens)
         os.kill(os.getpid(), signal.SIGSEGV)
+        time.sleep(5)  # pragma: no cover
+
+
+def maybe_oom(key: str) -> None:
+    """Test hook: PSTMIG_TEST_OOM = comma-separated "<item_key>" (SIGKILL every time) or
+    "<item_key>@<flag path>" (SIGKILL only while the flag file does not exist; created first), like the
+    kernel OOM killer would. No effect outside the subprocess or if the variable is absent."""
+    if not IN_CHILD:
+        return
+    for spec in (s.strip() for s in os.environ.get(TEST_OOM_ENV, "").split(",")):
+        k, _, flag = spec.partition("@")
+        if not spec or k != key:
+            continue
+        if flag:
+            if os.path.exists(flag):
+                continue
+            with open(flag, "w"):
+                pass
+        log.warning("%s : simulated OOM kill (%s)", TEST_OOM_ENV, key)
+        os.kill(os.getpid(), signal.SIGKILL)
         time.sleep(5)  # pragma: no cover
 
 
@@ -120,8 +142,8 @@ def describe_rc(rc: int | None) -> str:
 
 
 # ------------------------------------------------------------------ parent worker side
-def _blame(marker: dict, job_id: int, why: str) -> str | None:
-    """Mark the item designated by the marker as an error "libpff crash". Returns its description."""
+def _blame(marker: dict, job_id: int, why: str, msg: str = CRASH_MSG) -> str | None:
+    """Mark the item designated by the marker as an error `msg` ("libpff crash"). Returns its description."""
     kind, folder, aid, pid = marker.get("kind"), marker.get("folder") or "", marker.get("a"), marker.get("p")
     if not (kind and aid and pid):
         return None
@@ -135,7 +157,7 @@ def _blame(marker: dict, job_id: int, why: str) -> str | None:
         key = f"{folder}#crash{marker.get('idx')}"
         _add_skip(pkey, kind, folder, int(marker.get("idx") or 0))
         desc = f"reading of item no. {marker.get('idx')} (folder '{folder}')"
-    err = f"{CRASH_MSG} ({why}) — item skipped"
+    err = f"{msg} ({why}) — item skipped" if msg == CRASH_MSG else f"{msg} — item skipped"
     # never an item already `ok` or `inflight` (possibly APPENDed: checked on resume by _resolve_inflight)
     db.ex("INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,error,job_id,updated_at) "
           "VALUES (?,?,?,?,?,?,'error',?,?,?) "
@@ -154,6 +176,12 @@ def record_builder_crash(job_id: int, marker: dict, rc: int | None) -> tuple[int
     n = get_crashes(job_id) + 1
     db.kv_set(f"job:{job_id}:crashes", str(n))
     return n, desc, why
+
+
+def record_builder_oom(job_id: int, marker: dict) -> str | None:
+    """A builder was SIGKILLed (OOM killer) twice building the item of `marker`: the item becomes an error
+    OOM_MSG - not a "libpff crash", and the job's crash counter is left alone. Returns its description."""
+    return _blame(marker, job_id, "SIGKILL", OOM_MSG)
 
 
 def handle_job_crash(job_id: int, rc: int | None) -> str:

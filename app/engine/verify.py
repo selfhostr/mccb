@@ -38,12 +38,25 @@ def _decode_body(h, body: bytes) -> bytes:
     """= EmailMessage.get_payload(decode=True) for a non-multipart part (our own, well-formed output)."""
     cte = str(h.get("content-transfer-encoding", "")).lower()
     if cte == "base64":
-        return binascii.a2b_base64(body)
+        try:
+            return binascii.a2b_base64(body)
+        except binascii.Error as ex:
+            raise _Unrecognised("bad base64: %s" % ex) from ex
     if cte == "quoted-printable":
         return binascii.a2b_qp(body)
     if cte in ("x-uuencode", "uuencode", "uue", "x-uue"):
         raise _Unrecognised("uuencode")
     return body
+
+
+def _strict_boundary_end(text: bytes, after: int) -> bool:
+    """True if the bytes after "--B" end a real boundary line: optional "--", blanks, then CRLF or end."""
+    if text.startswith(b"--", after):
+        after += 2
+    n = len(text)
+    while after < n and text[after] in b" \t":
+        after += 1
+    return after >= n or text.startswith(b"\r\n", after)
 
 
 def _parse_headers(block: bytes):
@@ -77,6 +90,8 @@ def _fast_parts(data: bytes, depth: int = 0):
     while True:
         after = pos + len(delim)
         if text.startswith(b"--", after):
+            if not _strict_boundary_end(text, after):
+                raise _Unrecognised("malformed close boundary line")
             return  # close delimiter: the epilogue is ignored
         eol = text.find(b"\r\n", after)
         if eol < 0 or text[after:eol].strip(b" \t"):
@@ -90,6 +105,8 @@ def _fast_parts(data: bytes, depth: int = 0):
             tail = text[nxt + len(delim):nxt + len(delim) + 2]
             # a boundary line is "--b" followed by "--", blanks or CRLF (feedparser's boundary regex)
             if tail[:2] == b"--" or tail[:1] in (b"\r", b" ", b"\t"):
+                if not _strict_boundary_end(text, nxt + len(delim)):
+                    raise _Unrecognised("malformed boundary line")
                 break
             nxt += 1
         yield from _fast_parts(text[start:nxt], depth + 1)

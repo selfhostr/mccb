@@ -81,12 +81,14 @@ def test_builder_pool_mismatched_key_is_an_item_error(env, tmp_path):
 
 def test_default_processes(monkeypatch):
     from app.server import builders
+    from app.server import tuner
     monkeypatch.delenv("BUILD_PROCESSES", raising=False)
-    monkeypatch.setattr(builders.os, "cpu_count", lambda: 12)
+    cpus = {"n": 12}
+    monkeypatch.setattr(tuner, "probe_machine", lambda *a, **k: tuner.MachineProbe(cpus["n"], 64 << 30))
     assert builders.default_processes() == 8
-    monkeypatch.setattr(builders.os, "cpu_count", lambda: 4)
+    cpus["n"] = 4
     assert builders.default_processes() == 3
-    monkeypatch.setattr(builders.os, "cpu_count", lambda: 1)
+    cpus["n"] = 1
     assert builders.default_processes() == 1
     monkeypatch.setenv("BUILD_PROCESSES", "0")
     assert builders.default_processes() == 0
@@ -164,3 +166,107 @@ def test_inprocess_mode_and_cid_warnings_aggregated(client, env, monkeypatch):
     warned = {w["item_key"]: w["warnings"] for w in rep["item_warnings"]}
     assert warned[k[0]] == ["cid-unresolved:image001.png@01D9"] and len(warned) == 4
     assert len(server_import_ids(email)) == 24
+
+
+# ------------------------------------------------------------------ v1.1.0 regressions
+class _BrokenConn:
+    """Pipe end whose recv() fails with something else than EOF (corrupt / truncated pickle, OSError)."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def fileno(self):
+        return self._c.fileno()
+
+    def poll(self, *a):
+        return True
+
+    def recv(self):
+        raise OSError("simulated recv failure")
+
+    def send(self, obj):
+        return self._c.send(obj)
+
+    def close(self):
+        return self._c.close()
+
+
+def test_builder_pool_recv_error_kills_builder_and_reports_crash(env, tmp_path):
+    """Regression: a non-EOF recv() error broke the service loop, leaving the builder alive with its task
+    held forever (wait() returned at once, _mail_parallel spun)."""
+    from app.server import builders
+    from app.server.builders import BuilderPool
+    path = str(tmp_path / "f.pst")
+    fake_engine.make_fake_pst(path, 1000)
+    fake_engine.CONFIG.update(folders=[INBOX])
+    tasks = _pool_tasks(path)
+    pool = BuilderPool(path, 1, in_child=False, engine_module="tests.server.fake_engine")
+    try:
+        pool.dispatch(tasks[0])
+        slot = pool.slots[0]
+        slot.conn = _BrokenConn(slot.conn)
+        evs, deadline = [], time.time() + 30
+        while not evs and time.time() < deadline:
+            evs = pool.wait(1.0)
+        assert len(evs) == 1 and evs[0].task is tasks[0]
+        assert evs[0].crashed == -9 and "unreadable" in evs[0].note
+        assert not builders.is_oom_kill(evs[0])  # killed by the pool: a crash, not an OOM retry
+        assert not pool.busy() and pool.size == 1
+        # the respawned builder keeps working
+        pool.dispatch(tasks[1])
+        got = []
+        while not got and time.time() < deadline:
+            got = pool.wait(1.0)
+        assert got[0].result["status"] == "ok"
+    finally:
+        pool.close()
+
+
+def test_is_oom_kill():
+    from app.server.builders import BuildEvent, is_oom_kill
+    assert is_oom_kill(BuildEvent(None, crashed=-9))
+    assert not is_oom_kill(BuildEvent(None, crashed=-9, note="result unreadable"))
+    assert not is_oom_kill(BuildEvent(None, crashed=-11)) and not is_oom_kill(BuildEvent(None, result={}))
+
+
+def test_machine_default_honours_probe(monkeypatch):
+    """Regression: manual mode with `builders` unset used os.cpu_count() - 1, ignoring the cgroup CPU quota,
+    the affinity mask and the available memory."""
+    from app.server import builders, tuner
+    probe = {"p": tuner.MachineProbe(cpus=3, mem_available_bytes=64 << 30)}
+    monkeypatch.setattr(tuner, "probe_machine", lambda *a, **k: probe["p"])
+    monkeypatch.setattr(builders.os, "cpu_count", lambda: 64)
+    assert builders.machine_default() == 2
+    probe["p"] = tuner.MachineProbe(cpus=16, mem_available_bytes=600 << 20)  # 300 MiB budget -> 1 builder
+    assert builders.machine_default() == 1
+    monkeypatch.delenv("BUILD_PROCESSES", raising=False)
+    assert builders.default_processes() == 1
+
+
+@needs_imap
+def test_builder_oom_kill_is_retried_once_with_fewer_builders(client, env, monkeypatch, tmp_path):
+    """A builder SIGKILLed (OOM killer) is not a libpff crash: the item is rebuilt once with one builder
+    fewer; killed again, it becomes an out-of-memory error (crash counter untouched)."""
+    from app.server import crash
+    monkeypatch.setenv("BUILD_PROCESSES", "3")
+    monkeypatch.setattr(crash, "IN_CHILD", True)
+    fake_engine.CONFIG.update(folders=[INBOX])
+    once, always = fake_engine.item_key(INBOX[0], 4), fake_engine.item_key(INBOX[0], 11)
+    monkeypatch.setenv("PSTMIG_TEST_OOM", f"{once}@{tmp_path / 'oom-flag'},{always}")
+    aid, email = setup_account(client, env)
+    jid = run(client, aid)
+    from app.server import db
+    db.ex("UPDATE jobs SET status='running' WHERE id=?", (jid,))
+    j = run_inproc(client, jid)
+    log = _log(client, jid)
+    assert j["status"] == "done_with_errors", log
+    items = _items(aid)
+    assert {k for k, r in items.items() if r["status"] == "error"} == {always}, log
+    assert items[always]["error"].startswith(crash.OOM_MSG) and "libpff" not in items[always]["error"]
+    assert items[once]["status"] == "ok"
+    assert "probably out of memory: retrying it once with 2 builder(s)" in log
+    assert "probably out of memory: retrying it once with 1 builder(s)" in log
+    assert "Subprocess crash" not in log and "SIGKILL again" in log
+    assert crash.get_crashes(jid) == 0
+    ids = server_import_ids(email)
+    assert len(ids) == 23 and set(ids.values()) == {1}

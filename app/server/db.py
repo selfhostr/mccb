@@ -153,7 +153,10 @@ def pst_key_of(pst_row) -> str | None:
     return pst_row["pst_sha"] or f"id:{pst_row['id']}"
 
 
-DEFAULT_WORKERS = 4  # servers.workers default: earlier servers with another value keep manual tuning
+DEFAULT_WORKERS = 4  # servers.workers default (schema)
+# `workers` values that earlier versions used as their default (schema: 4, 1.0.0 web UI: 2): such servers
+# were not tuned by hand and become 'auto'; any other value was chosen by the administrator (stays manual)
+DEFAULT_WORKERS_LEGACY = (2, 4)
 
 
 def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
@@ -169,8 +172,9 @@ def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
 
 def _migrate_tuning(conn: sqlite3.Connection) -> None:
     """servers.tuning ('auto' | 'manual') + servers.builders (manual builder count, NULL = machine default).
-    Servers of earlier versions become 'auto', except those whose `workers` differs from the default (4): the
-    administrator chose that value, they stay 'manual' with it. Columns added and values set in ONE
+    Servers of earlier versions become 'auto' when `workers` is one of the earlier defaults (2: 1.0.0 UI, 4:
+    schema), otherwise the administrator chose that value: they stay 'manual' with it. Idempotent: runs only
+    while the column is missing. Columns added and values set in ONE
     transaction (re-checked under the write lock): a concurrent process sees either nothing or everything."""
     if "tuning" in {r[1] for r in conn.execute("PRAGMA table_info(servers)")}:
         return
@@ -180,8 +184,9 @@ def _migrate_tuning(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE servers ADD COLUMN tuning TEXT NOT NULL DEFAULT 'auto'")
             if "builders" not in {r[1] for r in conn.execute("PRAGMA table_info(servers)")}:
                 conn.execute("ALTER TABLE servers ADD COLUMN builders INTEGER")
-            conn.execute("UPDATE servers SET tuning = CASE WHEN workers <> ? THEN 'manual' ELSE 'auto' END",
-                         (DEFAULT_WORKERS,))
+            marks = ",".join("?" * len(DEFAULT_WORKERS_LEGACY))
+            conn.execute(f"UPDATE servers SET tuning = CASE WHEN workers IN ({marks}) THEN 'auto' ELSE 'manual' END",
+                         DEFAULT_WORKERS_LEGACY)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")

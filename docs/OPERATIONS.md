@@ -398,12 +398,16 @@ Each server has a **tuning** mode (server form: Auto / Manual).
   During the mail phase a sample is taken every 5 s and the controller adjusts both counts: more connections
   while built messages wait for an APPEND slot and it pays off, more builders while they are the bottleneck and
   CPU is idle, connections halved on a transient server error ([LIMIT], [UNAVAILABLE], BYE, refused, timeout),
-  and a latched fallback to 2 builders / 2 connections after repeated errors. Each change is a job log line
+  APPEND latency compared per message-size bucket with a smoothed baseline (a back-off needs the excess for
+  2 consecutive windows and a throughput drop), and a latched fallback after repeated errors (at most 2
+  builders / 2 connections, never more than the current values; errors still back off while in fallback).
+  A builder killed by SIGKILL (out of memory) is not a libpff crash: its item is retried once with one builder
+  fewer, then marked "builder process killed (SIGKILL, probably out of memory)". Each change is a job log line
   (`Auto-tune: ...`); the job page shows the current values.
 - Resizing is graceful: a connection or builder leaves only after its current item is finished and recorded;
   queued items stay queued. Per-item verification and `X-PST-Import-Id` idempotency are unchanged.
-- Upgrade: servers of earlier versions become Auto, except those whose `workers` was not the default (4),
-  which stay Manual with that value.
+- Upgrade: servers of earlier versions become Auto when `workers` was a default (2 in the 1.0.0 UI, 4 in the
+  schema); any other value was chosen by hand and stays Manual with that value.
 
 ## Version
 
