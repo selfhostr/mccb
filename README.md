@@ -4,17 +4,13 @@
 
 <h3>Bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</h3>
 
-<br><br>
-
 [![Docker image](https://github.com/yetysw/mccb/actions/workflows/docker.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/docker.yml)
 [![Tests](https://github.com/yetysw/mccb/actions/workflows/tests.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<br><br>
-
-<img src="docs/assets/screenshot.png" alt="mccb accounts page" width="100%">
-
 </div>
+
+Screenshots: [screenshots/](screenshots/)
 
 [Website](https://www.yety.ch) · [Documentation](docs/index.md) · [Releases](https://github.com/yetysw/mccb/releases)
 
