@@ -32,7 +32,7 @@ docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
 
-Pin a version by replacing `latest` with `1.0.0` in `docker-compose.yml`. To update: `docker compose pull && docker compose up -d`.
+Pin a version by replacing `latest` with `1.1.1` in `docker-compose.yml`. To update: `docker compose pull && docker compose up -d`.
 
 Open **http://\<host\>:22362** and sign in with the printed password. Change it under **Settings**, or set the `ADMIN_PASSWORD` environment variable.
 
@@ -80,7 +80,7 @@ docker compose up -d --build
 docker compose -f docker-compose.test.yml run --rm --build tests
 ```
 
-API reference and specification: [docs/SPEC.md](docs/SPEC.md).
+API reference and specification: [docs/SPEC.md](docs/SPEC.md). Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 

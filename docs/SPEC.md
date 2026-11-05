@@ -109,7 +109,7 @@ class FolderInfo:
 @dataclass
 class BuiltMessage:
     raw: bytes               # full RFC 5322, clean UTF-8, contains X-PST-Import-Id
-    internaldate: datetime   # tz-aware
+    internaldate: datetime   # tz-aware, = mail_date() (also the newest-first sort key)
     flags: list[str]         # e.g. ['\\Seen']
     subject: str
     attachments: int
@@ -133,7 +133,7 @@ class PstFile:  # context manager
     def build_event(self, handle) -> DavObject | None    # appointment, recurrence if possible (RRULE), attendees, reminder
     def scan(self) -> dict    # {'folders':[{path,kind,count}], 'totals':{'mail':n,'contacts':n,'calendar':n}, 'errors':[...]}
     def item_date(self, handle, kind: str) -> datetime | None  # optional: sort date, cheap (no MIME build);
-        # kind 'mail' (delivery > client submit > creation) | 'event' (start) | 'contact' (last modification > creation)
+        # kind 'mail' (mail_date(): same date as internaldate, see OPERATIONS) | 'event' (start) | 'contact' (last modification > creation)
 
 def verify_message(built: BuiltMessage, handle) -> list[str]   # blocking errors (empty = OK)
 def check_pst_signature(path: str) -> bool

@@ -249,11 +249,13 @@ pass again, skipping what is already `ok`.
   Drafts, Trash and Junk are mapped to the server's SPECIAL-USE folders (or found
   by name). With `root_folder`, the whole PST is imported beneath it, with no special mapping.
 - **Import order: newest first.** At the start of the mail phase the job indexes the dates of the
-  mails still to import (the Date header, else client submit/delivery/creation time: exactly the INTERNALDATE date — read without
+  mails still to import (the mail date: the Date header only if it has a timezone, lies between 1980 and the delivery time
+  (or now + 2 days) and is not more than 30 days after delivery; otherwise client submit, delivery, creation, then modification time.
+  The same rule gives the IMAP INTERNALDATE, so order and INTERNALDATE always match; read without
   building the message, in the builder processes), then imports them **across all folders** from the
   newest to the oldest; all IMAP folders are created up front. Calendar: by start date, newest first;
   contacts: by last modification (else creation), newest first. Items without a date come last, ties are
-  broken by item key. The UI shows `Indexing n / total` meanwhile, the log `Indexed N item(s) in X s`.
+  broken by item key. The UI shows `Indexing n / total` meanwhile; the log shows `Indexing mail items (newest first)…` then `Indexed N item(s) in X s`. Finished jobs show their average speed (`avg X items/s · Y MB/s`).
   The order is recomputed on each run (deterministic): a resume skips `ok` items, checks `inflight`
   ones on the server, and continues with the remaining items in the same order. With several IMAP
   connections, neighbouring messages may be stored a few positions apart (small inversions from parallel IMAP connections are expected). A libpff crash while reading
@@ -411,7 +413,7 @@ Each server has a **tuning** mode (server form: Auto / Manual).
 
 ## Version
 
-The version comes from `app/VERSION` (currently `1.1.0`). Docker builds can override it with `--build-arg VERSION=<tag>` (CI passes the tag) and `--build-arg GIT_SHA=<sha>`; without `VERSION` the app shows `<file>+<sha>` (for example `1.1.0+<sha>`). It is shown in the sidebar footer and on the login screen, returned by `GET /api/version` (public) and `GET /api/health`, and logged at web and worker startup.
+The version comes from `app/VERSION` (currently `1.1.1`). Docker builds can override it with `--build-arg VERSION=<tag>` (CI passes the tag) and `--build-arg GIT_SHA=<sha>`; without `VERSION` the app shows `<file>+<sha>` (for example `1.1.1+<sha>`). It is shown in the sidebar footer and on the login screen, returned by `GET /api/version` (public) and `GET /api/health`, and logged at web and worker startup.
 
 ## License
 
