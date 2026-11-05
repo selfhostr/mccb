@@ -1,0 +1,14 @@
+.env
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.log
+.claude/
+.venv/
+venv/
+.coverage
+htmlcov/
+*.tmp
+.DS_Store

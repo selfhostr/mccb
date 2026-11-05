@@ -1,0 +1,44 @@
+# Environnement d'intégration : IMAP (GreenMail) + CalDAV/CardDAV (Radicale) + exécution pytest.
+#   docker compose -f docker-compose.test.yml run --rm --build tests
+#   docker compose -f docker-compose.test.yml down -v
+name: psttoimap-test
+
+services:
+  imap:
+    image: greenmail/standalone:2.1.2
+    environment:
+      # authentification ACTIVE : les utilisateurs sont créés par les tests via l'API REST (port 8080),
+      # un mauvais mot de passe est refusé (→ auth_failed)
+      GREENMAIL_OPTS: "-Dgreenmail.setup.test.all -Dgreenmail.startup.timeout=30000 -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=e2e:e2e-pw@example.test -Dgreenmail.users.login=email -Dgreenmail.verbose=false"
+
+  radicale:
+    image: tomsquest/docker-radicale:3.3.1.0
+    volumes:
+      - ./tests/server/radicale/config:/config/config:ro
+      - dav-users:/users:ro
+
+  tests:
+    build:
+      context: .
+      args:
+        DEV: "1"
+    image: psttoimap:test
+    depends_on:
+      imap:
+        condition: service_started
+      radicale:
+        condition: service_started
+    environment:
+      TEST_IMAP_HOST: imap
+      TEST_IMAP_PORT: "3143"
+      TEST_DAV_URL: http://radicale:5232/
+      TEST_GREENMAIL_API: http://imap:8080
+      TEST_DAV_HTPASSWD: /dav-users/htpasswd
+    volumes:
+      - .:/app
+      - dav-users:/dav-users
+    working_dir: /app
+    command: ["python", "-m", "pytest", "-q", "tests/engine", "tests/server", "tests/e2e"]
+
+volumes:
+  dav-users:

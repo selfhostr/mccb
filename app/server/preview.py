@@ -1,0 +1,135 @@
+"""Aperçu : échantillon .eml/.ics/.vcf généré par l'engine dans un sous-processus (libpff peut segfaulter).
+
+    python -m app.server.preview <pst> <outdir> [limit]
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import os
+import re
+import shutil
+import sys
+import tempfile
+import zipfile
+from collections import deque
+
+KINDS = ("mail", "calendar", "contacts")
+EXT = {"mail": "eml", "calendar": "ics", "contacts": "vcf"}
+
+
+def _safe(s: str) -> str:
+    return re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", s).strip(". ") or "_"
+
+
+def generate(pst_path: str, outdir: str, limit: int) -> dict:
+    """Écrit au plus `limit` éléments, répartis en tourniquet entre types puis entre dossiers."""
+    from .engine_loader import engine
+    eng = engine()
+    sha = hashlib.sha256(os.path.abspath(pst_path).encode()).hexdigest()[:16]
+    stats = {"mail": 0, "calendar": 0, "contacts": 0, "errors": 0}
+    with eng.PstFile(pst_path) as p:
+        queues = {k: deque() for k in KINDS}
+        for f in p.folders():
+            if f.kind in queues and f.count != 0:
+                queues[f.kind].append((f, p.iter_items(f)))
+        written = 0
+        counters: dict[int, int] = {}
+        while written < limit and any(queues.values()):
+            for kind in KINDS:
+                q = queues[kind]
+                if not q or written >= limit:
+                    continue
+                f, it = q.popleft()
+                try:
+                    i, key, h = next(it)
+                except StopIteration:
+                    continue
+                q.append((f, it))
+                try:
+                    if kind == "mail":
+                        b = p.build_message(h, "%s-%s" % (sha, key))
+                        if b is None:
+                            continue
+                        name, data = "%04d.eml" % i, b.raw
+                    else:
+                        o = p.build_event(h) if kind == "calendar" else p.build_contact(h)
+                        if o is None:
+                            continue
+                        name, data = "%04d-%s" % (i, _safe(o.filename)), o.content.encode("utf-8")
+                    fdir = os.path.join(outdir, *[_safe(x) for x in f.path])
+                    os.makedirs(fdir, exist_ok=True)
+                    with open(os.path.join(fdir, name), "wb") as fh:
+                        fh.write(data)
+                    stats[kind] += 1
+                    written += 1
+                except Exception as ex:  # noqa: BLE001
+                    stats["errors"] += 1
+                    print("ERROR %s #%d: %s" % ("/".join(f.path), i, ex), file=sys.stderr)
+    return stats
+
+
+def zip_dir(src: str, dest: str) -> int:
+    n = 0
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _d, files in os.walk(src):
+            for fn in sorted(files):
+                full = os.path.join(root, fn)
+                z.write(full, os.path.relpath(full, src).replace(os.sep, "/"))
+                n += 1
+    return n
+
+
+class PreviewCrash(Exception):
+    pass
+
+
+class PreviewError(Exception):
+    pass
+
+
+_sem: asyncio.Semaphore | None = None
+
+
+async def build_zip(pst_path: str, limit: int, timeout: float = 120.0) -> tuple[str, str]:
+    """Retourne (chemin du zip, répertoire temporaire à supprimer ensuite)."""
+    global _sem
+    if _sem is None:
+        _sem = asyncio.Semaphore(2)
+    from .config import settings
+    tmp = tempfile.mkdtemp(prefix="pstpreview-")
+    try:
+        out = os.path.join(tmp, "out")
+        os.makedirs(out)
+        env = dict(os.environ, PSTMIG_ENGINE=settings.engine_module)
+        async with _sem:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "app.server.preview", pst_path, out, str(limit), env=env,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            try:
+                _o, err = await asyncio.wait_for(proc.communicate(), timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise PreviewError("délai dépassé pendant l'aperçu")
+        if proc.returncode is not None and proc.returncode < 0:
+            raise PreviewCrash()
+        if proc.returncode != 0:
+            raise PreviewError((err or b"").decode("utf-8", "replace")[-300:] or "échec de l'aperçu")
+        dest = os.path.join(tmp, "preview.zip")
+        await asyncio.to_thread(zip_dir, out, dest)
+        return dest, tmp
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def main(argv=None) -> int:
+    a = argv if argv is not None else sys.argv[1:]
+    stats = generate(a[0], a[1], int(a[2]) if len(a) > 2 else 20)
+    print(stats)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

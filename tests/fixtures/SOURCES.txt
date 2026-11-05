@@ -1,0 +1,7 @@
+Public sample PST/OST files used as test fixtures (untrusted data: never execute anything from here).
+enron.pst, pstextractortest.ost, mtnman1965.ost : https://github.com/epfromer/pst-extractor (src/__tests__/testdata)
+dist-list.pst                                   : https://github.com/rjohnsondev/java-libpst (src/test/resources)
+aspose-outlook.pst (Outlook.pst), aspose-sub-corrupt.pst (Sub.pst, contains unreadable folders),
+aspose-sample-contacts.pst (SampleContacts.pst)  : https://github.com/aspose-email/Aspose.Email-for-Java (Examples/src/main/resources/outlook)
+aspose-sample.ost (SampleOstFile.ost), aspose-test-part0.pst (Chunks/Test_part0.pst, contains an unreadable message)
+                                                : https://github.com/aspose-email/Aspose.Email-for-.NET (Examples/Data/MAPI)

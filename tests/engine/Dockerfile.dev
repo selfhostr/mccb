@@ -1,0 +1,5 @@
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential zlib1g-dev && rm -rf /var/lib/apt/lists/*
+COPY app/engine/requirements.txt /tmp/req-engine.txt
+RUN pip install --no-cache-dir -r /tmp/req-engine.txt pytest==8.3.3
+WORKDIR /src

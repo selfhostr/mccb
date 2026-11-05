@@ -1,0 +1,7 @@
+data/
+.git/
+**/__pycache__/
+*.pst
+.claude/
+.env
+.pytest_cache/
