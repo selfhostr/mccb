@@ -1,14 +1,17 @@
-<p align="center"><img src="docs/logo.svg" alt="PST Migrator logo" width="72" height="72"></p>
+<p align="center"><img src="docs/logo.svg" alt="mccb logo" width="72" height="72"></p>
 
-<h1 align="center">PST Migrator</h1>
+<h1 align="center">mccb</h1>
 
-<p align="center">Bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</p>
+<p align="center">PST Migrator — bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</p>
 
 <p align="center">
+  <a href="https://github.com/yetysw/mccb/releases"><img src="https://img.shields.io/github/v/release/yetysw/mccb" alt="Latest release"></a>
   <a href="https://github.com/yetysw/mccb/actions/workflows/docker.yml"><img src="https://github.com/yetysw/mccb/actions/workflows/docker.yml/badge.svg" alt="Docker image"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <a href="https://github.com/yetysw/mccb/pkgs/container/mccb"><img src="https://img.shields.io/badge/ghcr.io-yetysw%2Fmccb-informational?logo=docker" alt="GHCR image"></a>
 </p>
+
+<p align="center"><img src="docs/screenshot.png" alt="mccb accounts page" width="800"></p>
 
 ## Features
 
@@ -25,6 +28,8 @@ curl -fsSLO https://raw.githubusercontent.com/yetysw/mccb/main/docker-compose.ym
 docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
+
+Pin a version by replacing `latest` with `1.0.0` in `docker-compose.yml`. To update: `docker compose pull && docker compose up -d`.
 
 Open **http://\<host\>:22362** and sign in with the printed password. Change it under **Settings**, or set the `ADMIN_PASSWORD` environment variable.
 
@@ -76,7 +81,7 @@ API reference and specification: [docs/SPEC.md](docs/SPEC.md).
 ## Limitations
 
 - Single administrator, SQLite on a local disk: one host, no high availability.
-- UI is in French only.
+- Items with no charset information at all may decode imperfectly for some languages (e.g. Baltic); items that declare their codepage are preserved in every script.
 - A corrupted PST can crash libpff; affected items are skipped and reported.
 
 ## License
