@@ -168,6 +168,7 @@ def test_append_order_newest_first_across_folders(client, env, monkeypatch, proc
         assert keys == [k for k in order if k in set(keys)]  # UIDs ascend with the newest-first order
     log = _log(client, jid)
     assert "Indexed 12 item(s) in " in log and "12 to import, newest first (1 without date" in log
+    assert "Indexing mail items (newest first)…" in log
 
 
 @needs_imap

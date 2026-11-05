@@ -28,6 +28,7 @@ from .security import decrypt
 IMPORT_HEADER = "X-PST-Import-Id"
 KIND_OF_PHASE = {"mail": "mail", "calendar": "event", "contacts": "contact"}
 PROGRESS_KEY = {"mail": "mail", "event": "calendar", "contact": "contacts"}
+ITEM_LABEL = {"mail": "mail", "event": "calendar", "contact": "contacts"}
 # engine fallback key for an item unreadable during iteration ("<fnid>-x<index>", see pst.iter_items)
 FALLBACK_KEY_RE = re.compile(r"-x(\d+)$")
 # unresolved cid warnings: aggregated per folder in the log (still recorded per item in items.warnings)
@@ -1266,6 +1267,7 @@ class JobRunner:
         if not keep_pool:  # pool closed after the indexing: no more processes than chunks to read
             procs = min(procs, sum(-(-int(f.count or 0) // ordering.CHUNK) for f in folders))
         pool = self._pool(max(1, procs), "builder" if keep_pool else "indexing")
+        self.log(f"Indexing {ITEM_LABEL.get(kind, kind)} items (newest first)…")
         self.current_folder = f"Indexing 0 / {total:,}"
         self.flush(force=True)
         try:

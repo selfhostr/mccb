@@ -12,7 +12,7 @@ from . import mapi
 from .charset import ansi_for, codec_for_cpid, normalize
 from .contact import build_contact as _build_contact
 from .event import build_event as _build_event, deterministic_uid
-from .message import (BuildError, MessageBuilder, clean_subject, internaldate_of, is_mail_class,
+from .message import (BuildError, MessageBuilder, clean_subject, internaldate_of, is_mail_class, mail_date, NO_INTERNALDATE,
                       message_class, message_flags)
 from .source import Context, PffMessage
 
@@ -376,29 +376,41 @@ class PstFile:
                 bag = self._bag(item)
                 return (bag.time((mapi.PSETID_APPOINTMENT, mapi.LID_START_WHOLE))
                         or bag.time((mapi.PSETID_COMMON, mapi.LID_COMMON_START)) or bag.time(mapi.PR_START_DATE))
-            tags = self._DATE_TAGS.get(kind, self._DATE_TAGS["mail"])
-            slow = False
-            for tag in tags:
-                fn = getattr(item, self._FAST_TIME[tag], None)
-                if fn is None:
-                    slow = True
-                    break
-                try:
-                    d = mapi.filetime_to_dt(fn() or 0)
-                except Exception:  # noqa: BLE001 - property absent/unreadable for this getter
-                    d = None
-                if d:
-                    return d
-            if not slow:
+            if kind == "contact":
+                for tag in self._DATE_TAGS["contact"]:
+                    d = self._fast_time(item, tag, None)
+                    if d:
+                        return d
                 return None
-            bag = self._bag(item)
-            for tag in tags:
-                d = bag.time(tag)
-                if d:
-                    return d
+            bag = []  # lazily built, only when a pypff getter is missing
+
+            def get_bag():
+                if not bag:
+                    bag.append(self._bag(item))
+                return bag[0]
+
+            def get_time(tag):
+                return self._fast_time(item, tag, get_bag)
+
+            def get_headers():
+                v = getattr(item, "transport_headers", None)
+                if v is None:
+                    return get_bag().string(mapi.PR_TRANSPORT_MESSAGE_HEADERS)
+                return v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else v
+
+            # same function as INTERNALDATE (message.internaldate_of), incl. its 1980 default
+            return mail_date(get_time, get_headers) or NO_INTERNALDATE
         except Exception:  # noqa: BLE001
             return None
-        return None
+
+    def _fast_time(self, item, tag, get_bag):
+        fn = getattr(item, self._FAST_TIME[tag], None)
+        if fn is None:
+            return get_bag().time(tag) if get_bag else None
+        try:
+            return mapi.filetime_to_dt(fn() or 0)
+        except Exception:  # noqa: BLE001 - property absent/unreadable for this getter
+            return None
 
     def _wrap(self, handle):
         if isinstance(handle, ItemHandle):

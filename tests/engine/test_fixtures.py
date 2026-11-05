@@ -272,3 +272,44 @@ def test_cli_dump(tmp_path):
     assert any(f.endswith(".ics") for f in files)
     assert any(f.endswith(".vcf") for f in files)
     shutil.rmtree(out)
+
+
+def test_sort_key_equals_internaldate(pst_path):
+    """The newest-first sort key is the very date of the built message's INTERNALDATE."""
+    sha = hashlib.sha256(pst_path.encode()).hexdigest()[:16]
+    n = 0
+    with PstFile(pst_path) as p:
+        for f in p.folders():
+            if f.kind != "mail":
+                continue
+            for i, key, h in p.iter_items(f):
+                try:
+                    b = p.build_message(h, "%s-%s" % (sha, key))
+                except ItemError:
+                    continue
+                if b is None:
+                    continue
+                assert p.item_date(h, "mail") == b.internaldate, (f.path, i)
+                n += 1
+
+
+def _md(date_hdr, delivery=None, submit=None):
+    from datetime import datetime, timezone
+    from app.engine.message import mail_date
+    times = {mapi.PR_MESSAGE_DELIVERY_TIME: delivery, mapi.PR_CLIENT_SUBMIT_TIME: submit}
+    hdr = None if date_hdr is None else "Date: %s\r\nSubject: x\r\n" % date_hdr
+    return mail_date(times.get, lambda: hdr, now=datetime(2024, 1, 1, tzinfo=timezone.utc))
+
+
+def test_mail_date_guardrails():
+    from datetime import datetime, timezone
+    D = lambda *a: datetime(*a, tzinfo=timezone.utc)  # noqa: E731
+    deliv, sub = D(2011, 5, 2), D(2011, 5, 1)
+    assert _md("Mon, 02 May 2011 10:00:00 +0200", deliv, sub) == D(2011, 5, 2, 8)      # valid
+    assert _md("Thu, 01 Jan 1970 00:00:00 +0000", deliv, sub) == sub                    # before 1980 -> fallback
+    assert _md("Mon, 02 May 2016 10:00:00 +0000", deliv, sub) == deliv                  # > delivery + 30 d
+    assert _md("Sat, 14 May 2011 10:00:00 +0000", deliv, sub) == sub                    # +12 d: fallback
+    assert _md("Mon, 02 May 2011 10:00:00", deliv, sub) == sub                          # no timezone
+    assert _md("Mon, 02 May 2011 10:00:00 -0000", deliv, sub) == sub                    # no timezone (-0000)
+    assert _md("Fri, 01 Jan 2100 00:00:00 +0000", None, sub) == sub                     # future vs now, no delivery
+    assert _md("Mon, 02 May 2011 10:00:00 +0000", None, None) == D(2011, 5, 2, 10)      # valid, no MAPI date

@@ -22,5 +22,5 @@ export function jobCard(job, email) {
     h('div', { class: 'muted small' }, PHASES[job.phase] || job.phase || '', job.current_folder ? ' · ' + job.current_folder : ''),
     progressBar(t.pct, { label: t.pct + '%', striped: job.status === 'running', kind: t.errors ? 'warn' : '' }),
     h('div', { class: 'row between small muted' }, h('span', null, `${fmtNum(t.done)} / ${fmtNum(t.total)} items`),
-      h('span', null, job.status === 'running' ? `${fmtRate(job.rate, job.rate_bytes)} · ${fmtDur(job.eta)}` : '')));
+      h('span', null, job.status === 'running' ? `${fmtRate(job.rate, job.rate_bytes)} · ${fmtDur(job.eta)}` : (job.rate ? 'avg ' + fmtRate(job.rate, job.rate_bytes) : ''))));
 }

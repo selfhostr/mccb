@@ -774,6 +774,57 @@ def expectations(parts: _Parts, simple: bool = False) -> dict:
     }
 
 
+def header_date(headers: str | None) -> datetime | None:
+    """Date of the transport headers (only that header is parsed), aware UTC; None if absent, unparsable
+    or without a timezone."""
+    if not headers:
+        return None
+    for name, raw in parse_transport_headers(headers):
+        if name.lower() == "date":
+            try:
+                d = email.utils.parsedate_to_datetime(raw)
+            except Exception:  # noqa: BLE001
+                return None
+            if d is None or d.tzinfo is None:
+                return None
+            try:
+                return d.astimezone(timezone.utc)
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
+_MIN_DATE = datetime(1980, 1, 1, tzinfo=timezone.utc)
+
+
+def mail_date(get_time, get_headers, now: datetime | None = None) -> datetime | None:
+    """THE mail date (shared by INTERNALDATE and the newest-first sort key, so they cannot diverge).
+    Date header of the transport headers, only if it carries a timezone and lies within
+    [1980-01-01, (delivery time or now) + 2 days]; a header more than 30 days after the delivery time gives
+    the delivery time; otherwise client submit > delivery > creation > last modification.
+    ``get_time(tag)`` -> datetime | None, ``get_headers()`` -> transport headers text | None (both lazy)."""
+    from datetime import timedelta
+    try:
+        d = header_date(get_headers())
+    except Exception:  # noqa: BLE001
+        d = None
+    if d:
+        delivery = get_time(mapi.PR_MESSAGE_DELIVERY_TIME)
+        limit = (delivery or now or datetime.now(timezone.utc)) + timedelta(days=2)
+        if _MIN_DATE <= d <= limit:
+            return d
+        if delivery and d > delivery + timedelta(days=30):
+            return delivery
+    for t in (mapi.PR_CLIENT_SUBMIT_TIME, mapi.PR_MESSAGE_DELIVERY_TIME, mapi.PR_CREATION_TIME,
+              mapi.PR_LAST_MODIFICATION_TIME):
+        d = get_time(t)
+        if d:
+            return d
+    return None
+
+
+NO_INTERNALDATE = datetime(1980, 1, 1, tzinfo=timezone.utc)
+
+
 def internaldate_of(bag) -> datetime:
-    d = message_dates(bag)
-    return d if d else datetime(1980, 1, 1, tzinfo=timezone.utc)
+    return mail_date(bag.time, lambda: bag.string(mapi.PR_TRANSPORT_MESSAGE_HEADERS)) or NO_INTERNALDATE

@@ -249,14 +249,14 @@ pass again, skipping what is already `ok`.
   Drafts, Trash and Junk are mapped to the server's SPECIAL-USE folders (or found
   by name). With `root_folder`, the whole PST is imported beneath it, with no special mapping.
 - **Import order: newest first.** At the start of the mail phase the job indexes the dates of the
-  mails still to import (delivery time, else client submit time, else creation time — read without
+  mails still to import (the Date header, else client submit/delivery/creation time: exactly the INTERNALDATE date — read without
   building the message, in the builder processes), then imports them **across all folders** from the
   newest to the oldest; all IMAP folders are created up front. Calendar: by start date, newest first;
   contacts: by last modification (else creation), newest first. Items without a date come last, ties are
   broken by item key. The UI shows `Indexing n / total` meanwhile, the log `Indexed N item(s) in X s`.
   The order is recomputed on each run (deterministic): a resume skips `ok` items, checks `inflight`
   ones on the server, and continues with the remaining items in the same order. With several IMAP
-  connections, neighbouring messages may be stored a few positions apart. A libpff crash while reading
+  connections, neighbouring messages may be stored a few positions apart (small inversions from parallel IMAP connections are expected). A libpff crash while reading
   a date only leaves that item without date (imported last); it is not counted as a crash.
 - **Sending.** Parallel APPEND over N connections (server `workers`), reconnect and exponential
   backoff on temporary errors (`IMAP_MAX_RETRIES`). Permanent errors are recorded per
