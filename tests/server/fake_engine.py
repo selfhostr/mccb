@@ -69,6 +69,9 @@ CONFIG: dict = _Config({
     "reject_keys": set(),  # item_keys rejected by verify_message
     "unreadable": set(),   # "<path joined by />#<index>" unreadable during iteration (fallback key <fid>-x<i>)
     "warnings": {},        # item_key -> list of (non-blocking) build warnings
+    # "<path joined by />#<index>" -> epoch seconds (None = no date) overriding the default item date
+    # (default: 2024-07-01 10:00 UTC + index hours, also the INTERNALDATE of the built mail)
+    "dates": {},
 })
 
 
@@ -143,6 +146,21 @@ class PstFile:
             key = item_key(folder.path, i)
             yield i, key, {"key": key, "i": i, "path": folder.path, "kind": folder.kind}
 
+    @staticmethod
+    def _date(handle) -> datetime | None:
+        ref = f"{'/'.join(handle['path'])}#{handle['i']}"
+        dates = CONFIG.get("dates") or {}
+        if ref in dates:
+            v = dates[ref]
+            return None if v is None else datetime.fromtimestamp(v, timezone.utc)
+        return datetime(2024, 7, 1, 10, 0, tzinfo=timezone.utc) + timedelta(hours=handle["i"])
+
+    def item_date(self, handle, kind: str = "mail") -> datetime | None:
+        """Sort date (engine extension): cheap, never builds the item."""
+        if handle.get("unreadable"):
+            return None
+        return self._date(handle)
+
     def _wait(self):
         if CONFIG["delay"]:
             time.sleep(CONFIG["delay"])
@@ -156,7 +174,7 @@ class PstFile:
         if handle["kind"] != "mail":
             return None
         i = handle["i"]
-        dt = datetime(2024, 7, 1, 10, 0, tzinfo=timezone.utc) + timedelta(hours=i)
+        dt = self._date(handle) or datetime(1980, 1, 1, tzinfo=timezone.utc)
         m = EmailMessage()
         m["From"] = "Hélène Dupré <helene@example.test>"
         m["To"] = "client@example.test"

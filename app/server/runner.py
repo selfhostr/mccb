@@ -7,7 +7,9 @@ DAV: deterministic UIDs -> idempotent PUT.
 """
 from __future__ import annotations
 
+import collections
 import json
+import os
 import queue
 import random
 import re
@@ -15,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import builders, crash, db, repo
+from . import builders, crash, db, ordering, repo, tuner
 from .config import settings
 from .dav import DavClient, DavError
 from .engine_loader import engine
@@ -147,29 +149,85 @@ class AppendResult:
 
 
 class AppendPool:
-    """N parallel IMAP connections, each in its own thread.
+    """N parallel IMAP connections, each in its own thread, resizable while running (auto-tuning).
 
     - After a temporary error (timeout, dropped connection — possibly AFTER the literal was sent),
       the APPEND is never blindly replayed: reconnect then exact search for X-PST-Import-Id;
       resend only if the message is absent.
     - Pause/stop: tasks not yet started are cancelled ("cancel" result -> item `pending`),
       those in progress run to completion; close() waits for ALL threads to finish (no APPEND after the
-      job ends)."""
+      job ends).
+    - resize(n): growing starts threads (new connections); shrinking lets surplus threads exit only BETWEEN
+      two tasks — after the current APPEND is finished and its result reported — and queued tasks stay queued
+      for the remaining threads: no task is lost or run twice. The task queue bound (2 x connections)
+      follows the current size."""
 
     def __init__(self, params: ImapParams, n: int, create_folder, should_stop, base_delay: float = 1.0):
         self.params = params
-        self.n = max(1, n)
-        self.tasks: queue.Queue = queue.Queue(maxsize=self.n * 2)
-        self.results: queue.Queue = queue.Queue()
         self.create_folder = create_folder
         self.should_stop = should_stop
         self.base_delay = base_delay
         self.abort = threading.Event()
-        self.pending = 0
-        self.lock = threading.Lock()
-        self.threads = [threading.Thread(target=self._run, daemon=True, name=f"append-{i}") for i in range(self.n)]
-        for t in self.threads:
-            t.start()
+        self.results: queue.Queue = queue.Queue()
+        self.pending = 0                     # submitted, result not yet drained
+        self.lock = threading.Lock()         # pending counter
+        self.cond = threading.Condition()    # task queue, sizes, statistics
+        self._queue: collections.deque = collections.deque()
+        self._target = 0
+        self._alive = 0                      # threads not (yet) retired
+        self._busy = 0                       # threads running an APPEND
+        self._closing = False
+        self._seq = 0
+        self.threads: list[threading.Thread] = []
+        self._lat_sum = 0.0
+        self._lat_n = 0
+        self._errors: list[str] = []         # transient errors seen (tuner input), retried or not
+        self.resize(max(1, n))
+
+    @property
+    def n(self) -> int:
+        """Current (target) number of connections."""
+        return self._target
+
+    def resize(self, n: int) -> None:
+        n = max(1, int(n))
+        with self.cond:
+            if self._closing:
+                return
+            self._target = n
+            for _ in range(max(0, n - self._alive)):
+                t = threading.Thread(target=self._run, daemon=True, name=f"append-{self._seq}")
+                self._seq += 1
+                self._alive += 1
+                self.threads.append(t)
+                t.start()
+            self.cond.notify_all()  # surplus idle threads retire, blocked submitters re-check the bound
+
+    def alive(self) -> int:
+        with self.cond:
+            return self._alive
+
+    def queued(self) -> int:
+        with self.cond:
+            return len(self._queue)
+
+    def busy(self) -> int:
+        with self.cond:
+            return self._busy
+
+    def take_stats(self) -> tuple[float | None, list[str]]:
+        """(mean APPEND latency, transient errors) since the previous call."""
+        with self.cond:
+            lat = self._lat_sum / self._lat_n if self._lat_n else None
+            errs, self._errors = self._errors, []
+            self._lat_sum, self._lat_n = 0.0, 0
+        return lat, errs
+
+    def _note_error(self, err) -> None:
+        from .tuner import classify_error
+        if classify_error(err):
+            with self.cond:
+                self._errors.append(str(err)[:300])
 
     def _stopping(self) -> bool:
         if self.abort.is_set():
@@ -182,21 +240,49 @@ class AppendPool:
             return False
         return False
 
+    def _next(self):
+        """Next task, or None when this thread must exit (surplus after a shrink, or closing with an empty queue)."""
+        with self.cond:
+            while True:
+                if self._alive > self._target and not self._closing:
+                    self._alive -= 1  # retire between two tasks: nothing in hand
+                    self.cond.notify_all()
+                    return None
+                if self._queue:
+                    t = self._queue.popleft()
+                    self._busy += 1
+                    self.cond.notify_all()  # room for a blocked submit()
+                    return t
+                if self._closing:
+                    self._alive -= 1
+                    return None
+                self.cond.wait()
+
     def _run(self) -> None:
         conn = ImapConn(self.params)
         try:
             while True:
-                t = self.tasks.get()
+                t = self._next()
                 if t is None:
                     return
-                if self._stopping():
-                    self.results.put(AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)"))
-                    continue
                 try:
-                    r = self._do(conn, t)
-                except Exception as e:  # pragma: no cover - safety
-                    r = AppendResult(t.item_id, False, "temp", f"{type(e).__name__}: {e}")
-                self.results.put(r)
+                    if self._stopping():
+                        r = AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)")
+                    else:
+                        t0 = time.monotonic()
+                        try:
+                            r = self._do(conn, t)
+                        except Exception as e:  # pragma: no cover - safety
+                            r = AppendResult(t.item_id, False, "temp", f"{type(e).__name__}: {e}")
+                        if r.ok:
+                            with self.cond:
+                                self._lat_sum += time.monotonic() - t0
+                                self._lat_n += 1
+                    self.results.put(r)  # reported BEFORE this thread may retire
+                finally:
+                    with self.cond:
+                        self._busy -= 1
+                        self.cond.notify_all()
         finally:
             conn.close()
 
@@ -221,6 +307,8 @@ class AppendPool:
                 return AppendResult(t.item_id, True, uid=uid, size=t.size)
             except Exception as e:
                 err = wrap_exc(e)
+                if err.kind != "trycreate":
+                    self._note_error(err)
                 if err.kind == "trycreate" and not created:
                     created = True
                     try:
@@ -242,7 +330,11 @@ class AppendPool:
     def submit(self, t: AppendTask) -> None:
         with self.lock:
             self.pending += 1
-        self.tasks.put(t)
+        with self.cond:
+            while len(self._queue) >= 2 * self._target and not self._closing:
+                self.cond.wait(0.5)
+            self._queue.append(t)
+            self.cond.notify_all()
 
     def drain(self, block: bool = False, timeout: float = 0.2) -> list[AppendResult]:
         out = []
@@ -261,10 +353,58 @@ class AppendPool:
         """Cancels the remaining tasks and waits for all threads to finish (no limit: an APPEND in progress
         is bounded by the socket timeout and the retries)."""
         self.abort.set()
-        for _ in self.threads:
-            self.tasks.put(None)
-        for t in self.threads:
+        with self.cond:
+            self._closing = True
+            if self._alive == 0 and self._queue:  # pragma: no cover - cannot happen (target >= 1)
+                for t in list(self._queue):
+                    self.results.put(AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)"))
+                self._queue.clear()
+            self.cond.notify_all()
+        for t in list(self.threads):
             t.join()
+
+
+AUTO_START_CONNECTIONS = 4  # IMAP connections of an auto-tuned job before the first decision
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def initial_tuning(srv: dict, running_jobs: int = 1, probe: "tuner.MachineProbe | None" = None) -> dict:
+    """Pipeline sizes of a job at its start: {mode, builders, connections, fallback, max_builders, forced}.
+
+    - manual: `workers` IMAP connections, `builders` builder processes (NULL = machine default);
+    - auto: builders from the machine probe split between the `running_jobs`, AUTO_START_CONNECTIONS
+      connections (then adjusted by the AutoTuner); `max_builders` = the probe limit for one job.
+    BUILD_PROCESSES, when set, forces the builder count in both modes (`forced`)."""
+    forced = tuner.parse_env_builders(os.environ.get("BUILD_PROCESSES"))
+    if not tuner.is_auto(srv):
+        m = tuner.manual_settings(srv, forced, default_builders=builders.machine_default())
+        m.update(max_builders=m["builders"], forced=forced is not None)
+        return m
+    if probe is None:
+        probe = tuner.probe_machine()
+    b = tuner.choose_builders(probe, env_override=forced, running_jobs=running_jobs)
+    mx = tuner.choose_builders(probe, env_override=forced, running_jobs=1)
+    return {"builders": b, "connections": AUTO_START_CONNECTIONS, "mode": "auto", "fallback": False,
+            "max_builders": max(b, mx), "forced": forced is not None}
+
+
+def _proc_stat() -> tuple[float, float] | None:
+    """(idle jiffies, total jiffies) of the machine (/proc/stat), None if unavailable."""
+    try:
+        with open("/proc/stat", encoding="ascii") as fh:
+            parts = fh.readline().split()
+    except OSError:
+        return None
+    if not parts or parts[0] != "cpu":
+        return None
+    v = [float(x) for x in parts[1:]]
+    return (v[3] + (v[4] if len(v) > 4 else 0.0)), sum(v[:8])
 
 
 class JobRunner:
@@ -295,6 +435,17 @@ class JobRunner:
         self._inflight_bytes: dict[int, int] = {}  # item_id -> size: built, submitted, not yet APPENDed
         self.build_procs = builders.default_processes()
         self.byte_budget = builders.byte_budget()
+        # pipeline sizes (see _setup_tuning): builders = self.build_procs, IMAP connections = self.connections
+        self.connections = max(1, int(self.srv["workers"] or 1)) if self.srv else 1
+        self.tuning_mode = "manual"
+        self.tuning_fallback = False
+        self.tuner: tuner.AutoTuner | None = None
+        self._builders_forced = False
+        self._cpus = os.cpu_count() or 1
+        self.tune_interval = max(0.05, _float_env("AUTOTUNE_INTERVAL", 5.0))  # seconds between two samples
+        self._tune_t0: float | None = None
+        self._tune_b0 = 0
+        self._tune_cpu: tuple[float, float] | None = None
         self._phase = ""
         self._item_phase = False
         self.report: dict = {"folders": [], "warnings": [], "verify": {}, "dav": {}, "precheck": {}}
@@ -416,7 +567,10 @@ class JobRunner:
 
     def flush(self, force: bool = False) -> None:
         now = time.time()
-        if not force and now - self._last_flush < 1.0:
+        # young rate window (start of an import phase, or right after its indexing): 4 samples/s for 5 s,
+        # so that short jobs show a rate; then 1/s
+        young = bool(self._rate_window) and now - self._rate_window[0][0] < 5.0
+        if not force and now - self._last_flush < (0.25 if young else 1.0):
             return
         self._last_flush = now
         self.recompute_progress()
@@ -426,8 +580,9 @@ class JobRunner:
         # sliding average over 60 s, otherwise since the start of the phase (first sample kept)
         self._rate_window = [x for x in self._rate_window if now - x[0] <= 60]
         t0, d0, b0 = self._rate_window[0]
-        rate = (done - d0) / (now - t0) if now - t0 >= 0.2 else None
-        rate_bytes = (self._bytes_done - b0) / (now - t0) if now - t0 >= 0.2 else None
+        measurable = now - t0 >= 0.2 and (done > d0 or now - t0 >= 5.0)  # no "0 items/s" before the 1st item
+        rate = (done - d0) / (now - t0) if measurable else None
+        rate_bytes = (self._bytes_done - b0) / (now - t0) if measurable else None
         if self._item_phase:
             self._rate_last = (now, done, self._bytes_done)
         eta = None
@@ -522,6 +677,7 @@ class JobRunner:
         self.log(f"Job {self.job_id} started for {self.acc['email']} (mode {self.mode})")
         self._mark()  # stale marker from a killed process (abrupt container stop): not a crash
         try:
+            self._setup_tuning()
             if not self.pst_row:
                 raise JobFailed("no PST linked to the account")
             if self.pst_row["status"] != "valid":
@@ -611,6 +767,97 @@ class JobRunner:
               "report_path=COALESCE(?, report_path), current_folder=NULL WHERE id=?",
               (status, error, now, self._avg_rate(), self._avg_rate_bytes(), path, self.job_id))
 
+    # ------------------------------------------------------------ tuning (builders / IMAP connections)
+    def _setup_tuning(self) -> None:
+        """Manual: the server's values. Auto: machine probe (+ ~1-2 s build benchmark), builders split between
+        the running jobs, then an AutoTuner adjusts both counts during the mail phase."""
+        srv = dict(self.srv)
+        if tuner.is_auto(srv):
+            secs = _float_env("AUTOTUNE_BENCH_SECONDS", 1.5)
+            probe = tuner.probe_machine(benchmark=(lambda: tuner.default_benchmark(secs)) if secs > 0 else None)
+            running = db.q1("SELECT COUNT(*) n FROM jobs WHERE status='running'")["n"] or 1
+            t = initial_tuning(srv, running, probe)
+            self._cpus = probe.cpus
+            bench = f"{probe.bench_rate:.0f} msg/s" if probe.bench_rate else "n/a"
+            self.log(f"Auto-tune: probe {probe.cpus} CPUs, {probe.mem_available_bytes / 2 ** 30:.1f} GiB free, "
+                     f"bench {bench}, {running} running job(s) → {t['builders']} builders"
+                     + (" (BUILD_PROCESSES)" if t["forced"] else "") + f", IMAP connections {t['connections']}")
+            self.tuner = tuner.AutoTuner(builders=max(1, t["builders"]), max_builders=max(1, t["max_builders"]),
+                                         connections=t["connections"], min_window_s=self.tune_interval)
+            if t["forced"]:  # the builder count never moves: the tuner adjusts the connections only
+                self.tuner.max_builders = self.tuner.fallback_builders = self.tuner.builders
+        else:
+            t = initial_tuning(srv)
+            self.log(f"Tuning: manual — {t['builders']} builder(s)" + (" (BUILD_PROCESSES)" if t["forced"] else "")
+                     + f", IMAP connections {t['connections']}")
+        self.tuning_mode = t["mode"]
+        self._builders_forced = t["forced"]
+        self.build_procs = t["builders"]
+        self.connections = t["connections"]
+        self._save_tuning()
+
+    def tuning_view(self) -> dict:
+        return {"mode": self.tuning_mode, "builders": self.build_procs, "connections": self.connections,
+                "fallback": self.tuning_fallback}
+
+    def _save_tuning(self) -> None:
+        db.ex("UPDATE jobs SET tuning=? WHERE id=?", (db.jdump(self.tuning_view()), self.job_id))
+
+    def _cpu_headroom(self) -> float | None:
+        """Idle cores since the previous call (/proc/stat), else from the load average."""
+        cur = _proc_stat()
+        prev, self._tune_cpu = self._tune_cpu, cur
+        if cur is not None and prev is not None and cur[1] > prev[1]:
+            return max(0.0, self._cpus * (cur[0] - prev[0]) / (cur[1] - prev[1]))
+        try:
+            return max(0.0, self._cpus - os.getloadavg()[0])
+        except OSError:  # pragma: no cover
+            return None
+
+    def _tune_tick(self, pool: AppendPool) -> None:
+        """Mail phase: one Sample about every `tune_interval` seconds (sooner on a transient IMAP error)
+        fed to the AutoTuner, whose decision is applied at once."""
+        if self.tuner is None or pool is None:
+            return
+        now = time.monotonic()
+        bpool = getattr(self, "_bpool", None)
+        if self._tune_t0 is None:
+            self._tune_t0, self._tune_b0 = now, self._bytes_done
+            pool.take_stats()
+            if bpool is not None:
+                bpool.take_utilisation()
+            self._cpu_headroom()
+            return
+        dur = now - self._tune_t0
+        if dur < self.tune_interval and not (pool._errors and dur >= min(0.5, self.tune_interval)):
+            return
+        lat, errs = pool.take_stats()
+        util = bpool.take_utilisation() if bpool is not None else None
+        state = tuner.queue_state(pool.pending, pool.n, sum(self._inflight_bytes.values()), self.byte_budget,
+                                  idle_appenders=max(0, pool.alive() - pool.busy()))
+        sample = tuner.Sample(bytes_appended=self._bytes_done - self._tune_b0, duration_s=dur, queue_state=state,
+                              append_latency_s=lat, builder_util=util, cpu_headroom=self._cpu_headroom(),
+                              errors=errs)
+        self._tune_t0, self._tune_b0 = now, self._bytes_done
+        self._apply_decision(self.tuner.feed(sample), pool)
+
+    def _apply_decision(self, d: "tuner.Decision", pool: AppendPool) -> None:
+        """Resizes the AppendPool / BuilderPool (graceful: nothing in flight is lost) and logs the decision."""
+        if not d.changed and not d.log:
+            return
+        if d.connections != pool.n:
+            pool.resize(d.connections)
+        self.connections = pool.n
+        bpool = getattr(self, "_bpool", None)
+        if d.builders != self.build_procs and not self._builders_forced and self.build_procs > 0:
+            if bpool is not None:
+                bpool.resize(d.builders)
+            self.build_procs = d.builders
+        self.tuning_fallback = self.tuning_fallback or d.fallback
+        if d.log:
+            self.log(d.log, "warning" if d.fallback else "info")
+        self._save_tuning()
+
     # ------------------------------------------------------------ precheck
     def precheck(self) -> None:
         self.set_phase("precheck")
@@ -669,6 +916,8 @@ class JobRunner:
         existing.add(name)
 
     def phase_mail(self) -> None:
+        """Mail phase: all IMAP folders created up front, then every mail still to import, across all the
+        folders, newest first (see ordering.py)."""
         self.set_phase("mail")
         mail_folders = [f for f in self.folders if f.kind == "mail"]
         params = self.imap_params()
@@ -701,9 +950,44 @@ class JobRunner:
             def create_folder(c: ImapConn, target: str) -> None:
                 c.create(target)
 
-            pool = AppendPool(params, int(self.srv["workers"] or 1), create_folder, self._should_stop)
+            pool = AppendPool(params, self.connections, create_folder, self._should_stop)
+            self._tune_t0 = None
+            todo = []
             for f in mail_folders:
-                self._mail_folder(f, plan[folder_key(f.path)][0], conn, pool)
+                fk = folder_key(f.path)
+                if not self._folder_has_work("mail", f):
+                    continue
+                if fk in self.folder_errors:
+                    self.current_folder = fk
+                    self._fail_folder(f, fk, "mail", self.item_rows("mail", fk, f.path), plan[fk][0],
+                                      self.folder_errors[fk])
+                    continue
+                todo.append(f)
+            targets = {self._folder_index(f): plan[folder_key(f.path)][0] for f in todo}
+
+            def prepare(spec: ordering.FolderSpec, rows: dict) -> None:
+                self.log(f"Folder '{spec.fkey}' -> {targets[spec.folder_index]} ({spec.folder.count} item(s))")
+                self._resolve_on_server(conn, rows)  # before any resend: inflight items searched on the server
+
+            # builder processes started for the indexing are kept for the builds (BUILD_PROCESSES > 0)
+            entries = self._index_items("mail", todo, prepare, procs=self.build_procs,
+                                        keep_pool=self.build_procs > 0)
+            pst_sha = self.pst_row["pst_sha"]
+            self._cid_msgs = {}
+            if self.build_procs > 0 and entries:
+                self._mail_parallel(entries, pool, self._pool(self.build_procs), targets, pst_sha)
+            else:
+                self._close_builders()  # indexing process(es) no longer needed: builds run in this process
+                self._mail_inprocess(entries, pool, targets, pst_sha)
+            self._wait_pool(pool)
+            self._mark()
+            for f in todo:
+                fk = folder_key(f.path)
+                n = self._cid_msgs.get(fk)
+                if n:
+                    self.log(f"{fk}: {n} message(s) reference images missing from the PST (quoted replies) — harmless")
+                # post-folder check: messages bearing our fingerprint >= sent (ok) to this folder
+                self.check_folder_status(conn, fk, targets[self._folder_index(f)])
         finally:
             self._close_builders()  # in-flight builds discarded (pause/stop/failure): nothing recorded for them
             if pool is not None:
@@ -716,6 +1000,7 @@ class JobRunner:
                     except JobFailed:
                         pass
             conn.close()
+        self.current_folder = None
         self.flush(force=True)  # last sample of the phase (end-of-job average rates)
 
     def _handle_results(self, results: list[AppendResult]) -> None:
@@ -739,7 +1024,7 @@ class JobRunner:
                     self.consecutive_temp += 1
         if fatal:
             raise JobFailed(f"permanent server error: {fatal}")
-        if self.consecutive_temp >= max(5, 3 * int(self.srv["workers"] or 1)):
+        if self.consecutive_temp >= max(5, 3 * max(1, self.connections)):  # current connection count
             raise JobFailed("IMAP server unavailable (too many consecutive errors)")
 
     def _wait_pool(self, pool: AppendPool) -> None:
@@ -749,6 +1034,8 @@ class JobRunner:
             if not pool.abort.is_set() and self._should_stop():
                 pool.abort.set()
             self._handle_results(pool.drain(block=True, timeout=0.5))
+            if not pool.abort.is_set():
+                self._tune_tick(pool)
         self._handle_results(pool.drain())
 
     def _resolve_on_server(self, conn: ImapConn, rows: dict[str, dict]) -> None:
@@ -781,40 +1068,45 @@ class JobRunner:
                 self.set_item(r["id"], "pending")
                 r["status"] = "pending"
 
-    def _mail_folder(self, f, target: str, conn: ImapConn, pool: AppendPool) -> None:
-        fkey = folder_key(f.path)
-        self.current_folder = fkey
-        rows = self.item_rows("mail", fkey, f.path)
-        if self.mode == "errors" and not any(r["status"] in ("error", "inflight", "pending") for r in rows.values()):
-            return
-        self.log(f"Folder '{fkey}' -> {target} ({f.count} item(s))")
-        self.flush(force=True)
-        self._wait_pool(pool)
-        if fkey in self.folder_errors:
-            self._fail_folder(f, fkey, "mail", rows, target, self.folder_errors[fkey])
-            return
-        self._resolve_on_server(conn, rows)
-        fallback = self.fallback_rows(rows)
-        pst_sha = self.pst_row["pst_sha"]
-        self._cid_msgs = 0
-        bpool = self._builders(f)
-        if bpool is None:
-            for idx, key, handle in self._iter(f, "mail", fkey):
-                self.check()
-                self._handle_results(pool.drain())
-                r, fb = self._resolve_key(rows, fallback, idx, key)
-                if not self.wants(r):
-                    continue
-                self._mail_item(f, fkey, idx, key, handle, target, pool, pst_sha)
-                self._drop_fallback(fb)
-        else:
-            self._mail_folder_parallel(f, fkey, target, pool, bpool, rows, fallback, pst_sha)
-        self._wait_pool(pool)
-        if self._cid_msgs:
-            self.log(f"{fkey}: {self._cid_msgs} message(s) reference images missing from the PST "
-                     f"(quoted replies) — harmless")
-        # post-folder check: messages bearing our fingerprint >= sent (ok) to this folder
-        self.check_folder_status(conn, fkey, target)
+    def _folder_has_work(self, kind: str, f) -> bool:
+        """"Retry errors" mode: folders without error/inflight/pending item are not even indexed."""
+        if self.mode != "errors":
+            return True
+        return db.q1("SELECT 1 FROM items WHERE account_id=? AND pst_key=? AND kind=? AND folder IN (?, ?) "
+                     "AND status IN ('error','inflight','pending') LIMIT 1",
+                     (self.account_id, self.pst_key, kind, folder_key(f.path), legacy_folder_key(f.path))) is not None
+
+    def _fetch(self, f, kind: str, fkey: str, idx: int, key: str, target: str):
+        """Handle of item no. idx (job process, marker set: a libpff crash here skips the index on resume).
+        None (item recorded as an error) if the key read differs from the indexed one."""
+        self._mark(kind, fkey, idx)
+        gen = self.pst.iter_items(f, idx)
+        try:
+            got = next(gen, None)
+        finally:
+            gen.close()
+        if got is None or got[0] != idx or got[1] != key:
+            self.upsert_item(kind, key, fkey, "error", target=target,
+                             error=f"construction: item key mismatch ({got[1] if got else None} != {key})")
+            return None
+        return got[2]
+
+    def _mail_inprocess(self, entries: list, pool: AppendPool, targets: dict, pst_sha: str) -> None:
+        """Index order, build in this process (BUILD_PROCESSES=0)."""
+        entries.reverse()  # pop() = next entry, memory released as the import progresses
+        while entries:
+            _sv, key, fi, idx = entries.pop()
+            self.check()
+            self._handle_results(pool.drain())
+            self._tune_tick(pool)
+            f = self.folders[fi]
+            fkey = folder_key(f.path)
+            self.current_folder = fkey
+            handle = self._fetch(f, "mail", fkey, idx, key, targets[fi])
+            if handle is None:
+                continue
+            self._mail_item(f, fkey, idx, key, handle, targets[fi], pool, pst_sha)
+            self._drop_fallback(self._fallbacks.pop((fi, idx), None))
 
     def _fail_folder(self, f, fkey: str, kind: str, rows: dict, target: str, msg: str) -> None:
         """Unusable target folder: its items to send are marked as errors (without reading the content)."""
@@ -862,7 +1154,10 @@ class JobRunner:
             return
         others = [w for w in warns if not CID_WARNING_RE.match(w)]
         if len(others) != len(warns):
-            self._cid_msgs = getattr(self, "_cid_msgs", 0) + 1
+            cid = getattr(self, "_cid_msgs", None)
+            if cid is None:
+                cid = self._cid_msgs = {}
+            cid[fkey] = cid.get(fkey, 0) + 1
         if others:
             self.log(f"Warning '{res['subject']}': {', '.join(others)}", "warning")
         raw = res["raw"]
@@ -878,19 +1173,18 @@ class JobRunner:
             if not pool.abort.is_set() and self._should_stop():
                 pool.abort.set()
             self._handle_results(pool.drain(block=True, timeout=0.5))
+            self._tune_tick(pool)
         self._inflight_bytes[task.item_id] = task.size
         pool.submit(task)
 
-    # ------------------------------------------------------------ parallel builders
-    def _builders(self, f) -> builders.BuilderPool | None:
-        """Builder processes (started on first use, shared by the folders of the mail phase)."""
-        if self.build_procs <= 0 or not int(f.count or 0):
-            return None
+    # ------------------------------------------------------------ builder processes / indexing
+    def _pool(self, n: int, what: str = "builder") -> builders.BuilderPool:
+        """Builder processes (started on first use, shared by the indexing and the builds of a phase)."""
         bp = getattr(self, "_bpool", None)
         if bp is None:
-            bp = builders.BuilderPool(self.pst_row["path"], self.build_procs, in_child=crash.IN_CHILD)
+            bp = builders.BuilderPool(self.pst_row["path"], max(1, n), in_child=crash.IN_CHILD)
             self._bpool = bp
-            self.log(f"{bp.size} builder process(es)")
+            self.log(f"{bp.size} {what} process(es)")
         return bp
 
     def _close_builders(self) -> None:
@@ -905,40 +1199,115 @@ class JobRunner:
                 return i
         raise JobFailed(f"folder not found: {f.path}")
 
-    def _mail_folder_parallel(self, f, fkey: str, target: str, pool: AppendPool, bpool: builders.BuilderPool,
-                              rows: dict, fallback: dict, pst_sha: str) -> None:
-        """The job process iterates (keys, idempotence decisions) and records; builders build.
-        At most one task per builder; results are recorded as they arrive (any order)."""
-        fi = self._folder_index(f)
-        it = self._iter(f, "mail", fkey)
-        exhausted = False
-        try:
-            while True:
-                self.check()
-                self._handle_results(pool.drain())
-                while not exhausted and bpool.can_dispatch() and \
-                        sum(self._inflight_bytes.values()) < self.byte_budget:
-                    try:
-                        idx, key, _handle = next(it)
-                    except StopIteration:
-                        exhausted = True
-                        break
-                    self._mark()  # item fetched: a later death of this process is not blamed on its index
-                    r, fb = self._resolve_key(rows, fallback, idx, key)
-                    if not self.wants(r):
-                        self.check()
-                        continue
-                    bpool.dispatch(builders.BuildTask(fi, list(f.path), idx, key, import_id_of(pst_sha, key),
-                                                      meta=fb))
-                if exhausted and not bpool.busy():
-                    return
-                for ev in bpool.wait(0.2):
-                    self._on_built(ev, fkey, target, pool)
-        finally:
-            it.close()
+    def _index_items(self, kind: str, folders: list, prepare=None, procs: int = 1, keep_pool: bool = False) -> list:
+        """Entries ``(sort value, item_key, folder index, item index)`` of the items of `folders` still to
+        import, newest first (ordering.py). Dates are read in builder processes (crash-isolated).
+        `prepare(spec, rows)` runs once per folder before its items are judged (e.g. server check of
+        `inflight` items). Fallback rows to drop once processed: self._fallbacks[(folder index, idx)]."""
+        self._fallbacks: dict[tuple[int, int], dict] = {}
+        specs = []
+        for f in folders:
+            fkey = folder_key(f.path)
+            fkeys = {fkey, legacy_folder_key(f.path)}
+            specs.append(ordering.FolderSpec(self._folder_index(f), f, fkey,
+                                             {i for k, fo, i in self.skips if k == kind and fo in fkeys}))
+        total = sum(int(f.count or 0) for f in folders)
+        if not total:
+            return []
+        state: dict = {}
 
-    def _on_built(self, ev: builders.BuildEvent, fkey: str, target: str, pool: AppendPool) -> None:
+        def begin(spec: ordering.FolderSpec) -> None:
+            rows = self.item_rows(kind, spec.fkey, spec.folder.path)
+            if prepare is not None:
+                prepare(spec, rows)
+            state["rows"], state["fallback"] = rows, self.fallback_rows(rows)
+
+        def end(spec: ordering.FolderSpec) -> None:
+            state.clear()  # DB rows kept for one folder at a time
+
+        def keep(spec: ordering.FolderSpec, idx: int, key: str) -> bool:
+            r, fb = self._resolve_key(state["rows"], state["fallback"], idx, key)
+            if not self.wants(r):
+                return False
+            if fb is not None:
+                self._fallbacks[(spec.folder_index, idx)] = {"id": fb["id"]}
+            return True
+
+        def progress(done: int, tot: int) -> None:
+            self.current_folder = f"Indexing {done:,} / {tot:,}"
+            self.flush()
+
+        def on_fetch_crash(spec: ordering.FolderSpec, idx: int, rc: int | None) -> None:
+            # the mere reading of the item kills libpff: same handling as a crash during iteration
+            marker = {"a": self.account_id, "p": self.pst_id, "s": self.pst_key, "kind": kind,
+                      "folder": spec.fkey, "idx": idx, "key": None}
+            n, desc, why = crash.record_builder_crash(self.job_id, marker, rc)
+            self.crashes = n
+            self.skips.add((kind, spec.fkey, idx))
+            self.log(f"Subprocess crash ({why}, {n}/{settings.max_child_crashes}): {desc} — marked as error "
+                     f"'{crash.CRASH_MSG}', index skipped (builder process restarted)", "error")
+            if n >= settings.max_child_crashes:
+                raise JobFailed(f"The subprocess crashed {n} times (probable libpff crash)")
+
+        if not keep_pool:  # pool closed after the indexing: no more processes than chunks to read
+            procs = min(procs, sum(-(-int(f.count or 0) // ordering.CHUNK) for f in folders))
+        pool = self._pool(max(1, procs), "builder" if keep_pool else "indexing")
+        self.current_folder = f"Indexing 0 / {total:,}"
+        self.flush(force=True)
+        try:
+            entries, st = ordering.build_index(pool, specs, kind, keep, self.check, progress, on_fetch_crash,
+                                               begin, end)
+        except ordering.IndexingError as e:
+            raise JobFailed(str(e)) from e
+        self.current_folder = None
+        self.log(f"Indexed {st.seen:,} item(s) in {st.seconds:.1f} s — {st.kept:,} to import, newest first"
+                 + (f" ({st.undated:,} without date, imported last)" if st.undated else ""))
+        if st.date_crashes:
+            self.log(f"{st.date_crashes} item(s): reading the date crashed a builder process — no date, "
+                     f"imported last", "warning")
+        # rate window restarted after indexing (items/s and ETA measure the import, not the indexing)
+        now = time.time()
+        done = sum(p["done"] for p in self.progress.values())
+        self._rate_window = [(now, done, self._bytes_done)]
+        return entries
+
+    def _mail_parallel(self, entries: list, pool: AppendPool, bpool: builders.BuilderPool, targets: dict,
+                       pst_sha: str) -> None:
+        """Builders build, the job process records and submits. Results are recorded and submitted in the
+        index order (reorder buffer, bounded to 2 x builders results): APPENDs follow the newest-first
+        order, strictly with one IMAP connection."""
+        entries.reverse()  # pop() = next entry
+        seq_next = seq_rec = 0
+        ready: dict[int, builders.BuildEvent] = {}
+        ready_bytes = 0
+        while True:
+            self.check()
+            self._handle_results(pool.drain())
+            self._tune_tick(pool)
+            # reorder buffer bounded to 2 x the CURRENT builder count (resized by the auto-tuner)
+            while entries and bpool.can_dispatch() and len(ready) < 2 * bpool.size and \
+                    sum(self._inflight_bytes.values()) + ready_bytes < self.byte_budget:
+                _sv, key, fi, idx = entries.pop()
+                f = self.folders[fi]
+                fb = self._fallbacks.pop((fi, idx), None)
+                bpool.dispatch(builders.BuildTask(fi, list(f.path), idx, key, import_id_of(pst_sha, key),
+                                                  meta=(seq_next, folder_key(f.path), targets[fi], fb)))
+                seq_next += 1
+            for ev in bpool.wait(0.2):
+                ready[ev.task.meta[0]] = ev
+                ready_bytes += len((ev.result or {}).get("raw") or b"")
+            while seq_rec in ready:
+                ev = ready.pop(seq_rec)
+                seq_rec += 1
+                ready_bytes -= len((ev.result or {}).get("raw") or b"")
+                self._on_built(ev, pool)
+            if not entries and not bpool.busy() and not ready:
+                return
+
+    def _on_built(self, ev: builders.BuildEvent, pool: AppendPool) -> None:
         t = ev.task
+        _seq, fkey, target, fb = t.meta
+        self.current_folder = fkey
         if ev.crashed is not None:
             marker = {"a": self.account_id, "p": self.pst_id, "s": self.pst_key, "kind": "mail", "folder": fkey,
                       "idx": t.index, "key": t.key}
@@ -950,7 +1319,7 @@ class JobRunner:
                 raise JobFailed(f"The subprocess crashed {n} times (probable libpff crash)")
             return
         self._record_built(fkey, t.index, t.key, target, pool, t.import_id, ev.result)
-        self._drop_fallback(t.meta)
+        self._drop_fallback(fb)
 
     def _path_of(self, fkey: str) -> list[str]:
         for f in getattr(self, "folders", []):
@@ -980,6 +1349,8 @@ class JobRunner:
 
     # ------------------------------------------------------------ DAV
     def phase_dav(self, phase: str) -> None:
+        """Calendar (start desc) / contacts (last modification desc): all the folders of the phase, newest
+        first (see ordering.py); builds and PUTs in this process."""
         folders = [f for f in self.folders if f.kind == phase]
         if not folders:
             return
@@ -994,21 +1365,29 @@ class JobRunner:
                 url = dav.discover(dk, tmpl, self.acc["email"], self.srv["imap_host"])
                 self.dav_targets[phase] = url
             builder = self.pst.build_event if phase == "calendar" else self.pst.build_contact
-            for f in folders:
+            todo = [f for f in folders if self._folder_has_work(kind, f)]
+
+            def prepare(spec: ordering.FolderSpec, rows: dict) -> None:
+                self.log(f"Folder '{spec.fkey}' -> {url} ({spec.folder.count} item(s))")
+
+            try:
+                entries = self._index_items(kind, todo, prepare, procs=self.build_procs)
+            finally:
+                self._close_builders()
+            entries.reverse()
+            while entries:
+                _sv, key, fi, idx = entries.pop()
+                self.check()
+                f = self.folders[fi]
                 fkey = folder_key(f.path)
                 self.current_folder = fkey
-                rows = self.item_rows(kind, fkey, f.path)
-                if self.mode == "errors" and not any(r["status"] in ("error", "inflight", "pending") for r in rows.values()):
+                handle = self._fetch(f, kind, fkey, idx, key, url)
+                if handle is None:
                     continue
-                self.log(f"Folder '{fkey}' -> {url} ({f.count} item(s))")
-                fallback = self.fallback_rows(rows)
-                for idx, key, handle in self._iter(f, kind, fkey):
-                    self.check()
-                    r, fb = self._resolve_key(rows, fallback, idx, key)
-                    if not self.wants(r):
-                        continue
-                    self._dav_item(dav, url, phase, kind, fkey, idx, key, handle, builder)
-                    self._drop_fallback(fb)
+                self._dav_item(dav, url, phase, kind, fkey, idx, key, handle, builder)
+                self._drop_fallback(self._fallbacks.pop((fi, idx), None))
+            self._mark()
+        self.current_folder = None
         self.flush(force=True)
 
     def _dav_item(self, dav: DavClient, url: str, phase: str, kind: str, fkey: str, idx: int, key: str, handle,

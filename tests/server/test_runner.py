@@ -44,9 +44,11 @@ def wait_services():
 
 @pytest.fixture(autouse=True)
 def reset_fake():
-    fake_engine.CONFIG.update(folders=list(DEFAULT_FOLDERS), delay=0.0, fail_keys=set(), reject_keys=set(), unreadable=set())
+    fake_engine.CONFIG.update(folders=list(DEFAULT_FOLDERS), delay=0.0, fail_keys=set(), reject_keys=set(), unreadable=set(),
+                              dates={})
     yield
-    fake_engine.CONFIG.update(folders=list(DEFAULT_FOLDERS), delay=0.0, fail_keys=set(), reject_keys=set(), unreadable=set())
+    fake_engine.CONFIG.update(folders=list(DEFAULT_FOLDERS), delay=0.0, fail_keys=set(), reject_keys=set(), unreadable=set(),
+                              dates={})
 
 
 class WorkerThread:
@@ -77,12 +79,13 @@ def wait_job(client, jid, statuses, timeout=90, cond=None):
     raise AssertionError(f"job {jid} stuck: {j}\n" + "\n".join(l["msg"] for l in log[-30:]))
 
 
-def setup_account(client, env, root_folder=None, workers=3):
+def setup_account(client, env, root_folder=None, workers=3, **server):
+    """`workers` != 4 without `tuning` -> manual tuning with that many IMAP connections (API rule)."""
     email = create_user()
     srv = client.post("/api/servers", json={
         "name": "test", "imap_host": IMAP_HOST, "imap_port": IMAP_PORT, "imap_security": "none",
         "verify_tls": False, "root_folder": root_folder, "caldav_url": DAV_URL, "carddav_url": DAV_URL,
-        "dav_enabled": True, "workers": workers, "notes": ""}).json()
+        "dav_enabled": True, "workers": workers, "notes": "", **server}).json()
     acc = client.post("/api/accounts", json={"server_id": srv["id"], "email": email, "password": "pw"}).json()
     # upload + validation of the fake PST
     from app.server.uploads import validate
@@ -203,7 +206,7 @@ def test_pause_resume(client, env):
 def test_stop_then_retry_without_duplicates(client, env):
     fake_engine.CONFIG["folders"] = [(["Boîte de réception"], "mail", "IPF.Note", "inbox", 25),
                                      (["Contacts"], "contacts", "IPF.Contact", None, 3)]
-    fake_engine.CONFIG["delay"] = 0.08
+    fake_engine.CONFIG["delay"] = 0.15
     aid, email = setup_account(client, env)
     jid = run(client, aid)
     with WorkerThread():

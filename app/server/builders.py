@@ -4,6 +4,7 @@ Building a MIME message (libpff reads, charset work, MIME encoding, self-verific
 Python and CPU-bound: one job process saturated one core while the APPEND threads waited. The job
 process now keeps the iteration, the bookkeeping (DB), the AppendPool; builder processes receive
 small tasks ``(folder index, path, item index, item key, import id)`` and return the finished message.
+The same processes also run the date indexing of ordering.py (tasks with a ``run()`` method).
 
 - One task at a time per builder: if a builder dies (libpff SIGSEGV) the item it held is known
   exactly; the caller marks it "libpff crash" and the builder is respawned.
@@ -34,6 +35,11 @@ def default_processes() -> int:
             return max(0, int(v))
         except ValueError:
             pass
+    return machine_default()
+
+
+def machine_default() -> int:
+    """Builder count without BUILD_PROCESSES: min(cpu_count - 1, 8), at least 1."""
     return max(1, min((os.cpu_count() or 2) - 1, 8))
 
 
@@ -63,7 +69,7 @@ class BuildTask:
 
 @dataclass
 class BuildEvent:
-    task: BuildTask
+    task: BuildTask               # or any task with run() (ordering.IndexTask)
     result: dict | None = None    # see build_one()
     crashed: int | None = None    # exit code of the builder that died holding this task (< 0: signal)
 
@@ -150,7 +156,8 @@ def _builder_main(conn, pst_path: str, engine_module: str, in_child: bool, paren
             return
         if task is None:
             return
-        conn.send(build_one(eng, pst, folders, task))
+        run = getattr(task, "run", None)  # other read-only tasks (e.g. ordering.IndexTask) carry their code
+        conn.send(run(eng, pst, folders) if run is not None else build_one(eng, pst, folders, task))
 
 
 # ------------------------------------------------------------------ job process side
@@ -159,17 +166,21 @@ class BuilderError(Exception):
 
 
 class _Slot:
-    __slots__ = ("proc", "conn", "task", "ready")
+    __slots__ = ("proc", "conn", "task", "ready", "retire")
 
     def __init__(self):
         self.proc = None
         self.conn = None
         self.task: BuildTask | None = None
         self.ready = False
+        self.retire = False  # shrink requested: no new task, leaves once its current task is reported
 
 
 class BuilderPool:
-    """N builder processes, at most one task each. wait() returns BuildEvents (result or crash)."""
+    """N builder processes, at most one task each. wait() returns BuildEvents (result or crash).
+
+    resize(n): growing starts processes; shrinking retires idle builders at once and busy ones only after
+    their current task's result (or crash) has been reported by wait(): no task is lost or built twice."""
 
     def __init__(self, pst_path: str, n: int, in_child: bool, engine_module: str | None = None):
         if engine_module is None:
@@ -179,10 +190,13 @@ class BuilderPool:
         self.engine_module = engine_module
         self.in_child = in_child
         self.ctx = multiprocessing.get_context("spawn")
-        self.slots = [_Slot() for _ in range(max(1, n))]
+        self.slots: list[_Slot] = []
+        self._leaving: list[_Slot] = []  # retired builders asked to exit, reaped lazily
         self.idle_deaths = 0
-        for s in self.slots:
-            self._start(s)
+        self._busy_t = 0.0               # sum over time of busy builders (utilisation)
+        self._cap_t = 0.0                # sum over time of builders
+        self._last_t = time.monotonic()
+        self.resize(max(1, n))
 
     def _start(self, s: _Slot) -> None:
         parent, child = self.ctx.Pipe(duplex=True)
@@ -204,12 +218,79 @@ class BuilderPool:
             s.proc.join()
         return s.proc.exitcode
 
+    def _active(self) -> list[_Slot]:
+        return [s for s in self.slots if not s.retire]
+
     @property
     def size(self) -> int:
-        return len(self.slots)
+        """Current (target) number of builders: retiring ones excluded."""
+        return len(self._active())
+
+    def resize(self, n: int) -> None:
+        n = max(1, int(n))
+        self._account()
+        active = self._active()
+        if n > len(active):
+            # cancel pending retirements first (busy builders asked to leave), then start new processes
+            for s in self.slots:
+                if s.retire and len(active) < n:
+                    s.retire = False
+                    active.append(s)
+            while len(active) < n:
+                s = _Slot()
+                self._start(s)
+                self.slots.append(s)
+                active.append(s)
+            return
+        surplus = len(active) - n
+        for s in sorted(active, key=lambda x: x.task is not None):  # idle builders leave first
+            if surplus <= 0:
+                break
+            s.retire = True
+            surplus -= 1
+            if s.task is None:
+                self._dismiss(s)
+
+    def _dismiss(self, s: _Slot) -> None:
+        """Retired builder with nothing in hand: asked to exit, removed from the pool."""
+        try:
+            s.conn.send(None)
+        except Exception:  # noqa: BLE001
+            pass
+        self.slots.remove(s)
+        self._leaving.append(s)
+
+    def _reap_leaving(self, force: bool = False) -> None:
+        for s in list(self._leaving):
+            if force or not s.proc.is_alive():
+                if force and s.proc.is_alive():
+                    s.proc.join(1.0)
+                    if s.proc.exitcode is None:
+                        s.proc.kill()
+                s.proc.join()
+                try:
+                    s.conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._leaving.remove(s)
+
+    def _account(self) -> None:
+        now = time.monotonic()
+        dt = now - self._last_t
+        self._last_t = now
+        if dt > 0:
+            self._busy_t += dt * self.in_flight()
+            self._cap_t += dt * max(1, self.size)
+
+    def take_utilisation(self) -> float | None:
+        """Mean busy fraction of the builders since the previous call (None if no time elapsed)."""
+        self._account()
+        u = self._busy_t / self._cap_t if self._cap_t > 0 else None
+        self._busy_t = self._cap_t = 0.0
+        return None if u is None else min(1.0, u)
 
     def can_dispatch(self) -> bool:
-        return any(s.task is None for s in self.slots)
+        return any(s.task is None and not s.retire for s in self.slots)
 
     def busy(self) -> bool:
         return any(s.task is not None for s in self.slots)
@@ -218,7 +299,8 @@ class BuilderPool:
         return sum(s.task is not None for s in self.slots)
 
     def dispatch(self, task: BuildTask) -> None:
-        s = next(s for s in self.slots if s.task is None)
+        self._account()
+        s = next(s for s in self.slots if s.task is None and not s.retire)
         meta, task.meta = task.meta, None
         try:
             s.conn.send(task)
@@ -229,6 +311,7 @@ class BuilderPool:
 
     def wait(self, timeout: float) -> list[BuildEvent]:
         """Events of finished/crashed tasks (possibly none after timeout). Dead builders are respawned."""
+        self._reap_leaving()
         watch = {}
         for s in self.slots:
             watch[s.conn] = s
@@ -238,6 +321,7 @@ class BuilderPool:
             ready = multiprocessing.connection.wait(list(watch), timeout)
         except OSError:
             ready = list(watch)
+        self._account()
         seen = set()
         for obj in ready:
             s = watch[obj]
@@ -268,11 +352,17 @@ class BuilderPool:
             task, s.task = s.task, None
             if task is not None:
                 events.append(BuildEvent(task, crashed=rc))
-            else:
+            elif not s.retire:
                 self.idle_deaths += 1
                 if self.idle_deaths > 3 * len(self.slots) + 3:
                     raise BuilderError(f"builder processes keep dying at start (exit {rc})")
-            self._start(s)
+            if s.retire:
+                self.slots.remove(s)  # retiring: not respawned
+            else:
+                self._start(s)
+            return
+        if s.retire and s.task is None:
+            self._dismiss(s)  # its last task has just been reported
 
     def close(self) -> None:
         """Stops every builder at once: in-flight builds are discarded (nothing was recorded for them)."""
@@ -299,3 +389,4 @@ class BuilderPool:
             except Exception:  # noqa: BLE001
                 pass
             s.task = None
+        self._reap_leaving(force=True)

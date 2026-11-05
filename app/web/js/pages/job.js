@@ -34,6 +34,7 @@ export default async function (root, { params }) {
           mini('Items', `${fmtNum(t.done)} / ${fmtNum(t.total)}`), mini('Errors', fmtNum(t.errors), t.errors ? 'bad' : ''),
           mini(run ? 'Rate' : 'Average rate', job.rate != null ? `${Number(job.rate).toFixed(1)} items/s` : '—'), mini('Time left', run ? fmtDur(job.eta) : '—'),
           mini('Started', fmtDate(job.started_at)), mini('Finished', fmtDate(job.finished_at))),
+        job.tuning ? h('div', { class: 'tuneline' }, `Builders ${job.tuning.builders} · IMAP connections ${job.tuning.connections} (${job.tuning.mode}${job.tuning.fallback ? ', fallback' : ''})`) : null,
         job.current_folder ? h('div', { class: 'curfolder' }, icon('folder', 16), ' Current folder: ', h('b', null, job.current_folder)) : null,
         job.error ? h('div', { class: 'alert bad' }, icon('alert', 16), ' ', job.error) : null, phaseBars(job)));
   }

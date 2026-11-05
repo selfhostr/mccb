@@ -132,6 +132,8 @@ class PstFile:  # context manager
     def build_contact(self, handle) -> DavObject | None
     def build_event(self, handle) -> DavObject | None    # appointment, recurrence if possible (RRULE), attendees, reminder
     def scan(self) -> dict    # {'folders':[{path,kind,count}], 'totals':{'mail':n,'contacts':n,'calendar':n}, 'errors':[...]}
+    def item_date(self, handle, kind: str) -> datetime | None  # optional: sort date, cheap (no MIME build);
+        # kind 'mail' (delivery > client submit > creation) | 'event' (start) | 'contact' (last modification > creation)
 
 def verify_message(built: BuiltMessage, handle) -> list[str]   # blocking errors (empty = OK)
 def check_pst_signature(path: str) -> bool
@@ -147,7 +149,9 @@ Bounded memory: never load the whole PST; read attachments in blocks if possible
   fresh session cookie is returned for the caller.
 - Servers: `GET/POST /api/servers`, `GET/PUT/DELETE /api/servers/{id}`, `POST /api/servers/{id}/test`
   Server = `{id,name,imap_host,imap_port,imap_security:'ssl'|'starttls'|'none',verify_tls,`
-  `root_folder:str|null,caldav_url:str|null,carddav_url:str|null,dav_enabled:bool,workers:int,notes}`
+  `root_folder:str|null,caldav_url:str|null,carddav_url:str|null,dav_enabled:bool,workers:int,notes,`
+  `tuning:'auto'|'manual',builders:int|null}` (manual: `workers` IMAP connections, `builders` builder processes, null =
+  machine default; `tuning` omitted on creation = `manual` if `workers` ≠ 4 else `auto`, omitted on update = unchanged)
   (`caldav_url`/`carddav_url`: empty = `.well-known` auto-discovery, otherwise a template with `{email}`, `{user}`, `{domain}`)
 - Accounts: `GET /api/accounts?server_id=`, `POST /api/accounts {server_id,email,password,login?}`,
   `PUT/DELETE /api/accounts/{id}`, `POST /api/accounts/{id}/test` → `{imap:{ok,msg,quota},caldav:{ok,msg},carddav:{ok,msg}}`,
@@ -165,7 +169,7 @@ Bounded memory: never load the whole PST; read attachments in blocks if possible
 - Jobs: `POST /api/runs {account_ids:[...]}` (queues), `POST /api/jobs/{id}/pause|resume|stop|retry`,
   `GET /api/jobs?active=1`, `GET /api/jobs/{id}` → `{id,account_id,status:'queued'|'running'|'paused'|'stopping'|'stopped'|'done'|'done_with_errors'|'failed',`
   `phase:'precheck'|'mail'|'calendar'|'contacts'|'verify',progress:{mail:{done,total,errors},calendar:{...},contacts:{...}},`
-  `current_folder,rate,eta,started_at,finished_at,error}`
+  `current_folder,rate,eta,started_at,finished_at,error,tuning:{mode,builders,connections,fallback}|null}`
   `GET /api/jobs/{id}/log?after=` (lines), `GET /api/jobs/{id}/report` (JSON), `GET /api/jobs/{id}/errors`,
   `POST /api/jobs/{id}/retry-errors`
 - Real time: `GET /api/events` (SSE) emits `job` / `upload` / `pst` / `account` with the full object.

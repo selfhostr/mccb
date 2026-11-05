@@ -27,7 +27,8 @@ class Settings:
         self.cookie_secure = os.environ.get("COOKIE_SECURE", "0") == "1"
         self.engine_module = os.environ.get("PSTMIG_ENGINE", "app.engine")
         self.web_dir = Path(os.environ.get("WEB_DIR", str(Path(__file__).resolve().parent.parent / "web")))
-        self.worker_concurrency = _int("WORKER_CONCURRENCY", 2)
+        # mailboxes migrated in parallel; unset / 0 = auto (tuner.choose_worker_concurrency: cores, memory)
+        self.worker_concurrency = max(0, _int("WORKER_CONCURRENCY", 0))
         self.verify_sample = _int("VERIFY_SAMPLE", 20)
         self.max_retries = _int("IMAP_MAX_RETRIES", 5)
         self.heartbeat_stale = _int("WORKER_STALE_SECONDS", 60)

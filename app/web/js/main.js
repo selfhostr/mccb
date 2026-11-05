@@ -4,6 +4,8 @@ import './uploader.js';
 import { hasActiveUploads } from './uploader.js';
 
 const app = document.getElementById('app');
+let appVersion = '';
+get('/version', { noAuthRedirect: true }).then(r => { appVersion = r.version ? 'v' + r.version : ''; document.querySelectorAll('.ver').forEach(e => { e.textContent = appVersion; }); }).catch(() => {});
 let cleanup = null, me = null, sseOk = false, routeSeq = 0;
 
 const routes = [
@@ -26,7 +28,7 @@ function shell() {
     h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('logo', 18)), h('div', null, h('b', null, 'PST Migrator'), h('small', null, 'PST → IMAP / DAV'))),
     h('nav', null, nav.map(([k, t, i, href]) => h('a', { href, 'data-nav': k }, icon(i), h('span', null, t)))),
     h('div', { class: 'side-foot' }, dot, h('span', { id: 'livetxt' }, 'Connecting…'),
-      h('span', { class: 'sp' }),
+      h('span', { class: 'sp' }), h('span', { class: 'ver' }, appVersion),
       h('button', { class: 'icon-btn', title: 'Sign out', onClick: async () => { try { await post('/logout'); } catch {} stopEvents(); showLogin(); } }, icon('out', 16))));
   const top = h('header', { class: 'topbar' }, h('button', { class: 'icon-btn', onClick: () => document.body.classList.toggle('navopen') }, icon('menu')), h('b', null, 'PST Migrator'));
   app.append(h('div', { class: 'layout' }, top, side, content));
@@ -73,7 +75,7 @@ function showLogin(msg) {
   } },
     h('div', { class: 'logo big' }, icon('logo', 28)), h('h1', null, 'PST Migrator'),
     h('p', { class: 'muted' }, 'Migrate PST mailboxes to IMAP, CalDAV and CardDAV'), pw, err,
-    btn('Sign in', { kind: 'primary', type: 'submit' }));
+    btn('Sign in', { kind: 'primary', type: 'submit' }), h('small', { class: 'ver' }, appVersion));
   app.append(h('div', { class: 'login' }, form));
 }
 

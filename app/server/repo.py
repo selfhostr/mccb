@@ -21,6 +21,8 @@ def server_view(r) -> dict:
         "root_folder": r["root_folder"] or None, "caldav_url": r["caldav_url"] or None,
         "carddav_url": r["carddav_url"] or None, "dav_enabled": bool(r["dav_enabled"]),
         "workers": r["workers"], "notes": r["notes"] or "",
+        "tuning": (r["tuning"] if "tuning" in r.keys() else None) or "auto",
+        "builders": r["builders"] if "builders" in r.keys() else None,
     }
 
 
@@ -39,6 +41,8 @@ def job_view(r) -> dict:
         "eta": r["eta"],
         "started_at": r["started_at"], "finished_at": r["finished_at"], "error": r["error"],
         "mode": r["mode"], "created_at": r["created_at"],
+        # current pipeline sizes {mode: auto|manual, builders, connections, fallback} (None before the job starts)
+        "tuning": db.jload(r["tuning"], None) if "tuning" in r.keys() else None,
     }
 
 

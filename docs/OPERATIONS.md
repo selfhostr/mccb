@@ -109,8 +109,10 @@ They are defined in `.env` (read by the `web` and `worker` services). The file i
 | `SECRET_KEY` | *(empty)* | Key used to encrypt mailbox passwords and sign sessions. Empty: generated in `data/secret.key`. |
 | `UPLOAD_CHUNK_SIZE` | `33554432` (32 MiB) | Upload chunk size, in bytes (16 to 64 MiB recommended). **Do not change it during a migration**, see [resuming](#how-resuming-works). |
 | `UPLOAD_DISK_MARGIN` | `536870912` (512 MiB) | Free disk space margin required on top of the PST size. |
-| `WORKER_CONCURRENCY` | `2` | Number of mailboxes migrated simultaneously by the worker. |
-| `BUILD_PROCESSES` | min(CPUs − 1, 8) | Processes building MIME messages for one mailbox (each opens the PST read-only). A builder killed by a libpff crash marks its item "libpff crash" and is restarted; crashes count towards `MAX_CHILD_CRASHES`. `0` = build inside the job process (previous behaviour). Total CPU use is about `WORKER_CONCURRENCY` × `BUILD_PROCESSES`. |
+| `WORKER_CONCURRENCY` | auto | Number of mailboxes migrated simultaneously by the worker. Unset or `0`: chosen from the usable cores (cgroup-aware) and the free memory (2 cores and 512 MB per job, at most 4, at most the jobs waiting). |
+| `BUILD_PROCESSES` | per server tuning | When set, forces in both tuning modes the number of processes building MIME messages for one mailbox (each opens the PST read-only). A builder killed by a libpff crash marks its item "libpff crash" and is restarted; crashes count towards `MAX_CHILD_CRASHES`. `0` = build inside the job process (previous behaviour). Total CPU use is about `WORKER_CONCURRENCY` × `BUILD_PROCESSES`. |
+| `AUTOTUNE_BENCH_SECONDS` | `1.5` | Length of the build benchmark run at the start of an auto-tuned job (`0` = none). |
+| `AUTOTUNE_INTERVAL` | `5` | Seconds between two auto-tuning samples during the mail phase. |
 | `BUILD_MAX_INFLIGHT_MB` | `256` | Memory budget for built messages waiting for their APPEND. |
 | `VERIFY_SAMPLE` | `20` | Number of mails re-read for the sample check at the end of a job. |
 | `IMAP_MAX_RETRIES` | `5` | Attempts on temporary IMAP errors (exponential backoff). |
@@ -246,10 +248,20 @@ pass again, skipping what is already `ok`.
 - **IMAP folders.** Names in modified UTF-7, server separator, NAMESPACE prefix honored. Sent,
   Drafts, Trash and Junk are mapped to the server's SPECIAL-USE folders (or found
   by name). With `root_folder`, the whole PST is imported beneath it, with no special mapping.
+- **Import order: newest first.** At the start of the mail phase the job indexes the dates of the
+  mails still to import (delivery time, else client submit time, else creation time — read without
+  building the message, in the builder processes), then imports them **across all folders** from the
+  newest to the oldest; all IMAP folders are created up front. Calendar: by start date, newest first;
+  contacts: by last modification (else creation), newest first. Items without a date come last, ties are
+  broken by item key. The UI shows `Indexing n / total` meanwhile, the log `Indexed N item(s) in X s`.
+  The order is recomputed on each run (deterministic): a resume skips `ok` items, checks `inflight`
+  ones on the server, and continues with the remaining items in the same order. With several IMAP
+  connections, neighbouring messages may be stored a few positions apart. A libpff crash while reading
+  a date only leaves that item without date (imported last); it is not counted as a crash.
 - **Sending.** Parallel APPEND over N connections (server `workers`), reconnect and exponential
   backoff on temporary errors (`IMAP_MAX_RETRIES`). Permanent errors are recorded per
   item. Exceeding the quota fails the job.
-- **Checks.** After each folder, `STATUS MESSAGES` must be at least equal to the number of mails
+- **Checks.** After the mail phase, for each folder, `STATUS MESSAGES` must be at least equal to the number of mails
   sent. At the end of the job, `VERIFY_SAMPLE` mails are re-read by header and compared by hash. DAV
   resources are counted.
 - **Real time.** `GET /api/events` (SSE) relays changes, detected by SQLite triggers
@@ -375,6 +387,27 @@ resumable upload (chunk with wrong hash → 422, resume, identical final file, d
 check), full import, root folder, pause and resume, stop then retry without duplicates, simulated
 crash with `inflight` items and an orphaned job, simulated libpff crash (`PSTMIG_TEST_CRASH`),
 retry of errors only. Without `TEST_IMAP_HOST` or `TEST_DAV_URL`, integration tests are skipped.
+
+## Tuning (builders and IMAP connections)
+
+Each server has a **tuning** mode (server form: Auto / Manual).
+
+- **Manual**: `workers` IMAP APPEND connections and `builders` builder processes (empty = CPUs − 1, max 8).
+- **Auto** (default): at job start the machine is probed (usable cores, free memory, ~1.5 s build benchmark);
+  the builders are the free cores split between the running jobs, the job starts with 4 IMAP connections.
+  During the mail phase a sample is taken every 5 s and the controller adjusts both counts: more connections
+  while built messages wait for an APPEND slot and it pays off, more builders while they are the bottleneck and
+  CPU is idle, connections halved on a transient server error ([LIMIT], [UNAVAILABLE], BYE, refused, timeout),
+  and a latched fallback to 2 builders / 2 connections after repeated errors. Each change is a job log line
+  (`Auto-tune: ...`); the job page shows the current values.
+- Resizing is graceful: a connection or builder leaves only after its current item is finished and recorded;
+  queued items stay queued. Per-item verification and `X-PST-Import-Id` idempotency are unchanged.
+- Upgrade: servers of earlier versions become Auto, except those whose `workers` was not the default (4),
+  which stay Manual with that value.
+
+## Version
+
+The version comes from `app/VERSION` (currently `1.1.0`). Docker builds can override it with `--build-arg VERSION=<tag>` (CI passes the tag) and `--build-arg GIT_SHA=<sha>`; without `VERSION` the app shows `<file>+<sha>` (for example `1.1.0+<sha>`). It is shown in the sidebar footer and on the login screen, returned by `GET /api/version` (public) and `GET /api/health`, and logged at web and worker startup.
 
 ## License
 

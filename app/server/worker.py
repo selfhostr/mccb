@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from . import crash, db, repo
+from . import crash, db, repo, tuner
 from .config import settings
 
 log = logging.getLogger("worker")
@@ -28,7 +28,12 @@ class Worker:
     def __init__(self, concurrency: int | None = None):
         self.host = socket.gethostname()
         self.id = f"{self.host}:{os.getpid()}:{int(time.time())}"
-        self.concurrency = concurrency or settings.worker_concurrency
+        # auto (WORKER_CONCURRENCY unset or 0): recomputed on every tick from the machine probe and the queue;
+        # the cores are then split between the running jobs by each job (tuner.choose_builders)
+        self.auto_concurrency = not (concurrency or settings.worker_concurrency)
+        self.concurrency = concurrency or settings.worker_concurrency or 1
+        self._probe: tuner.MachineProbe | None = None
+        self._probe_t = 0.0
         self.threads: dict[int, threading.Thread] = {}
         self.stop_event = threading.Event()
         self.validating: dict[int, threading.Thread] = {}
@@ -143,6 +148,18 @@ class Worker:
         for t in list(self.threads.values()) + list(self.validating.values()):
             t.join(5)
 
+    def auto_limit(self) -> int:
+        """Jobs to run in parallel in auto mode (no benchmark: cores + available memory, refreshed every 30 s)."""
+        now = time.time()
+        if self._probe is None or now - self._probe_t > 30:
+            self._probe, self._probe_t = tuner.probe_machine(), now
+        queued = db.q1("SELECT COUNT(*) n FROM jobs WHERE status='queued'")["n"]
+        running = len(self.threads)
+        # memory already held by the running jobs is not "available" any more: counted back in
+        mem = self._probe.mem_available_bytes + running * 512 * 1024 * 1024 if self._probe.mem_available_bytes else None
+        return max(1, tuner.choose_worker_concurrency(self._probe.cpus, pending=queued + running,
+                                                      mem_available_bytes=mem))
+
     def tick(self) -> None:
         for jid, t in list(self.threads.items()):
             if not t.is_alive():
@@ -157,6 +174,11 @@ class Worker:
                 self.validating[r["id"]] = t
                 t.start()
         # jobs
+        if self.auto_concurrency:
+            n = self.auto_limit()
+            if n != self.concurrency:
+                log.info("concurrency (auto): %d job(s) in parallel", n)
+                self.concurrency = n
         while len(self.threads) < self.concurrency and not self.stop_event.is_set():
             jid = self.claim()
             if jid is None:
@@ -180,7 +202,8 @@ class Worker:
         db.conn()
         self.recover(startup=True)
         last_recover = time.time()
-        log.info("worker %s started (concurrency %d)", self.id, self.concurrency)
+        log.info("worker %s started (concurrency %s)", self.id,
+                 f"auto, {self.auto_limit()} now" if self.auto_concurrency else self.concurrency)
         while not self.stop_event.is_set():
             try:
                 self.tick()
@@ -211,6 +234,7 @@ def main() -> None:
     if "--healthcheck" in sys.argv:
         sys.exit(healthcheck())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("worker").info("mccb v%s starting (worker)", __import__("app.server.version", fromlist=["get_version"]).get_version())
     w = Worker()
 
     def _stop(*_):

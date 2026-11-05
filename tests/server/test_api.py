@@ -27,7 +27,7 @@ def test_servers_crud(client):
     assert r.status_code == 201
     s = r.json()
     assert set(s) == {"id", "name", "imap_host", "imap_port", "imap_security", "verify_tls", "root_folder",
-                      "caldav_url", "carddav_url", "dav_enabled", "workers", "notes"}
+                      "caldav_url", "carddav_url", "dav_enabled", "workers", "notes", "tuning", "builders"}
     assert s["carddav_url"] == "https://dav/{email}/"
     sid = s["id"]
     assert client.get(f"/api/servers/{sid}").json()["name"] == "Prod"

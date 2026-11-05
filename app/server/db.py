@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS servers (
     dav_enabled INTEGER NOT NULL DEFAULT 1,
     workers INTEGER NOT NULL DEFAULT 4,
     notes TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    tuning TEXT NOT NULL DEFAULT 'auto',
+    builders INTEGER
 );
 CREATE TABLE IF NOT EXISTS psts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +112,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at REAL,
     error TEXT,
     report_path TEXT,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    tuning TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS jobs_account ON jobs(account_id);
@@ -150,14 +153,47 @@ def pst_key_of(pst_row) -> str | None:
     return pst_row["pst_sha"] or f"id:{pst_row['id']}"
 
 
+DEFAULT_WORKERS = 4  # servers.workers default: earlier servers with another value keep manual tuning
+
+
+def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
+    name = ddl.split()[0]
+    if name in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():  # added in the meantime by the other process
+            raise
+
+
+def _migrate_tuning(conn: sqlite3.Connection) -> None:
+    """servers.tuning ('auto' | 'manual') + servers.builders (manual builder count, NULL = machine default).
+    Servers of earlier versions become 'auto', except those whose `workers` differs from the default (4): the
+    administrator chose that value, they stay 'manual' with it. Columns added and values set in ONE
+    transaction (re-checked under the write lock): a concurrent process sees either nothing or everything."""
+    if "tuning" in {r[1] for r in conn.execute("PRAGMA table_info(servers)")}:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if "tuning" not in {r[1] for r in conn.execute("PRAGMA table_info(servers)")}:
+            conn.execute("ALTER TABLE servers ADD COLUMN tuning TEXT NOT NULL DEFAULT 'auto'")
+            if "builders" not in {r[1] for r in conn.execute("PRAGMA table_info(servers)")}:
+                conn.execute("ALTER TABLE servers ADD COLUMN builders INTEGER")
+            conn.execute("UPDATE servers SET tuning = CASE WHEN workers <> ? THEN 'manual' ELSE 'auto' END",
+                         (DEFAULT_WORKERS,))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Migration: items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
-    if "rate_bytes" not in {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}:
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN rate_bytes REAL")  # bytes/s (sliding 60 s)
-        except sqlite3.OperationalError as e:
-            if "duplicate column" not in str(e).lower():  # added in the meantime by the other process
-                raise
+    """Migrations: jobs.rate_bytes, jobs.tuning, servers.tuning/builders, items(pst_id) -> items(pst_key = PST
+    fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
+    _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
+    _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
+    _migrate_tuning(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")

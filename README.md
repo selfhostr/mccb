@@ -19,6 +19,9 @@
 - **Resumable uploads**, built for 50 GB+ PSTs.
 - Every message is **verified**; every language and charset is preserved.
 - **Pause, resume and retry** with no duplicates.
+- **Newest-first import** across all folders (calendar by start date, contacts by last modification).
+- **Auto or manual tuning** of builders and IMAP connections per server (auto by default); see [OPERATIONS](docs/OPERATIONS.md#tuning-builders-and-imap-connections).
+- **Version** shown in the UI and at `/api/version`; see [OPERATIONS](docs/OPERATIONS.md#version).
 
 ## Quick start
 
@@ -49,8 +52,8 @@ All variables are optional (set them in `.env`, see [`.env.example`](.env.exampl
 |----------|---------|---------|
 | `ADMIN_PASSWORD` | generated | UI password; always wins when set |
 | `SECRET_KEY` | generated in `data/secret.key` | Encrypts mailbox passwords, signs sessions |
-| `WORKER_CONCURRENCY` | `2` | Mailboxes migrated in parallel |
-| `BUILD_PROCESSES` | min(CPUs − 1, 8) | Message-builder processes per mailbox (`0` = build in the job process) |
+| `WORKER_CONCURRENCY` | auto | Mailboxes migrated in parallel (auto: from CPUs and free memory) |
+| `BUILD_PROCESSES` | auto | Forces the message-builder processes per mailbox in both tuning modes (`0` = build in the job process) |
 | `UPLOAD_CHUNK_SIZE` | `33554432` | Upload chunk size in bytes; keep constant during a migration |
 | `COOKIE_SECURE` | `0` | `1` behind an HTTPS reverse proxy |
 

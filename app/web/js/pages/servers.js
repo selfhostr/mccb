@@ -2,7 +2,8 @@ import { get, post, put, del } from '../api.js';
 import { h, clear, btn, icon, modal, field, toast, confirmBox, empty } from '../ui.js';
 
 const SEC = { ssl: 'Implicit SSL/TLS', starttls: 'STARTTLS', none: 'None (plaintext)' };
-const blank = () => ({ name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 2, notes: '' });
+const blank = () => ({ name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, tuning: 'auto', builders: null, notes: '' });
+const tuningText = s => s.tuning === 'manual' ? `Manual · ${s.workers} IMAP connection${s.workers > 1 ? 's' : ''} · ${s.builders ?? 'default'} builder${s.builders === 1 ? '' : 's'}` : 'Auto';
 
 export default async function (root) {
   let servers = await get('/servers');
@@ -19,7 +20,7 @@ export default async function (root) {
       h('dl', { class: 'kv' }, h('dt', null, 'IMAP'), h('dd', null, `${s.imap_host}:${s.imap_port} · ${SEC[s.imap_security] || s.imap_security}${s.verify_tls ? '' : ' · TLS not verified'}`),
         s.root_folder ? [h('dt', null, 'Root folder'), h('dd', null, s.root_folder)] : null,
         s.dav_enabled ? [h('dt', null, 'CalDAV'), h('dd', { class: 'mono' }, s.caldav_url || 'auto-discovery'), h('dt', null, 'CardDAV'), h('dd', { class: 'mono' }, s.carddav_url || 'auto-discovery')] : null,
-        h('dt', null, 'Workers'), h('dd', null, s.workers)),
+        h('dt', null, 'Tuning'), h('dd', null, tuningText(s))),
       s.notes ? h('p', { class: 'muted small' }, s.notes) : null,
       h('div', { class: 'row gap actions' }, btn('Test', { ico: 'test', onClick: () => test(s) }), btn('Accounts', { ico: 'users', onClick: () => location.hash = '#/accounts?server=' + s.id }),
         h('span', { class: 'sp' }), btn('', { ico: 'edit', title: 'Edit', onClick: () => edit(s) }),
@@ -52,10 +53,21 @@ export default async function (root) {
       h('div', { class: 'help' }, h('b', null, 'Available placeholders'), h('ul', null,
         h('li', null, h('code', null, '{email}'), ' full address (john@example.com)'), h('li', null, h('code', null, '{user}'), ' local part (john)'), h('li', null, h('code', null, '{domain}'), ' domain (example.com)')),
         h('span', null, 'E.g. '), h('code', null, 'https://dav.example.com/{email}/calendar/')));
+    s.tuning = s.tuning === 'manual' ? 'manual' : 'auto';
+    const builders = h('input', { type: 'number', min: 0, max: 32, value: s.builders ?? '', placeholder: 'default', onInput: e => { s.builders = e.target.value === '' ? null : Number(e.target.value); } });
+    const manualBox = h('div', { class: 'cols', hidden: s.tuning !== 'manual' },
+      field('IMAP connections', I('workers', { type: 'number', min: 1, max: 32 })),
+      field('Builder processes', builders, 'Empty = CPUs − 1.'));
+    const segBtn = v => h('button', { type: 'button', class: s.tuning === v ? 'on' : '', onClick: () => setTuning(v) }, v === 'auto' ? 'Auto' : 'Manual');
+    const tuneSeg = h('div', { class: 'seg', role: 'group' }, segBtn('auto'), segBtn('manual'));
+    function setTuning(v) {
+      s.tuning = v; manualBox.hidden = v !== 'manual';
+      tuneSeg.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', ['auto', 'manual'][i] === v));
+    }
     const body = h('form', { class: 'form', onSubmit: e => e.preventDefault() },
       field('Name', I('name', { required: true, placeholder: 'Production' })),
       h('div', { class: 'cols' }, field('IMAP host', I('imap_host', { required: true, placeholder: 'imap.example.com' })), field('Port', port)),
-      h('div', { class: 'cols' }, field('Security', sec), field('Parallel workers', I('workers', { type: 'number', min: 1, max: 16 }))),
+      h('div', { class: 'cols' }, field('Security', sec), field('Tuning', tuneSeg)), manualBox,
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s.verify_tls, onChange: e => s.verify_tls = e.target.checked }), 'Verify TLS certificate'),
       field('IMAP root folder', I('root_folder', { placeholder: 'e.g. PST Import (empty = mailbox root)' }), 'PST folders will be created under this folder.'),
       h('label', { class: 'check' }, dav, 'Enable CalDAV / CardDAV (calendar and contacts)'), davBox,
@@ -64,7 +76,7 @@ export default async function (root) {
       { label: 'Cancel', onClick: c => c() },
       { label: 'Save', kind: 'primary', ico: 'check', onClick: async c => {
         if (!body.reportValidity()) return;
-        const payload = { ...s, root_folder: s.root_folder || null, caldav_url: s.caldav_url || null, carddav_url: s.carddav_url || null, workers: s.workers || 1 };
+        const payload = { ...s, root_folder: s.root_folder || null, caldav_url: s.caldav_url || null, carddav_url: s.carddav_url || null, workers: s.workers || 1, tuning: s.tuning, builders: s.builders ?? null };
         delete payload.id;
         try { isNew ? await post('/servers', payload) : await put('/servers/' + s0.id, payload); toast('Server saved.', 'ok'); c(); reload(); }
         catch (e) { toast(e.message, 'bad'); } } }] });

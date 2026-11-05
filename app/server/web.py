@@ -19,12 +19,13 @@ from . import crash, csvimport, db, preview, repo, uploads
 from .config import settings
 from .dav import DavClient
 from .imap import ImapConn, ImapError, ImapParams
+from .version import get_version
 from .security import (admin_created, check_password, check_session, decrypt, encrypt, ensure_admin_password,
                        make_session, password_from_env, set_admin_password)
 
 log = logging.getLogger("web")
 COOKIE = "psttoimap_session"
-PUBLIC_API = {"/api/login", "/api/health", "/api/logout"}
+PUBLIC_API = {"/api/login", "/api/health", "/api/logout", "/api/version"}
 
 
 
@@ -46,6 +47,7 @@ def _admin_startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_app):
+    log.info("mccb v%s starting (web)", get_version())
     settings.ensure_dirs()
     db.conn()
     _admin_startup()
@@ -134,7 +136,12 @@ def health():
     hb = db.kv_get("worker_heartbeat")
     age = (time.time() - float(hb)) if hb else None
     return {"ok": True, "worker": {"alive": age is not None and age < 60, "last_seen": float(hb) if hb else None},
-            "time": time.time()}
+            "time": time.time(), "version": get_version()}
+
+
+@app.get("/api/version")
+def version():
+    return {"version": get_version()}
 
 
 # ======================================================================= servers
@@ -148,8 +155,13 @@ class ServerIn(BaseModel):
     caldav_url: str | None = None
     carddav_url: str | None = None
     dav_enabled: bool = True
-    workers: int = Field(4, ge=1, le=32)
+    workers: int = Field(4, ge=1, le=32)  # IMAP APPEND connections (manual tuning)
     notes: str = ""
+    # "auto": builders / IMAP connections chosen and adjusted during the job; "manual": `workers` connections,
+    # `builders` builder processes (None = machine default). Omitted on creation: "manual" when `workers` is
+    # not the default (API clients of earlier versions chose it), else "auto". Omitted on update: unchanged.
+    tuning: str | None = Field(None, pattern="^(auto|manual)$")
+    builders: int | None = Field(None, ge=0, le=32)
 
 
 def _server_or_404(sid: int):
@@ -159,10 +171,18 @@ def _server_or_404(sid: int):
     return r
 
 
-def _srv_values(s: ServerIn) -> tuple:
+def _srv_values(s: ServerIn, current=None) -> tuple:
+    given = s.model_fields_set
+    if s.tuning is not None:
+        tuning = s.tuning
+    elif current is not None:
+        tuning = current["tuning"] or "auto"
+    else:
+        tuning = "manual" if "workers" in given and s.workers != db.DEFAULT_WORKERS else "auto"
+    builders = s.builders if ("builders" in given or current is None) else current["builders"]
     return (s.name.strip(), s.imap_host.strip(), s.imap_port, s.imap_security, int(s.verify_tls),
             (s.root_folder or "").strip() or None, (s.caldav_url or "").strip() or None,
-            (s.carddav_url or "").strip() or None, int(s.dav_enabled), s.workers, s.notes or "")
+            (s.carddav_url or "").strip() or None, int(s.dav_enabled), s.workers, s.notes or "", tuning, builders)
 
 
 @app.get("/api/servers")
@@ -173,7 +193,7 @@ def list_servers():
 @app.post("/api/servers", status_code=201)
 def create_server(s: ServerIn):
     cur = db.ex("INSERT INTO servers(name,imap_host,imap_port,imap_security,verify_tls,root_folder,caldav_url,"
-                "carddav_url,dav_enabled,workers,notes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "carddav_url,dav_enabled,workers,notes,tuning,builders,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (*_srv_values(s), time.time()))
     return repo.get_server(cur.lastrowid)
 
@@ -185,9 +205,9 @@ def get_server(sid: int):
 
 @app.put("/api/servers/{sid}")
 def update_server(sid: int, s: ServerIn):
-    _server_or_404(sid)
+    cur = _server_or_404(sid)
     db.ex("UPDATE servers SET name=?,imap_host=?,imap_port=?,imap_security=?,verify_tls=?,root_folder=?,caldav_url=?,"
-          "carddav_url=?,dav_enabled=?,workers=?,notes=? WHERE id=?", (*_srv_values(s), sid))
+          "carddav_url=?,dav_enabled=?,workers=?,notes=?,tuning=?,builders=? WHERE id=?", (*_srv_values(s, cur), sid))
     return repo.get_server(sid)
 
 

@@ -355,6 +355,51 @@ class PstFile:
                 key = "%d-x%d" % (fnid, i)
                 yield i, key, ItemHandle(self, None, folder, i, key, error=ex)
 
+    # sort dates ---------------------------------------------------------------
+    # pypff getters (one C lookup each, no PropBag / MIME work) per tag, fallback: record-set scan
+    _FAST_TIME = {mapi.PR_MESSAGE_DELIVERY_TIME: "get_delivery_time_as_integer",
+                  mapi.PR_CLIENT_SUBMIT_TIME: "get_client_submit_time_as_integer",
+                  mapi.PR_CREATION_TIME: "get_creation_time_as_integer",
+                  mapi.PR_LAST_MODIFICATION_TIME: "get_modification_time_as_integer"}
+    _DATE_TAGS = {"mail": (mapi.PR_MESSAGE_DELIVERY_TIME, mapi.PR_CLIENT_SUBMIT_TIME, mapi.PR_CREATION_TIME),
+                  "contact": (mapi.PR_LAST_MODIFICATION_TIME, mapi.PR_CREATION_TIME)}
+
+    def item_date(self, handle, kind: str = "mail") -> datetime | None:
+        """Sort date of an item, read cheaply (no body, no MIME): mail = delivery > client submit > creation;
+        event = start; contact = last modification > creation. None when unknown/unreadable."""
+        h = self._wrap(handle)
+        item = h.item
+        if h.error is not None or item is None:
+            return None
+        try:
+            if kind == "event":
+                bag = self._bag(item)
+                return (bag.time((mapi.PSETID_APPOINTMENT, mapi.LID_START_WHOLE))
+                        or bag.time((mapi.PSETID_COMMON, mapi.LID_COMMON_START)) or bag.time(mapi.PR_START_DATE))
+            tags = self._DATE_TAGS.get(kind, self._DATE_TAGS["mail"])
+            slow = False
+            for tag in tags:
+                fn = getattr(item, self._FAST_TIME[tag], None)
+                if fn is None:
+                    slow = True
+                    break
+                try:
+                    d = mapi.filetime_to_dt(fn() or 0)
+                except Exception:  # noqa: BLE001 - property absent/unreadable for this getter
+                    d = None
+                if d:
+                    return d
+            if not slow:
+                return None
+            bag = self._bag(item)
+            for tag in tags:
+                d = bag.time(tag)
+                if d:
+                    return d
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
     def _wrap(self, handle):
         if isinstance(handle, ItemHandle):
             return handle

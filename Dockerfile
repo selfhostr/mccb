@@ -18,6 +18,11 @@ COPY tests/server/requirements-dev.txt /app/tests/server/requirements-dev.txt
 RUN if [ "$DEV" = "1" ]; then pip install -r tests/server/requirements-dev.txt; fi
 
 COPY . /app
+# Version: APP_VERSION = VERSION if given; otherwise app/VERSION (+GIT_SHA if given), resolved by
+# app/server/version.py from the (possibly empty) variables below.
+ARG VERSION=
+ARG GIT_SHA=
+ENV APP_VERSION=${VERSION} GIT_SHA=${GIT_SHA}
 RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 22362

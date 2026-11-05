@@ -96,7 +96,7 @@ def test_default_processes(monkeypatch):
 @needs_imap
 def test_parallel_import_pause_resume_no_duplicates(client, env, monkeypatch):
     monkeypatch.setenv("BUILD_PROCESSES", "4")
-    fake_engine.CONFIG.update(folders=[INBOX, SUB], delay=0.05)
+    fake_engine.CONFIG.update(folders=[INBOX, SUB], delay=0.2)
     aid, email = setup_account(client, env)
     jid = run(client, aid)
     with WorkerThread():
@@ -157,7 +157,7 @@ def test_inprocess_mode_and_cid_warnings_aggregated(client, env, monkeypatch):
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"), cond=lambda j: j["finished_at"])
     assert j["status"] == "done", _log(client, jid)
     log = _log(client, jid)
-    assert "builder process" not in log
+    assert "builder process" not in log and "1 indexing process(es)" in log  # dates read out of process
     assert "Boîte de réception: 3 message(s) reference images missing from the PST (quoted replies) — harmless" in log
     assert "cid-unresolved" not in log and log.count("rtf-converted") == 2
     rep = client.get(f"/api/jobs/{jid}/report").json()
