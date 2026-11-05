@@ -1,7 +1,7 @@
-"""Worker : exécute la file de jobs (DB) et la validation des PST. Lancer : python -m app.server.worker
+"""Worker: runs the job queue (DB) and PST validation. Run: python -m app.server.worker
 
-Chaque job et chaque analyse de PST tourne dans un sous-processus (`python -m app.server.child`) : un crash
-natif de libpff ne tue que ce sous-processus ; le worker (superviseur) applique la reprise (voir crash.py)."""
+Each job and each PST analysis runs in a subprocess (`python -m app.server.child`): a native
+libpff crash only kills that subprocess; the worker (supervisor) applies recovery (see crash.py)."""
 from __future__ import annotations
 
 import logging
@@ -20,7 +20,7 @@ from .config import settings
 
 log = logging.getLogger("worker")
 HEARTBEAT_FILE = "worker.heartbeat"
-ROOT = Path(__file__).resolve().parents[2]  # dossier contenant le paquet `app`
+ROOT = Path(__file__).resolve().parents[2]  # directory containing the `app` package
 TERMINAL = ("done", "done_with_errors", "failed", "stopped")
 
 
@@ -35,7 +35,7 @@ class Worker:
         self.procs: dict[tuple[str, int], subprocess.Popen] = {}
         self.lock = threading.Lock()
 
-    # -------------------------------------------------- reprise après crash
+    # -------------------------------------------------- crash recovery
     def recover(self, startup: bool = False) -> None:
         now = time.time()
         stale = now - settings.heartbeat_stale
@@ -49,15 +49,15 @@ class Worker:
                 if r["status"] == "stopping":
                     db.ex("UPDATE jobs SET status='stopped', worker_id=NULL, finished_at=? WHERE id=? AND status='stopping'",
                           (now, r["id"]))
-                    repo.log(r["id"], "Arrêt finalisé après interruption du worker", "warning")
+                    repo.log(r["id"], "Stop finalized after worker interruption", "warning")
                 else:
                     db.ex("UPDATE jobs SET status='queued', worker_id=NULL WHERE id=? AND status='running'", (r["id"],))
-                    repo.log(r["id"], "Job orphelin (worker interrompu) : remis en file, reprise sans doublon", "warning")
-        # paused jobs encore attachés à un worker mort
+                    repo.log(r["id"], "Orphan job (worker interrupted): re-queued, resuming without duplicates", "warning")
+        # paused jobs still attached to a dead worker
         db.ex("UPDATE jobs SET worker_id=NULL WHERE status='paused' AND worker_id IS NOT NULL AND COALESCE(heartbeat,0) < ?",
               (stale,))
 
-    # -------------------------------------------------- prise de job
+    # -------------------------------------------------- job pickup
     def claim(self) -> int | None:
         now = time.time()
         with db.tx() as c:
@@ -71,7 +71,7 @@ class Worker:
                       "finished_at=NULL, error=NULL WHERE id=? AND status='queued'", (self.id, now, now, r["id"]))
             return r["id"]
 
-    # -------------------------------------------------- sous-processus isolés
+    # -------------------------------------------------- isolated subprocesses
     def _spawn(self, args: list[str]) -> subprocess.Popen:
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([str(ROOT)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -79,11 +79,11 @@ class Worker:
         return subprocess.Popen([sys.executable, "-m", "app.server.child", *args], cwd=str(ROOT), env=env)
 
     def _supervise(self, key: tuple[str, int], args: list[str]) -> int | None:
-        """Lance le sous-processus et attend sa fin. None = arrêt du worker (pas un crash)."""
+        """Launches the subprocess and waits for its end. None = worker shutdown (not a crash)."""
         try:
             p = self._spawn(args)
         except OSError as e:
-            log.error("lancement du sous-processus %s impossible : %s", key, e)
+            log.error("failed to launch subprocess %s: %s", key, e)
             raise
         with self.lock:
             self.procs[key] = p
@@ -93,7 +93,7 @@ class Worker:
             with self.lock:
                 self.procs.pop(key, None)
         if self.stop_event.is_set() and rc != 0:
-            return None  # terminé par l'arrêt du worker : le job est remis en file par run_forever
+            return None  # terminated by worker shutdown: the job is re-queued by run_forever
         return rc
 
     def _run_job(self, job_id: int) -> None:
@@ -107,8 +107,8 @@ class Worker:
                     crash.reset_crashes(job_id)
                 return
             st = crash.handle_job_crash(job_id, rc)
-            log.warning("job %s : sous-processus mort (%s) → %s", job_id, crash.describe_rc(rc), st)
-        except Exception as e:  # ne jamais tuer le worker
+            log.warning("job %s: subprocess died (%s) -> %s", job_id, crash.describe_rc(rc), st)
+        except Exception as e:  # never kill the worker
             log.exception("job %s", job_id)
             db.ex("UPDATE jobs SET status='failed', error=?, worker_id=NULL, finished_at=? WHERE id=?",
                   (f"{type(e).__name__}: {e}", time.time(), job_id))
@@ -117,14 +117,14 @@ class Worker:
         try:
             rc = self._supervise(("validate", pid), ["validate", str(pid)])
             if rc:
-                log.warning("validation %s : sous-processus mort (%s)", pid, crash.describe_rc(rc))
+                log.warning("validation %s: subprocess died (%s)", pid, crash.describe_rc(rc))
                 crash.handle_validate_crash(pid, rc)
         except Exception as e:
             log.exception("validation %s", pid)
             db.ex("UPDATE psts SET status='invalid', error=? WHERE id=? AND status='validating'", (str(e), pid))
 
     def terminate_children(self) -> None:
-        """SIGTERM aux sous-processus, SIGKILL après CHILD_TERM_GRACE secondes."""
+        """SIGTERM to subprocesses, SIGKILL after CHILD_TERM_GRACE seconds."""
         with self.lock:
             procs = list(self.procs.values())
         for p in procs:
@@ -137,7 +137,7 @@ class Worker:
             try:
                 p.wait(max(0.1, deadline - time.time()))
             except subprocess.TimeoutExpired:
-                log.warning("sous-processus %s : SIGKILL", p.pid)
+                log.warning("subprocess %s: SIGKILL", p.pid)
                 p.kill()
                 p.wait()
         for t in list(self.threads.values()) + list(self.validating.values()):
@@ -150,7 +150,7 @@ class Worker:
         for pid, t in list(self.validating.items()):
             if not t.is_alive():
                 del self.validating[pid]
-        # validations PST en attente
+        # pending PST validations
         for r in db.q("SELECT id FROM psts WHERE status='validating'"):
             if r["id"] not in self.validating and len(self.validating) < 2:
                 t = threading.Thread(target=self._validate, args=(r["id"],), daemon=True, name=f"validate-{r['id']}")
@@ -164,7 +164,7 @@ class Worker:
             t = threading.Thread(target=self._run_job, args=(jid,), daemon=True, name=f"job-{jid}")
             self.threads[jid] = t
             t.start()
-        # heartbeat des jobs (y compris pendant une longue opération réseau)
+        # job heartbeat (including during a long network operation)
         if self.threads:
             ids = list(self.threads)
             db.ex(f"UPDATE jobs SET heartbeat=? WHERE worker_id=? AND id IN ({','.join('?' * len(ids))})",
@@ -180,7 +180,7 @@ class Worker:
         db.conn()
         self.recover(startup=True)
         last_recover = time.time()
-        log.info("worker %s démarré (concurrence %d)", self.id, self.concurrency)
+        log.info("worker %s started (concurrency %d)", self.id, self.concurrency)
         while not self.stop_event.is_set():
             try:
                 self.tick()
@@ -188,15 +188,15 @@ class Worker:
                     self.recover()
                     last_recover = time.time()
             except Exception:
-                log.exception("boucle worker")
+                log.exception("worker loop")
             self.stop_event.wait(poll)
-        # arrêt propre : sous-processus terminés, puis jobs en cours remis en file (reprise idempotente)
+        # clean shutdown: subprocesses terminated, then running jobs re-queued (idempotent resume)
         self.terminate_children()
         for jid in list(self.threads):
             cur = db.ex("UPDATE jobs SET status='queued', worker_id=NULL WHERE id=? AND status='running' AND worker_id=?",
                         (jid, self.id))
-            if cur.rowcount:  # pas pour un job qui venait de se terminer
-                repo.log(jid, "Worker arrêté : job remis en file", "warning")
+            if cur.rowcount:  # not for a job that had just finished
+                repo.log(jid, "Worker stopped: job re-queued", "warning")
 
 
 def healthcheck() -> int:

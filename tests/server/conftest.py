@@ -27,7 +27,7 @@ def env(tmp_path, monkeypatch):
     db.reset()
     security.reset_cache()
     from tests.server import fake_engine
-    fake_engine.CONFIG.save()  # état courant visible des sous-processus du worker
+    fake_engine.CONFIG.save()  # current state visible to the worker subprocesses
     yield settings
     db.reset()
 

@@ -1,0 +1,23 @@
+name: Tests
+
+# Independent from the image build: a failure here never blocks the Docker image workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite (engine, server, e2e)
+        run: docker compose -f docker-compose.test.yml run --rm --build tests
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v

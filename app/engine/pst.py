@@ -272,13 +272,13 @@ class PstFile:
             for child in self._children(folder):
                 try:
                     b = self._bag(child)
-                    name = b.string(mapi.PR_DISPLAY_NAME) or child.name or "(sans nom)"
+                    name = b.string(mapi.PR_DISPLAY_NAME) or child.name or "(unnamed)"
                     cc = b.string(mapi.PR_CONTAINER_CLASS) or ""
                     nid = child.identifier
                 except Exception as ex:  # noqa: BLE001
                     self._errors.append("folder unreadable under %s: %s" % ("/".join(path) or "/", ex))
                     continue
-                name = name.replace("\x00", "").strip() or "(sans nom)"
+                name = name.replace("\x00", "").strip() or "(unnamed)"
                 kind = folder_kind(cc)
                 if kind == "mail" and cc.lower() in ("", "ipf.note"):
                     kind = self._sniff_kind(child) or kind

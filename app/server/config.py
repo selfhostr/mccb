@@ -1,4 +1,4 @@
-"""Configuration (variables d'environnement)."""
+"""Configuration (environment variables)."""
 from __future__ import annotations
 
 import os
@@ -31,9 +31,9 @@ class Settings:
         self.verify_sample = _int("VERIFY_SAMPLE", 20)
         self.max_retries = _int("IMAP_MAX_RETRIES", 5)
         self.heartbeat_stale = _int("WORKER_STALE_SECONDS", 60)
-        # crashs natifs (libpff) tolérés par job avant échec définitif
+        # native crashes (libpff) tolerated per job before permanent failure
         self.max_child_crashes = max(1, _int("MAX_CHILD_CRASHES", 3))
-        # délai laissé aux sous-processus pour s'arrêter (SIGTERM) avant SIGKILL
+        # time allowed for subprocesses to stop (SIGTERM) before SIGKILL
         self.child_term_grace = _int("CHILD_TERM_GRACE", 20)
 
     @property

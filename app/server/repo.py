@@ -1,4 +1,4 @@
-"""Lecture/sérialisation des objets exposés par l'API (format du Contrat API)."""
+"""Reading/serialization of the objects exposed by the API (API Contract format)."""
 from __future__ import annotations
 
 import time

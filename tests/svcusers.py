@@ -1,9 +1,9 @@
-"""Utilisateurs de test des services d'intégration (docker-compose.test.yml).
+"""Test users for the integration services (docker-compose.test.yml).
 
-GreenMail tourne AVEC authentification : chaque utilisateur est créé via son API REST
-(`TEST_GREENMAIL_API`, POST /api/user). Radicale utilise un fichier htpasswd (mots de passe en clair)
-partagé par volume (`TEST_DAV_HTPASSWD`) ; Radicale relit le fichier à chaque authentification.
-Sans ces variables (services lancés à la main, auth désactivée), les fonctions ne font rien.
+GreenMail runs WITH authentication: each user is created via its REST API
+(`TEST_GREENMAIL_API`, POST /api/user). Radicale uses an htpasswd file (plaintext passwords)
+shared via a volume (`TEST_DAV_HTPASSWD`); Radicale re-reads the file on each authentication.
+Without these variables (services started by hand, auth disabled), the functions do nothing.
 """
 from __future__ import annotations
 
@@ -19,14 +19,14 @@ def new_email(prefix: str = "u") -> str:
 
 
 def create_user(email: str | None = None, password: str = "pw", prefix: str = "u") -> str:
-    """Crée l'utilisateur (login = adresse) sur GreenMail et Radicale. Retourne l'adresse."""
+    """Creates the user (login = address) on GreenMail and Radicale. Returns the address."""
     email = email or new_email(prefix)
     api = os.environ.get("TEST_GREENMAIL_API")
     if api:
         import time
 
         import httpx
-        end = time.time() + 90  # démarrage à froid de GreenMail
+        end = time.time() + 90  # GreenMail cold start
         while True:
             try:
                 r = httpx.post(api.rstrip("/") + "/api/user",
@@ -36,7 +36,7 @@ def create_user(email: str | None = None, password: str = "pw", prefix: str = "u
                 if time.time() > end:
                     raise
                 time.sleep(0.5)
-        assert r.status_code == 200, f"GreenMail : création de {email} impossible ({r.status_code} {r.text})"
+        assert r.status_code == 200, f"GreenMail: cannot create {email} ({r.status_code} {r.text})"
     ht = os.environ.get("TEST_DAV_HTPASSWD")
     if ht:
         with _lock:

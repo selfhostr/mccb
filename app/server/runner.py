@@ -1,9 +1,9 @@
-"""Exécution d'un job (= une boîte) : precheck → mail → calendar → contacts → verify.
+"""Job execution (= one mailbox): precheck -> mail -> calendar -> contacts -> verify.
 
-Idempotence : table `items` (account_id, pst_key = empreinte du PST, kind, item_key) ; un mail est marqué
-`inflight` (commité) AVANT son APPEND, puis `ok`/`error`. À la reprise, les `inflight` (et les `error` déjà tentés)
-sont vérifiés par `UID SEARCH HEADER X-PST-Import-Id` + relecture exacte de l'en-tête (`<sha-clé>`).
-DAV : UID déterministes → PUT idempotent.
+Idempotence: `items` table (account_id, pst_key = PST fingerprint, kind, item_key); a mail is marked
+`inflight` (committed) BEFORE its APPEND, then `ok`/`error`. On resume, `inflight` items (and `error` items already tried)
+are checked by `UID SEARCH HEADER X-PST-Import-Id` + exact re-read of the header (`<sha-key>`).
+DAV: deterministic UIDs -> idempotent PUT.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from .security import decrypt
 IMPORT_HEADER = "X-PST-Import-Id"
 KIND_OF_PHASE = {"mail": "mail", "calendar": "event", "contacts": "contact"}
 PROGRESS_KEY = {"mail": "mail", "event": "calendar", "contact": "contacts"}
-# clé de repli de l'engine pour un élément illisible à l'itération (« <fnid>-x<index> », cf. pst.iter_items)
+# engine fallback key for an item unreadable during iteration ("<fnid>-x<index>", see pst.iter_items)
 FALLBACK_KEY_RE = re.compile(r"-x(\d+)$")
 
 
@@ -44,24 +44,24 @@ class JobFailed(Exception):
 
 
 def norm_hash(raw: bytes) -> str:
-    """Hash insensible aux fins de ligne (le serveur stocke en CRLF)."""
+    """Line-ending-insensitive hash (the server stores CRLF)."""
     data = raw.replace(b"\r\n", b"\n").rstrip(b"\n")
     return hashlib.sha256(data).hexdigest()
 
 
 def import_id_of(pst_sha: str, item_key: str) -> str:
-    """Valeur de X-PST-Import-Id : délimitée par <> pour qu'aucun identifiant ne soit préfixe d'un autre."""
+    """X-PST-Import-Id value: delimited by <> so that no identifier is a prefix of another."""
     return f"<{pst_sha}-{item_key}>"
 
 
 def folder_key(path: list[str]) -> str:
-    """Clé texte non ambiguë d'un dossier : « / » et « \\ » des noms sont échappés (« A/B » ≠ A → B).
-    Identique à l'ancienne clé ("/".join) pour les noms sans « / » ni « \\ »."""
+    """Unambiguous text key of a folder: "/" and "\\" in names are escaped ("A/B" != A -> B).
+    Identical to the old key ("/".join) for names without "/" or "\\"."""
     return "/".join(p.replace("\\", "\\\\").replace("/", "\\/") for p in path)
 
 
 def legacy_folder_key(path: list[str]) -> str:
-    """Ancienne clé (ambiguë), encore présente dans la table items des imports antérieurs."""
+    """Old (ambiguous) key, still present in the items table of earlier imports."""
     return "/".join(path)
 
 
@@ -75,11 +75,11 @@ def _needs_clean(name: str, delim: str) -> bool:
 
 
 def plan_folders(mail_folders, boxes, delim: str, root: str | None, prefix: str = "") -> dict[str, tuple[str, str | None]]:
-    """Calcule pour chaque dossier mail du PST le nom IMAP cible (UTF-7 modifié).
-    Retourne {folder_key: (nom_imap, special_flag_si_à_créer_ou_None)}.
-    Les noms cibles sont uniques (comparaison insensible à la casse) : deux dossiers que le nettoyage
-    confondrait (« A.B » et « A_B » avec le séparateur « . ») sont distingués par un suffixe « (2) », « (3) »…
-    L'attribution est déterministe (profondeur, nom non modifié d'abord, clé) : une reprise donne le même plan."""
+    """Computes the target IMAP name (modified UTF-7) for each mail folder of the PST.
+    Returns {folder_key: (imap_name, special_flag_if_to_create_or_None)}.
+    Target names are unique (case-insensitive comparison): two folders that cleaning would
+    merge ("A.B" and "A_B" with the "." separator) are told apart by a suffix " (2)", " (3)"...
+    The assignment is deterministic (depth, unmodified name first, key): a resume yields the same plan."""
     specials: dict[tuple, tuple[str, str | None]] = {}
     if not root:
         for f in mail_folders:
@@ -149,14 +149,14 @@ class AppendResult:
 
 
 class AppendPool:
-    """N connexions IMAP parallèles, chacune dans son thread.
+    """N parallel IMAP connections, each in its own thread.
 
-    - Après une erreur temporaire (délai dépassé, connexion coupée — peut-être APRÈS l'envoi du littéral),
-      l'APPEND n'est jamais rejoué à l'aveugle : reconnexion puis recherche exacte de X-PST-Import-Id ;
-      renvoi seulement si le message est absent.
-    - Pause/arrêt : les tâches pas encore commencées sont annulées (résultat « cancel » → élément `pending`),
-      celles en cours vont à leur terme ; close() attend la fin de TOUS les threads (aucun APPEND après la
-      sortie du job)."""
+    - After a temporary error (timeout, dropped connection — possibly AFTER the literal was sent),
+      the APPEND is never blindly replayed: reconnect then exact search for X-PST-Import-Id;
+      resend only if the message is absent.
+    - Pause/stop: tasks not yet started are cancelled ("cancel" result -> item `pending`),
+      those in progress run to completion; close() waits for ALL threads to finish (no APPEND after the
+      job ends)."""
 
     def __init__(self, params: ImapParams, n: int, create_folder, should_stop, base_delay: float = 1.0):
         self.params = params
@@ -180,7 +180,7 @@ class AppendPool:
             if self.should_stop():
                 self.abort.set()
                 return True
-        except Exception:  # pragma: no cover - DB indisponible : continuer
+        except Exception:  # pragma: no cover - DB unavailable: continue
             return False
         return False
 
@@ -192,11 +192,11 @@ class AppendPool:
                 if t is None:
                     return
                 if self._stopping():
-                    self.results.put(AppendResult(t.item_id, False, "cancel", "annulé avant envoi (pause/arrêt)"))
+                    self.results.put(AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)"))
                     continue
                 try:
                     r = self._do(conn, t)
-                except Exception as e:  # pragma: no cover - sécurité
+                except Exception as e:  # pragma: no cover - safety
                     r = AppendResult(t.item_id, False, "temp", f"{type(e).__name__}: {e}")
                 self.results.put(r)
         finally:
@@ -204,7 +204,7 @@ class AppendPool:
 
     def _do(self, conn: ImapConn, t: AppendTask) -> AppendResult:
         created = False
-        check = False  # un APPEND a peut-être abouti : rechercher avant de renvoyer
+        check = False  # an APPEND may have succeeded: search before resending
         attempt = 0
         while True:
             try:
@@ -216,9 +216,9 @@ class AppendPool:
                     except ImapError as se:
                         if se.kind == "temp":
                             raise
-                        uids = []  # dossier absent / illisible : le message n'y est pas
+                        uids = []  # folder missing / unreadable: the message is not there
                     if uids:
-                        return AppendResult(t.item_id, True, uid=uids[0], size=t.size, msg="déjà présent")
+                        return AppendResult(t.item_id, True, uid=uids[0], size=t.size, msg="already present")
                 uid = conn.append(t.target, t.raw, t.flags, t.internaldate)
                 return AppendResult(t.item_id, True, uid=uid, size=t.size)
             except Exception as e:
@@ -260,8 +260,8 @@ class AppendPool:
         return out
 
     def close(self) -> None:
-        """Annule les tâches restantes et attend la fin de tous les threads (sans limite : un APPEND en cours
-        est borné par le délai de socket et les reprises)."""
+        """Cancels the remaining tasks and waits for all threads to finish (no limit: an APPEND in progress
+        is bounded by the socket timeout and the retries)."""
         self.abort.set()
         for _ in self.threads:
             self.tasks.put(None)
@@ -280,7 +280,7 @@ class JobRunner:
         self.pst_row = db.q1("SELECT * FROM psts WHERE id=?", (self.acc["pst_id"],)) if self.acc and self.acc["pst_id"] else None
         self.account_id = self.acc["id"] if self.acc else None
         self.pst_id = self.pst_row["id"] if self.pst_row else None
-        # les éléments sont rattachés à l'empreinte du PST (pas à son id) : un même fichier renvoyé retrouve son état
+        # items are attached to the PST fingerprint (not its id): the same re-uploaded file recovers its state
         self.pst_key = db.pst_key_of(self.pst_row)
         self.folder_errors: dict[str, str] = {}
         self.progress = repo.empty_progress()
@@ -289,26 +289,26 @@ class JobRunner:
         self._last_flush = 0.0
         self._last_check = 0.0
         self._rate_window: list[tuple[float, int]] = []
-        # débit moyen sur les phases d'import de ce run (premier / dernier échantillon) : affiché en fin de job
+        # average rate over the import phases of this run (first / last sample): displayed at the end of the job
         self._rate_first: tuple[float, int] | None = None
         self._rate_last: tuple[float, int] | None = None
         self._item_phase = False
         self.report: dict = {"folders": [], "warnings": [], "verify": {}, "dav": {}, "precheck": {}}
         self.consecutive_temp = 0
         self.dav_targets: dict[str, str] = {}
-        # crashs natifs déjà subis par ce job (sous-processus) et index illisibles connus du PST
+        # native crashes already suffered by this job (subprocess) and unreadable indexes known for the PST
         self.crashes = crash.get_crashes(job_id)
         self.skips = crash.get_skips(self.pst_key) if self.pst_key else set()
 
-    # ------------------------------------------------------------ utilitaires
+    # ------------------------------------------------------------ utilities
     def log(self, msg: str, level: str = "info") -> None:
         repo.log(self.job_id, msg, level)
 
-    # ------------------------------------------------------------ marqueur « élément en cours » (crash libpff)
+    # ------------------------------------------------------------ "current item" marker (libpff crash)
     def _mark(self, kind: str | None = None, fkey: str | None = None, idx: int | None = None,
               key: str | None = None, phase: str | None = None) -> None:
-        """Enregistre (commité) ce que le process s'apprête à lire avec libpff : en cas de mort du
-        sous-processus, le worker parent marque cet élément « crash libpff » et la reprise continue après."""
+        """Records (committed) what the process is about to read with libpff: if the
+        subprocess dies, the parent worker marks this item "libpff crash" and the resume continues after it."""
         if kind is None and phase is None:
             crash.set_marker(self.job_id, None)
             return
@@ -323,7 +323,7 @@ class JobRunner:
             crash.maybe_crash(phase)
 
     def _iter(self, f, kind: str, fkey: str):
-        """pst.iter_items avec marqueur avant chaque lecture et saut des index connus pour planter libpff."""
+        """pst.iter_items with a marker before each read and skipping of indexes known to crash libpff."""
         fkeys = {fkey, legacy_folder_key(f.path)}
         skips = {i for k, fo, i in self.skips if k == kind and fo in fkeys}
         count = int(f.count or 0)
@@ -351,7 +351,7 @@ class JobRunner:
         self._mark()
 
     def check(self) -> None:
-        """Vérifié entre chaque élément : pause / arrêt demandés via l'API."""
+        """Checked between each item: pause / stop requested via the API."""
         r = db.q1("SELECT status FROM jobs WHERE id=?", (self.job_id,))
         st = r["status"] if r else "stopping"
         if st == "paused":
@@ -373,10 +373,10 @@ class JobRunner:
     def set_phase(self, phase: str) -> None:
         now = time.time()
         db.ex("UPDATE jobs SET phase=?, heartbeat=? WHERE id=?", (phase, now, self.job_id))
-        self.log(f"Phase : {phase}")
+        self.log(f"Phase: {phase}")
         self._item_phase = phase in ("mail", "calendar", "contacts")
         if self._item_phase and self.account_id and self.pst_key:
-            # fenêtre de débit ensemencée au début de la phase : un job court a un débit dès le 1er flush
+            # rate window seeded at the start of the phase: a short job has a rate from the 1st flush
             self.recompute_progress()
             done = sum(p["done"] for p in self.progress.values())
             self._rate_window = [(now, done)]
@@ -406,7 +406,7 @@ class JobRunner:
         done = sum(p["done"] for p in self.progress.values())
         total = sum(p["total"] for p in self.progress.values())
         self._rate_window.append((now, done))
-        # moyenne glissante sur 60 s, à défaut depuis le début de la phase (premier échantillon conservé)
+        # sliding average over 60 s, otherwise since the start of the phase (first sample kept)
         self._rate_window = [x for x in self._rate_window if now - x[0] <= 60]
         t0, d0 = self._rate_window[0]
         rate = (done - d0) / (now - t0) if now - t0 >= 0.2 else None
@@ -425,9 +425,9 @@ class JobRunner:
 
     @staticmethod
     def fallback_rows(rows: dict[str, dict]) -> dict[int, dict]:
-        """Éléments en erreur enregistrés sous la clé de repli « <fnid>-x<index> » (illisibles à l'itération) :
-        {index: ligne}. Si l'élément devient lisible (relance), il est traité sous sa vraie clé et la ligne de
-        repli est supprimée."""
+        """Items in error recorded under the fallback key "<fnid>-x<index>" (unreadable during iteration):
+        {index: row}. If the item becomes readable (rerun), it is processed under its real key and the fallback
+        row is deleted."""
         out = {}
         for k, r in rows.items():
             m = FALLBACK_KEY_RE.search(k)
@@ -436,7 +436,7 @@ class JobRunner:
         return out
 
     def _resolve_key(self, rows: dict, fallback: dict, idx: int, key: str) -> tuple[dict | None, dict | None]:
-        """(ligne à utiliser pour wants(), ligne de repli à supprimer une fois la vraie clé traitée)."""
+        """(row to use for wants(), fallback row to delete once the real key is processed)."""
         r = rows.get(key)
         fb = fallback.get(idx)
         if fb is None or fb["item_key"] == key:
@@ -470,7 +470,7 @@ class JobRunner:
     def wants(self, r: dict | None) -> bool:
         st = r["status"] if r else None
         if st == "error" and (r.get("error") or "").startswith(crash.CRASH_MSG):
-            # élément ayant fait planter libpff : ignoré, sauf « relancer les erreurs » tant que ce run n'a pas planté
+            # item that crashed libpff: ignored, except on "retry errors" as long as this run has not crashed
             return self.mode == "errors" and self.crashes == 0
         if self.mode == "errors":
             return st in ("error", "inflight", "pending")
@@ -481,21 +481,21 @@ class JobRunner:
                           verify_tls=bool(self.srv["verify_tls"]), login=self.acc["login"] or self.acc["email"],
                           password=decrypt(self.acc["password_enc"]))
 
-    # ------------------------------------------------------------ exécution
+    # ------------------------------------------------------------ execution
     def run(self) -> None:
         if not self.acc or not self.srv:
-            self._finish("failed", "compte ou serveur supprimé")
+            self._finish("failed", "account or server deleted")
             return
         started = time.time()
         self.report.update({"job_id": self.job_id, "account": self.acc["email"], "server": self.srv["name"],
                             "mode": self.mode, "started_at": started})
-        self.log(f"Démarrage du job {self.job_id} pour {self.acc['email']} (mode {self.mode})")
-        self._mark()  # marqueur périmé d'un process tué (arrêt brutal du conteneur) : ce n'est pas un crash
+        self.log(f"Job {self.job_id} started for {self.acc['email']} (mode {self.mode})")
+        self._mark()  # stale marker from a killed process (abrupt container stop): not a crash
         try:
             if not self.pst_row:
-                raise JobFailed("aucun PST associé au compte")
+                raise JobFailed("no PST linked to the account")
             if self.pst_row["status"] != "valid":
-                raise JobFailed(f"PST non valide (statut {self.pst_row['status']})")
+                raise JobFailed(f"PST not valid (status {self.pst_row['status']})")
             eng = engine()
             self._mark(phase="open")
             with eng.PstFile(self.pst_row["path"]) as pst:
@@ -519,18 +519,18 @@ class JobRunner:
         except PauseRequested:
             self.flush(force=True)
             db.ex("UPDATE jobs SET worker_id=NULL, rate=NULL, eta=NULL WHERE id=?", (self.job_id,))
-            self.log("Job en pause (reprise possible)", "warning")
+            self.log("Job paused (resume possible)", "warning")
             return
         except StopRequested:
-            self.log("Job arrêté à la demande", "warning")
+            self.log("Job stopped on request", "warning")
             self._finish("stopped", None)
             return
         except JobFailed as e:
-            self.log(f"Échec : {e}", "error")
+            self.log(f"Failure: {e}", "error")
             self._finish("failed", str(e))
             return
         except Exception as e:
-            self.log(f"Erreur inattendue : {type(e).__name__}: {e}", "error")
+            self.log(f"Unexpected error: {type(e).__name__}: {e}", "error")
             self._finish("failed", f"{type(e).__name__}: {e}")
             return
         self.recompute_progress()
@@ -539,14 +539,14 @@ class JobRunner:
         n_unfinished = self.count_unfinished()
         err = None
         if n_unfinished:
-            err = f"{n_unfinished} élément(s) non terminé(s) (en attente / en cours) — relancer le job"
+            err = f"{n_unfinished} unfinished item(s) (pending / in progress) — rerun the job"
             self.log(err, "error")
         status = "done_with_errors" if (n_err or verify_ko or n_unfinished) else "done"
-        self.log(f"Terminé : {status} ({n_err} erreur(s))", "warning" if status != "done" else "info")
+        self.log(f"Finished: {status} ({n_err} error(s))", "warning" if status != "done" else "info")
         self._finish(status, err)
 
     def count_unfinished(self) -> int:
-        """Éléments des phases actives restés `pending`/`inflight` : le job ne peut pas être « terminé »."""
+        """Items of active phases left `pending`/`inflight`: the job cannot be "finished"."""
         kinds = [k for k in ("mail", "event", "contact") if self._phase_enabled(k)]
         if not kinds or not self.pst_key:
             return 0
@@ -571,12 +571,12 @@ class JobRunner:
         try:
             path = self.write_report(status, error, now)
         except Exception as e:
-            self.log(f"Rapport non écrit : {e}", "error")
-        # run terminé : compteur de crashs remis à zéro AVANT que le statut final soit visible. Sinon un arrêt du
-        # worker juste après (sous-processus encore vivant, tué → _run_job n'appelle pas reset_crashes) laissait
-        # `job:<id>:crashes` > 0 et la relance « erreurs » suivante sautait les éléments « crash libpff ».
+            self.log(f"Report not written: {e}", "error")
+        # run finished: crash counter reset BEFORE the final status becomes visible. Otherwise a worker
+        # stop right after (subprocess still alive, killed -> _run_job does not call reset_crashes) left
+        # `job:<id>:crashes` > 0 and the next "errors" rerun skipped the "libpff crash" items.
         crash.reset_crashes(self.job_id)
-        # débit moyen des phases d'import conservé (affiché pour les jobs terminés, même très courts)
+        # average rate of the import phases kept (displayed for finished jobs, even very short ones)
         db.ex("UPDATE jobs SET status=?, error=?, finished_at=?, worker_id=NULL, rate=?, eta=NULL, "
               "report_path=COALESCE(?, report_path), current_folder=NULL WHERE id=?",
               (status, error, now, self._avg_rate(), path, self.job_id))
@@ -591,17 +591,17 @@ class JobRunner:
         except ImapError as e:
             if e.kind == "auth":
                 db.ex("UPDATE accounts SET status='auth_failed', last_test=? WHERE id=?", (time.time(), self.account_id))
-            raise JobFailed(f"IMAP : {e}")
+            raise JobFailed(f"IMAP: {e}")
         try:
             quota = conn.quota()
             self.report["precheck"]["imap"] = {"ok": True, "capabilities": sorted(conn.caps)[:50], "quota": quota}
-            self.log(f"Connexion IMAP OK ({params.host})")
+            self.log(f"IMAP connection OK ({params.host})")
             if quota and quota.get("limit"):
                 free = quota["limit"] - (quota.get("used") or 0)
                 est = int(self.pst_row["size"] * 0.8)
                 if free < est:
-                    w = (f"quota : {free // 2**20} Mo libres pour un PST de {self.pst_row['size'] // 2**20} Mo "
-                         f"(estimation {est // 2**20} Mo) — risque de dépassement")
+                    w = (f"quota: {free // 2**20} MB free for a PST of {self.pst_row['size'] // 2**20} MB "
+                         f"(estimate {est // 2**20} MB) — risk of exceeding")
                     self.report["warnings"].append(w)
                     self.log(w, "warning")
         finally:
@@ -618,10 +618,10 @@ class JobRunner:
                     with DavClient(params.login, params.password, bool(self.srv["verify_tls"])) as dav:
                         url = dav.discover(kind, self.srv[tmpl] or None, self.acc["email"], self.srv["imap_host"])
                 except DavError as e:
-                    raise JobFailed(f"{kind.upper()} : {e}")
+                    raise JobFailed(f"{kind.upper()}: {e}")
                 self.dav_targets[phase] = url
                 self.report["dav"][phase] = {"url": url}
-                self.log(f"{kind.upper()} : collection cible {url}")
+                self.log(f"{kind.upper()}: target collection {url}")
         db.ex("UPDATE accounts SET status='ok', last_test=? WHERE id=?", (time.time(), self.account_id))
         self.check()
 
@@ -662,11 +662,11 @@ class JobRunner:
                 except ImapError as e:
                     if e.kind in ("temp", "fatal", "auth"):
                         raise
-                    # CREATE refusé : seuls les éléments de ce dossier sont en erreur, la boîte continue
-                    msg = f"dossier IMAP « {utf7_decode(name)} » non créé : {e}"
+                    # CREATE refused: only the items of this folder are in error, the mailbox continues
+                    msg = f"IMAP folder '{utf7_decode(name)}' not created: {e}"
                     self.folder_errors[fk] = msg
-                    self.log(f"Dossier « {fk} » : {msg}", "error")
-            self.log(f"{len(mail_folders)} dossier(s) mail prêts (séparateur « {delim} »)")
+                    self.log(f"Folder '{fk}': {msg}", "error")
+            self.log(f"{len(mail_folders)} mail folder(s) ready (separator '{delim}')")
 
             def create_folder(c: ImapConn, target: str) -> None:
                 c.create(target)
@@ -679,7 +679,7 @@ class JobRunner:
                 try:
                     self._wait_pool(pool)
                 finally:
-                    pool.close()  # attend tous les threads : plus aucun APPEND après la sortie de la phase
+                    pool.close()  # waits for all threads: no more APPEND after the phase ends
                     try:
                         self._handle_results(pool.drain())
                     except JobFailed:
@@ -693,24 +693,24 @@ class JobRunner:
                 self.consecutive_temp = 0
                 self.set_item(r.item_id, "ok")
             elif r.kind == "cancel":
-                self.set_item(r.item_id, "pending")  # jamais envoyé (pause/arrêt avant l'APPEND)
+                self.set_item(r.item_id, "pending")  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():
-                continue  # interrompu par pause/arrêt : reste « inflight », revérifié à la reprise
+                continue  # interrupted by pause/stop: stays "inflight", rechecked on resume
             else:
                 self.set_item(r.item_id, "error", f"[{r.kind}] {r.msg}")
-                self.log(f"Échec APPEND (élément {r.item_id}) : {r.msg}", "error")
+                self.log(f"APPEND failure (item {r.item_id}): {r.msg}", "error")
                 if r.kind == "fatal":
                     fatal = r.msg
                 elif r.kind in ("temp", "auth"):
                     self.consecutive_temp += 1
         if fatal:
-            raise JobFailed(f"erreur définitive du serveur : {fatal}")
+            raise JobFailed(f"permanent server error: {fatal}")
         if self.consecutive_temp >= max(5, 3 * int(self.srv["workers"] or 1)):
-            raise JobFailed("serveur IMAP indisponible (trop d'erreurs consécutives)")
+            raise JobFailed("IMAP server unavailable (too many consecutive errors)")
 
     def _wait_pool(self, pool: AppendPool) -> None:
-        """Attend TOUS les résultats (sans limite de temps : chaque APPEND est borné par le délai de socket et
-        les reprises). Pause/arrêt : les tâches non commencées sont annulées, les APPEND en cours vont à terme."""
+        """Waits for ALL results (no time limit: each APPEND is bounded by the socket timeout and
+        the retries). Pause/stop: tasks not yet started are cancelled, APPENDs in progress run to completion."""
         while pool.pending > 0:
             if not pool.abort.is_set() and self._should_stop():
                 pool.abort.set()
@@ -718,15 +718,15 @@ class JobRunner:
         self._handle_results(pool.drain())
 
     def _resolve_on_server(self, conn: ImapConn, rows: dict[str, dict]) -> None:
-        """Avant tout renvoi : les `inflight` (APPEND peut-être abouti) et les `error` déjà tentés (hash connu,
-        p. ex. délai dépassé après envoi du littéral) sont recherchés EXACTEMENT par X-PST-Import-Id."""
+        """Before any resend: `inflight` items (APPEND possibly succeeded) and `error` items already tried (hash known,
+        e.g. timeout after the literal was sent) are searched for EXACTLY by X-PST-Import-Id."""
         todo = [r for r in rows.values()
                 if r["target"] and (r["status"] == "inflight"
                                     or (r["status"] == "error" and r["hash"] and self.wants(r)))]
         if not todo:
             return
         n_infl = sum(r["status"] == "inflight" for r in todo)
-        self.log(f"{n_infl} élément(s) « inflight » et {len(todo) - n_infl} en erreur à vérifier sur le serveur")
+        self.log(f"{n_infl} 'inflight' item(s) and {len(todo) - n_infl} in error to check on the server")
         for r in todo:
             self.check()
             import_id = import_id_of(self.pst_row["pst_sha"], r["item_key"])
@@ -736,13 +736,13 @@ class JobRunner:
                                   settings.max_retries, should_stop=self._should_stop)
             except ImapError as e:
                 if e.kind == "temp":
-                    raise JobFailed(f"vérification des éléments déjà envoyés impossible : {e}")
-                uids = []  # dossier absent → pas encore envoyé
+                    raise JobFailed(f"cannot verify items already sent: {e}")
+                uids = []  # folder missing -> not sent yet
             if uids:
                 self.set_item(r["id"], "ok")
                 r["status"] = "ok"
                 if len(uids) > 1:
-                    self.log(f"Attention : {len(uids)} exemplaires de {import_id} déjà présents", "warning")
+                    self.log(f"Warning: {len(uids)} copies of {import_id} already present", "warning")
             elif r["status"] == "inflight":
                 self.set_item(r["id"], "pending")
                 r["status"] = "pending"
@@ -753,7 +753,7 @@ class JobRunner:
         rows = self.item_rows("mail", fkey, f.path)
         if self.mode == "errors" and not any(r["status"] in ("error", "inflight", "pending") for r in rows.values()):
             return
-        self.log(f"Dossier « {fkey} » → {target} ({f.count} élément(s))")
+        self.log(f"Folder '{fkey}' -> {target} ({f.count} item(s))")
         self.flush(force=True)
         self._wait_pool(pool)
         if fkey in self.folder_errors:
@@ -771,11 +771,11 @@ class JobRunner:
             self._mail_item(f, fkey, idx, key, handle, target, pool, pst_sha)
             self._drop_fallback(fb)
         self._wait_pool(pool)
-        # contrôle après dossier : messages portant notre empreinte ≥ envoyés (ok) vers ce dossier
+        # post-folder check: messages bearing our fingerprint >= sent (ok) to this folder
         self.check_folder_status(conn, fkey, target)
 
     def _fail_folder(self, f, fkey: str, kind: str, rows: dict, target: str, msg: str) -> None:
-        """Dossier cible inutilisable : ses éléments à envoyer sont marqués en erreur (sans lecture du contenu)."""
+        """Unusable target folder: its items to send are marked as errors (without reading the content)."""
         fallback = self.fallback_rows(rows)
         for idx, key, handle in self._iter(f, kind, fkey):
             self.check()
@@ -787,30 +787,30 @@ class JobRunner:
 
     def _mail_item(self, f, fkey: str, idx: int, key: str, handle, target: str, pool: AppendPool, pst_sha: str) -> None:
         import_id = import_id_of(pst_sha, key)
-        self._mark("mail", fkey, idx, key)  # lecture libpff de cet élément
+        self._mark("mail", fkey, idx, key)  # libpff read of this item
         try:
             built = self.pst.build_message(handle, import_id)
         except Exception as e:
-            self.upsert_item("mail", key, fkey, "error", target=target, error=f"construction : {type(e).__name__}: {e}")
-            self.log(f"Construction impossible ({fkey} #{idx}) : {e}", "error")
+            self.upsert_item("mail", key, fkey, "error", target=target, error=f"construction: {type(e).__name__}: {e}")
+            self.log(f"Cannot build ({fkey} #{idx}): {e}", "error")
             return
         if built is None:
-            self.upsert_item("mail", key, fkey, "skipped", target=target, error="pas un mail")
+            self.upsert_item("mail", key, fkey, "skipped", target=target, error="not a mail")
             return
         try:
             errs = list(self.eng.verify_message(built, handle) or [])
         except Exception as e:
-            errs = [f"vérification : {type(e).__name__}: {e}"]
+            errs = [f"verification: {type(e).__name__}: {e}"]
         if IMPORT_HEADER.lower().encode() not in built.raw[:65536].lower():
-            errs.append(f"en-tête {IMPORT_HEADER} absent")
+            errs.append(f"header {IMPORT_HEADER} missing")
         warnings = db.jdump(built.warnings) if built.warnings else None
         if errs:
             self.upsert_item("mail", key, fkey, "error", target=target, subject=built.subject,
                              error="; ".join(errs)[:2000], warnings=warnings)
-            self.log(f"Mail rejeté « {built.subject} » : {'; '.join(errs)}", "error")
+            self.log(f"Mail rejected '{built.subject}': {'; '.join(errs)}", "error")
             return
         if built.warnings:
-            self.log(f"Avertissement « {built.subject} » : {', '.join(built.warnings)}", "warning")
+            self.log(f"Warning '{built.subject}': {', '.join(built.warnings)}", "warning")
         item_id = self.upsert_item("mail", key, fkey, "inflight", target=target, subject=built.subject,
                                    hash=norm_hash(built.raw), size=len(built.raw), warnings=warnings)
         pool.submit(AppendTask(item_id, target, built.raw, list(built.flags or []), built.internaldate, len(built.raw),
@@ -823,8 +823,8 @@ class JobRunner:
         return [fkey]
 
     def check_folder_status(self, conn: ImapConn, fkey: str, target: str) -> dict:
-        """Contrôle d'un dossier cible : nombre de messages portant NOTRE empreinte (X-PST-Import-Id contenant
-        « <sha>- ») ≥ éléments marqués envoyés vers ce dossier. Le contenu préexistant n'est pas compté."""
+        """Check of a target folder: number of messages bearing OUR fingerprint (X-PST-Import-Id containing
+        "<sha>-") >= items marked as sent to this folder. Pre-existing content is not counted."""
         n_ok = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND target=? AND status='ok'",
                      (self.account_id, self.pst_key, target))["n"]
         try:
@@ -833,13 +833,13 @@ class JobRunner:
                                  settings.max_retries, should_stop=self._should_stop)
         except ImapError as e:
             present = None
-            self.log(f"Comptage de {target} impossible : {e}", "warning")
+            self.log(f"Cannot count {target}: {e}", "warning")
         ok = present is not None and present >= n_ok
         entry = {"path": self._path_of(fkey), "folder": fkey, "target": target, "sent": n_ok,
                  "present": present, "ok": ok}
         self.report["folders"] = [x for x in self.report["folders"] if x["target"] != target] + [entry]
         if not ok:
-            self.log(f"Contrôle dossier « {fkey} » : {present} présent(s) < {n_ok} envoyé(s)", "error")
+            self.log(f"Folder check '{fkey}': {present} present < {n_ok} sent", "error")
         return entry
 
     # ------------------------------------------------------------ DAV
@@ -864,7 +864,7 @@ class JobRunner:
                 rows = self.item_rows(kind, fkey, f.path)
                 if self.mode == "errors" and not any(r["status"] in ("error", "inflight", "pending") for r in rows.values()):
                     continue
-                self.log(f"Dossier « {fkey} » → {url} ({f.count} élément(s))")
+                self.log(f"Folder '{fkey}' -> {url} ({f.count} item(s))")
                 fallback = self.fallback_rows(rows)
                 for idx, key, handle in self._iter(f, kind, fkey):
                     self.check()
@@ -877,22 +877,22 @@ class JobRunner:
 
     def _dav_item(self, dav: DavClient, url: str, phase: str, kind: str, fkey: str, idx: int, key: str, handle,
                   builder) -> None:
-        self._mark(kind, fkey, idx, key)  # lecture libpff de cet élément
+        self._mark(kind, fkey, idx, key)  # libpff read of this item
         try:
             obj = builder(handle)
         except Exception as e:
-            self.upsert_item(kind, key, fkey, "error", target=url, error=f"construction : {type(e).__name__}: {e}")
-            self.log(f"Construction impossible ({fkey} #{idx}) : {e}", "error")
+            self.upsert_item(kind, key, fkey, "error", target=url, error=f"construction: {type(e).__name__}: {e}")
+            self.log(f"Cannot build ({fkey} #{idx}): {e}", "error")
             return
         if obj is None:
-            self.upsert_item(kind, key, fkey, "skipped", target=url, error="élément non convertible")
+            self.upsert_item(kind, key, fkey, "skipped", target=url, error="item cannot be converted")
             return
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=url, subject=obj.summary,
                                    hash=obj.filename, size=len(obj.content.encode("utf-8")))
         err = self._dav_put(dav, url, obj, phase)
         if err:
             self.set_item(item_id, "error", err)
-            self.log(f"Échec PUT « {obj.summary} » : {err}", "error")
+            self.log(f"PUT failure '{obj.summary}': {err}", "error")
         else:
             self.set_item(item_id, "ok")
 
@@ -905,20 +905,20 @@ class JobRunner:
                 return None
             except DavError as e:
                 if e.status in (404, 409) and not recreated:
-                    # collection disparue depuis la découverte : recréée (MKCALENDAR / MKCOL étendu), puis nouvel essai
+                    # collection disappeared since discovery: recreated (MKCALENDAR / extended MKCOL), then retried
                     recreated = True
                     try:
                         dav.ensure_collection(kind, url)
                     except DavError as ce:
                         return f"[{'temp' if ce.temporary else 'perm'}] {ce}"
-                    self.log(f"{kind.upper()} : collection {url} absente, recréée", "warning")
+                    self.log(f"{kind.upper()}: collection {url} missing, recreated", "warning")
                     continue
                 if not e.temporary or attempt >= settings.max_retries:
                     return f"[{'temp' if e.temporary else 'perm'}] {e}"
                 self._sleep(min(60.0, 2.0 ** attempt))
-        return "échec"
+        return "failure"
 
-    # ------------------------------------------------------------ vérifications finales
+    # ------------------------------------------------------------ final checks
     def phase_verify(self) -> None:
         self.set_phase("verify")
         problems: list[str] = []
@@ -934,8 +934,8 @@ class JobRunner:
                     self.check()
                     e = self.check_folder_status(conn, t["folder"], t["target"])
                     if not e["ok"]:
-                        problems.append(f"dossier {t['folder']} : {e['present']} présent(s) < {e['sent']} envoyé(s)")
-                # échantillon relu par en-tête (correspondance exacte) + hash
+                        problems.append(f"folder {t['folder']}: {e['present']} present < {e['sent']} sent")
+                # sample re-read by header (exact match) + hash
                 ids = [r["id"] for r in db.q("SELECT id FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND status='ok'",
                                              (self.account_id, self.pst_key))]
                 sample = random.sample(ids, min(settings.verify_sample, len(ids)))
@@ -950,24 +950,24 @@ class JobRunner:
                         raw = with_retry(lambda c: c.fetch_raw(it["target"], uids[0]), conn, settings.max_retries,
                                          should_stop=self._should_stop) if uids else None
                     except ImapError as e:
-                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": f"relecture : {e}"})
+                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": f"re-read: {e}"})
                         checked += 1
                         continue
                     checked += 1
                     if not raw:
-                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": "introuvable sur le serveur"})
+                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": "not found on the server"})
                     elif it["hash"] and norm_hash(raw) != it["hash"]:
-                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": "hash différent"})
+                        bad.append({"item_key": it["item_key"], "subject": it["subject"], "problem": "hash differs"})
                     else:
                         good += 1
                 verify["sample"] = {"checked": checked, "ok": good, "problems": bad}
                 if bad:
-                    problems.append(f"échantillon : {len(bad)}/{checked} mail(s) non conforme(s)")
-                self.log(f"Relecture d'échantillon : {good}/{checked} conforme(s)",
+                    problems.append(f"sample: {len(bad)}/{checked} non-conforming mail(s)")
+                self.log(f"Sample re-read: {good}/{checked} conforming",
                          "info" if not bad else "error")
             except ImapError as e:
-                problems.append(f"vérification IMAP impossible : {e}")
-                self.log(f"Vérification IMAP impossible : {e}", "error")
+                problems.append(f"IMAP verification failed: {e}")
+                self.log(f"IMAP verification failed: {e}", "error")
             finally:
                 conn.close()
         if self.srv["dav_enabled"]:
@@ -982,21 +982,21 @@ class JobRunner:
                              (self.account_id, self.pst_key, kind))["n"]
                 try:
                     with DavClient(params.login, params.password, bool(self.srv["verify_tls"])) as dav:
-                        # seules NOS ressources (nom de fichier = UID déterministe) comptent, pas le contenu préexistant
+                        # only OUR resources (file name = deterministic UID) count, not pre-existing content
                         present = len(dav.names(url) & ours)
                 except DavError as e:
                     present = None
-                    problems.append(f"{phase} : comptage impossible ({e})")
+                    problems.append(f"{phase}: cannot count ({e})")
                 ok = present is not None and present >= n_ok
                 self.report["dav"][phase] = {"url": url, "sent": n_ok, "present": present, "ok": ok}
-                self.log(f"{phase} : {present} ressource(s) présente(s) pour {n_ok} envoyée(s)",
+                self.log(f"{phase}: {present} resource(s) present for {n_ok} sent",
                          "info" if ok else "error")
                 if present is not None and not ok:
-                    problems.append(f"{phase} : {present} présent(s) < {n_ok} envoyé(s)")
+                    problems.append(f"{phase}: {present} present < {n_ok} sent")
         verify["problems"] = problems
         self.report["verify"] = verify
 
-    # ------------------------------------------------------------ rapport
+    # ------------------------------------------------------------ report
     def write_report(self, status: str, error: str | None, finished: float) -> str | None:
         if not self.account_id:
             return None
@@ -1033,8 +1033,8 @@ class JobRunner:
             rep[pk] = {k: t[k] for k in ("sent", "present", "errors", "warnings", "skipped")}
         smp = (self.report.get("verify") or {}).get("sample")
         if smp:
-            rep["sample_check"] = (f"{smp['ok']}/{smp['checked']} mail(s) relu(s) par X-PST-Import-Id, hash identique"
-                                   + (f" — {len(smp['problems'])} problème(s)" if smp["problems"] else ""))
+            rep["sample_check"] = (f"{smp['ok']}/{smp['checked']} mail(s) re-read by X-PST-Import-Id, identical hash"
+                                   + (f" — {len(smp['problems'])} problem(s)" if smp["problems"] else ""))
         rep.update({"status": status, "error": error, "finished_at": finished, "totals": totals,
                     "errors": errors, "item_warnings": warns,
                     "pst": {"id": self.pst_id, "filename": self.pst_row["filename"] if self.pst_row else None,

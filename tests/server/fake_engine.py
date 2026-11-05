@@ -1,8 +1,8 @@
-"""Faux ENGINE respectant le « Contrat ENGINE » (docs/SPEC.md) pour tester le serveur sans pypff.
+"""Fake ENGINE honoring the "ENGINE contract" (docs/SPEC.md) to test the server without pypff.
 
-Le contenu est piloté par CONFIG (modifiable par les tests) ; le « PST » est un fichier commençant par !BDN.
-Le worker exécute les jobs dans un sous-processus : chaque modification de CONFIG est donc recopiée dans le
-fichier JSON désigné par PSTMIG_FAKE_CONFIG (fixture `env`), relu à chaque ouverture de PstFile.
+Content is driven by CONFIG (modifiable by tests); the "PST" is a file starting with !BDN.
+The worker runs jobs in a subprocess: every CONFIG change is therefore copied to the
+JSON file named by PSTMIG_FAKE_CONFIG (`env` fixture), re-read on each PstFile open.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ FAKE_CONFIG_ENV = "PSTMIG_FAKE_CONFIG"
 
 
 class _Config(dict):
-    """dict persisté dans $PSTMIG_FAKE_CONFIG à chaque modification (partage avec le sous-processus)."""
+    """dict persisted to $PSTMIG_FAKE_CONFIG on every change (shared with the subprocess)."""
 
     def __setitem__(self, k, v):
         super().__setitem__(k, v)
@@ -64,10 +64,10 @@ CONFIG: dict = _Config({
         (["Contacts"], "contacts", "IPF.Contact", None, 2),
         (["Tâches"], "tasks", "IPF.Task", None, 1),
     ],
-    "delay": 0.0,          # secondes par élément construit
-    "fail_keys": set(),    # item_key dont la construction lève une exception
-    "reject_keys": set(),  # item_key refusés par verify_message
-    "unreadable": set(),   # « <chemin joint par />#<index> » illisibles à l'itération (clé de repli <fid>-x<i>)
+    "delay": 0.0,          # seconds per built item
+    "fail_keys": set(),    # item_keys whose construction raises an exception
+    "reject_keys": set(),  # item_keys rejected by verify_message
+    "unreadable": set(),   # "<path joined by />#<index>" unreadable during iteration (fallback key <fid>-x<i>)
 })
 
 
@@ -114,13 +114,13 @@ def check_pst_signature(path: str) -> bool:
 
 
 def verify_message(built: BuiltMessage, handle) -> list[str]:
-    return ["rejeté par le faux engine"] if handle["key"] in CONFIG["reject_keys"] else []
+    return ["rejected by the fake engine"] if handle["key"] in CONFIG["reject_keys"] else []
 
 
 class PstFile:
     def __init__(self, path: str):
         if not check_pst_signature(path):
-            raise ValueError("pas un PST")
+            raise ValueError("not a PST")
         CONFIG.load()
         self.path = path
 
@@ -136,7 +136,7 @@ class PstFile:
     def iter_items(self, folder: FolderInfo, start: int = 0) -> Iterator[tuple[int, str, object]]:
         for i in range(start, folder.count):
             if f"{'/'.join(folder.path)}#{i}" in CONFIG.get("unreadable", ()):
-                key = f"{_fid(folder.path)}-x{i}"  # comme pst.iter_items : clé de repli
+                key = f"{_fid(folder.path)}-x{i}"  # like pst.iter_items: fallback key
                 yield i, key, {"key": key, "i": i, "path": folder.path, "kind": folder.kind, "unreadable": True}
                 continue
             key = item_key(folder.path, i)
@@ -149,9 +149,9 @@ class PstFile:
     def build_message(self, handle, import_id: str) -> BuiltMessage | None:
         self._wait()
         if handle.get("unreadable"):
-            raise RuntimeError("élément illisible (simulé)")
+            raise RuntimeError("unreadable item (simulated)")
         if handle["key"] in CONFIG["fail_keys"]:
-            raise RuntimeError("élément corrompu (simulé)")
+            raise RuntimeError("corrupted item (simulated)")
         if handle["kind"] != "mail":
             return None
         i = handle["i"]
@@ -172,7 +172,7 @@ class PstFile:
     def build_event(self, handle) -> DavObject | None:
         self._wait()
         if handle["key"] in CONFIG["fail_keys"]:
-            raise RuntimeError("rdv corrompu (simulé)")
+            raise RuntimeError("corrupted appointment (simulated)")
         uid = f"pst-{handle['key']}"
         i = handle["i"]
         ics = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//fake//pst//FR\r\nBEGIN:VEVENT\r\n"
@@ -183,7 +183,7 @@ class PstFile:
     def build_contact(self, handle) -> DavObject | None:
         self._wait()
         if handle["key"] in CONFIG["fail_keys"]:
-            raise RuntimeError("contact corrompu (simulé)")
+            raise RuntimeError("corrupted contact (simulated)")
         uid = f"pst-{handle['key']}"
         i = handle["i"]
         vcf = (f"BEGIN:VCARD\r\nVERSION:3.0\r\nUID:{uid}\r\nFN:Zoé Lefèvre {i}\r\nN:Lefèvre;Zoé {i};;;\r\n"

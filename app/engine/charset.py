@@ -1,6 +1,6 @@
 """Codepage / charset handling.
 
-Rules (see SPEC « Leçons » 1):
+Rules (see SPEC "Lessons" 1):
 * PT_UNICODE is UTF-16-LE, PT_STRING8 is in the message codepage;
 * the HTML body is in PR_INTERNET_CPID, fallback ``<meta charset>``, then cp1252;
 * we never introduce U+FFFD: the last resort is a lossless cp1252/latin-1 mix.

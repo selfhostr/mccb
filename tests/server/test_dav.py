@@ -6,7 +6,7 @@ from tests.svcusers import create_user
 
 BASE = os.environ.get("TEST_DAV_URL")
 if not BASE:
-    pytest.skip("TEST_DAV_URL non défini", allow_module_level=True)
+    pytest.skip("TEST_DAV_URL not set", allow_module_level=True)
 
 from app.server.dav import DavClient, DavError, expand_template  # noqa: E402
 
@@ -57,7 +57,7 @@ def test_discover_no_create(client, email):
 
 def test_test_method(client, email):
     ok, msg = client.test("caldav", BASE, email, "x")
-    assert ok and "créée" in msg
+    assert ok and "will be created" in msg
     client.discover("caldav", BASE, email, "x")
     ok, msg = client.test("caldav", BASE, email, "x")
     assert ok and "import-pst" in msg
@@ -75,15 +75,15 @@ def test_unreachable(email):
 @pytest.mark.parametrize("kind,slug,name,content", [
     ("caldav", "agenda-perso", "ev1.ics", ICS), ("carddav", "carnet-perso", "c1.vcf", VCF)])
 def test_template_url_404_creates_collection(client, email, kind, slug, name, content):
-    """URL cible configurée mais inexistante (404) : collection « Importé PST » créée à cette adresse."""
+    """Target URL configured but nonexistent (404): "PST Import" collection created at that address."""
     tmpl = BASE.rstrip("/") + "/{email}/" + slug + "/"
     url = expand_template(tmpl, email, email)
     ok, msg = client.test(kind, tmpl, email, "x")
-    assert ok and "créée" in msg, msg
+    assert ok and "will be created" in msg, msg
     from urllib.parse import unquote
     got = client.discover(kind, tmpl, email, "x")
     assert unquote(got) == url
-    assert client.discover(kind, tmpl, email, "x") == got  # 2e fois : trouvée telle quelle, pas recréée
+    assert client.discover(kind, tmpl, email, "x") == got  # 2nd time: found as is, not recreated
     assert client.put(got, name, content, kind) in (200, 201, 204)
     assert client.count(got) == 1
 
@@ -93,7 +93,7 @@ def test_ensure_collection_recreates_deleted(client, email):
     client._request("DELETE", url)
     assert client.ensure_collection("carddav", url) == url
     assert client.put(url, "c1.vcf", VCF, "carddav") in (200, 201, 204)
-    assert client.ensure_collection("carddav", url) == url  # existe : rien à faire
+    assert client.ensure_collection("carddav", url) == url  # exists: nothing to do
 
 
 def test_creation_refused_clear_error():
@@ -102,12 +102,12 @@ def test_creation_refused_clear_error():
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "PROPFIND":
             return httpx.Response(404)
-        return httpx.Response(403)  # MKCALENDAR / MKCOL refusés
+        return httpx.Response(403)  # MKCALENDAR / MKCOL refused
 
     with DavClient("u", "p", transport=httpx.MockTransport(handler)) as c:
-        for kind, what in (("caldav", "de l'agenda"), ("carddav", "du carnet d'adresses")):
+        for kind, what in (("caldav", "the calendar"), ("carddav", "the address book")):
             with pytest.raises(DavError) as ei:
                 c.discover(kind, "https://dav.example/u/x/", "u@example", "x")
             msg = str(ei.value)
-            assert f"création {what} « Importé PST » refusée" in msg and "HTTP 403" in msg, msg
+            assert f"creation of {what} 'PST Import' refused" in msg and "HTTP 403" in msg, msg
             assert not ei.value.temporary

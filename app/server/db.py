@@ -1,4 +1,4 @@
-"""Accès SQLite (WAL) partagé entre le process web et le worker."""
+"""SQLite access (WAL) shared between the web process and the worker."""
 from __future__ import annotations
 
 import json
@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     UNIQUE (account_id, pst_key, kind, item_key)
 );
 """
-# Les éléments sont rattachés au PST par son empreinte (`pst_key` = psts.pst_sha) et non par son id :
-# supprimer puis renvoyer le même fichier retrouve l'état d'avancement (pas de réimport ni de doublon).
+# Items are attached to the PST by its fingerprint (`pst_key` = psts.pst_sha) and not by its id:
+# deleting then re-uploading the same file recovers the progress state (no re-import or duplicate).
 ITEMS_INDEXES = """
 CREATE INDEX IF NOT EXISTS items_status2 ON items(account_id, pst_key, kind, status);
 CREATE INDEX IF NOT EXISTS items_folder2 ON items(account_id, pst_key, kind, folder);
@@ -143,25 +143,25 @@ SCHEMA = SCHEMA_TEMPLATE.replace("{ITEMS}", ITEMS_DDL.replace("{name}", "items")
 
 
 def pst_key_of(pst_row) -> str | None:
-    """Clé de rattachement des éléments à un PST : son empreinte (stable d'un envoi à l'autre du même fichier)."""
+    """Key attaching items to a PST: its fingerprint (stable across uploads of the same file)."""
     if pst_row is None:
         return None
     return pst_row["pst_sha"] or f"id:{pst_row['id']}"
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Migration : items(pst_id) → items(pst_key = empreinte du PST), clés kv `pst:<id>:crash_skips` → `pst:<sha>:…`."""
+    """Migration: items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")
         try:
             if "pst_key" in {r[1] for r in conn.execute("PRAGMA table_info(items)")}:
-                conn.execute("COMMIT")  # migré entre-temps par l'autre process
+                conn.execute("COMMIT")  # migrated in the meantime by the other process
                 conn.executescript(ITEMS_INDEXES)
                 return
             conn.execute("DROP TABLE IF EXISTS items_new")
             conn.execute(ITEMS_DDL.replace("{name}", "items_new"))
-            # en cas de collision (même PST envoyé deux fois), garder l'état le plus avancé
+            # on collision (same PST uploaded twice), keep the most advanced state
             conn.execute(
                 f"INSERT OR IGNORE INTO items_new({ITEMS_COLS}) "
                 "SELECT i.id, i.account_id, i.pst_id, COALESCE(p.pst_sha, 'id:' || i.pst_id), i.kind, i.item_key, "
@@ -219,7 +219,7 @@ def conn() -> sqlite3.Connection:
 
 
 def reset() -> None:
-    """Oublie les connexions (tests)."""
+    """Forget the connections (tests)."""
     c = getattr(_local, "conn", None)
     if c is not None:
         c.close()

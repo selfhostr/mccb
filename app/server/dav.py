@@ -1,4 +1,4 @@
-"""Client CalDAV / CardDAV minimal (sync, httpx + xml.etree)."""
+"""Minimal CalDAV / CardDAV client (sync, httpx + xml.etree)."""
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
@@ -11,7 +11,7 @@ NS_CAL = "urn:ietf:params:xml:ns:caldav"
 NS_CARD = "urn:ietf:params:xml:ns:carddav"
 
 IMPORT_NAME = "import-pst"
-IMPORT_DISPLAY = "Importé PST"
+IMPORT_DISPLAY = "PST Import"
 
 
 def _q(ns: str, name: str) -> str:
@@ -44,8 +44,8 @@ class DavClient:
                  timeout: float = 60.0, transport: httpx.BaseTransport | None = None):
         self.username = username
         self._auth = httpx.BasicAuth(username, password)
-        # Redirections gérées à la main (voir _send) : httpx transformerait
-        # PROPFIND en GET sur 301/302 et perdrait Authorization.
+        # Redirects handled by hand (see _send): httpx would turn
+        # PROPFIND into GET on 301/302 and drop Authorization.
         self._http = httpx.Client(
             verify=verify_tls,
             timeout=timeout,
@@ -62,16 +62,16 @@ class DavClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    # ---- bas niveau -------------------------------------------------
+    # ---- low level -------------------------------------------------
     MAX_REDIRECTS = 5
 
     def _send(self, method: str, url: str, **kw) -> httpx.Response:
-        """Requête avec redirections manuelles : méthode, corps et en-têtes
-        conservés (301/302/303/307/308 traités pareil, c'est ce qu'attend
-        WebDAV). Règle d'authentification : les identifiants ne sont renvoyés
-        que si la cible a le même hôte que la requête initiale et ne dégrade
-        pas https en http ; sinon la requête suit sans Authorization (jamais
-        de fuite de mot de passe vers un autre hôte)."""
+        """Request with manual redirects: method, body and headers
+        preserved (301/302/303/307/308 all treated the same, which is what
+        WebDAV expects). Authentication rule: credentials are only sent again
+        if the target has the same host as the initial request and does not downgrade
+        https to http; otherwise the request follows without Authorization (never
+        leaking the password to another host)."""
         origin = httpx.URL(url)
         cur = origin
         for _ in range(self.MAX_REDIRECTS + 1):
@@ -83,7 +83,7 @@ class DavClient:
                 cur = cur.join(loc)
                 continue
             return resp
-        raise DavError(f"{method} {url}: trop de redirections", temporary=False)
+        raise DavError(f"{method} {url}: too many redirects", temporary=False)
 
     def _request(self, method: str, url: str, ok: tuple[int, ...] | None = None,
                  **kw) -> httpx.Response:
@@ -117,7 +117,7 @@ class DavClient:
         try:
             root = ET.fromstring(resp.content)
         except ET.ParseError as e:
-            raise DavError(f"PROPFIND {url}: XML invalide ({e})") from e
+            raise DavError(f"PROPFIND {url}: invalid XML ({e})") from e
         out = []
         for r in root.findall(_q(NS_DAV, "response")):
             href_el = r.find(_q(NS_DAV, "href"))
@@ -161,12 +161,12 @@ class DavClient:
         return any(c.get("name", "").upper() == "VEVENT"
                    for c in comp.findall(_q(NS_CAL, "comp")))
 
-    # ---- découverte -------------------------------------------------
+    # ---- discovery -------------------------------------------------
     def _resolve(self, kind: str, start: str, create: bool
                  ) -> tuple[str | None, str | None]:
-        """Retourne (collection, home). collection None si absente."""
+        """Returns (collection, home). collection None if absent."""
         if kind not in ("caldav", "carddav"):
-            raise DavError(f"type inconnu: {kind}")
+            raise DavError(f"unknown type: {kind}")
         ns = NS_CAL if kind == "caldav" else NS_CARD
         home_prop = "calendar-home-set" if kind == "caldav" else "addressbook-home-set"
         coll_tag = "calendar" if kind == "caldav" else "addressbook"
@@ -178,14 +178,14 @@ class DavClient:
         except DavError as e:
             if e.status != 404:
                 raise
-            # URL cible (modèle du serveur) inexistante : la collection est créée à cette adresse
+            # target URL (server template) does not exist: the collection is created at this address
             if not create:
                 return None, _slash(start)
             created = self._mkcol(kind, _slash(start))
-            # URL canonique (href renvoyé par le serveur, ex. « @ » encodé) : identique aux découvertes suivantes
+            # canonical URL (href returned by the server, e.g. encoded "@"): identical to subsequent discoveries
             return self._resolve(kind, created, False)[0] or created, None
         if not entries:
-            raise DavError(f"PROPFIND {start}: réponse vide")
+            raise DavError(f"PROPFIND {start}: empty response")
         here, props = entries[0]
         if self._is_kind(props, kind):
             return _slash(here), None
@@ -217,12 +217,12 @@ class DavClient:
         return self._create_collection(kind, home), home
 
     def _create_collection(self, kind: str, home: str) -> str:
-        # slugs distincts : CalDAV et CardDAV partagent souvent le même home (Radicale…)
+        # distinct slugs: CalDAV and CardDAV often share the same home (Radicale...)
         return self._mkcol(kind, home + IMPORT_NAME + ("-agenda/" if kind == "caldav" else "-contacts/"))
 
     def _mkcol(self, kind: str, url: str) -> str:
-        """Crée la collection « Importé PST » à `url` : MKCALENDAR (CalDAV) ou MKCOL étendu (CardDAV, RFC 5689).
-        Refus du serveur → DavError explicite (non temporaire sauf 5xx/429)."""
+        """Creates the "PST Import" collection at `url`: MKCALENDAR (CalDAV) or extended MKCOL (CardDAV, RFC 5689).
+        Server refusal -> explicit DavError (non-temporary except 5xx/429)."""
         if kind == "caldav":
             root = ET.Element(_q(NS_CAL, "mkcalendar"))
             setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
@@ -244,11 +244,11 @@ class DavClient:
                           headers={"Content-Type": "application/xml; charset=utf-8"})
         except DavError as e:
             if e.status == 405 and self._is_collection(kind, url):
-                return url  # existe déjà (créée entre-temps)
-            what = "de l'agenda" if kind == "caldav" else "du carnet d'adresses"
-            raise DavError(f"création {what} « {IMPORT_DISPLAY} » refusée par le serveur "
-                           f"({method} {url} -> {f'HTTP {e.status}' if e.status else e}) : créez la collection "
-                           f"manuellement ou indiquez son URL dans la configuration du serveur",
+                return url  # already exists (created in the meantime)
+            what = "the calendar" if kind == "caldav" else "the address book"
+            raise DavError(f"creation of {what} '{IMPORT_DISPLAY}' refused by the server "
+                           f"({method} {url} -> {f'HTTP {e.status}' if e.status else e}): create the collection "
+                           f"manually or set its URL in the server configuration",
                            temporary=e.temporary, status=e.status) from e
         return url
 
@@ -260,7 +260,7 @@ class DavClient:
         return bool(entries) and self._is_kind(entries[0][1], kind)
 
     def ensure_collection(self, kind: str, url: str) -> str:
-        """La collection `url` existe (sinon elle est créée). Utile si elle a disparu après la découverte."""
+        """The collection `url` exists (otherwise it is created). Useful if it disappeared after discovery."""
         if self._is_collection(kind, url):
             return url
         return self._mkcol(kind, _slash(url))
@@ -290,7 +290,7 @@ class DavClient:
                  imap_host: str, create: bool = True) -> str:
         coll, _ = self._discover(kind, template_url, email, imap_host, create)
         if coll is None:
-            raise DavError(f"aucune collection {kind} trouvée")
+            raise DavError(f"no {kind} collection found")
         return coll
 
     def test(self, kind: str, template_url: str | None, email: str,
@@ -298,15 +298,15 @@ class DavClient:
         try:
             coll, home = self._discover(kind, template_url, email, imap_host, False)
         except DavError as e:
-            return False, f"Échec de la connexion {kind} : {e}"
-        except Exception as e:  # ne lève jamais
-            return False, f"Erreur inattendue {kind} : {e}"
+            return False, f"{kind} connection failed: {e}"
+        except Exception as e:  # never raises
+            return False, f"Unexpected {kind} error: {e}"
         if coll:
-            return True, f"Connexion {kind} réussie : {coll}"
-        return True, (f"Connexion {kind} réussie ; aucune collection trouvée dans "
-                      f"{home}, la collection « {IMPORT_DISPLAY} » sera créée.")
+            return True, f"{kind} connection successful: {coll}"
+        return True, (f"{kind} connection successful; no collection found in "
+                      f"{home}, the '{IMPORT_DISPLAY}' collection will be created.")
 
-    # ---- objets -----------------------------------------------------
+    # ---- objects -----------------------------------------------------
     @staticmethod
     def _item_url(collection_url: str, filename: str) -> str:
         return _slash(collection_url) + quote(filename, safe="")
@@ -324,7 +324,7 @@ class DavClient:
 
     def get(self, collection_url: str, filename: str) -> str | None:
         try:
-            # avec identifiants (comme toutes les autres requêtes) : sinon 401 sur un serveur authentifié
+            # with credentials (like all other requests): otherwise 401 on an authenticated server
             resp = self._send("GET", self._item_url(collection_url, filename))
         except httpx.HTTPError as e:
             raise DavError(f"GET: {e.__class__.__name__}: {e}", temporary=True) from e
@@ -349,7 +349,7 @@ class DavClient:
         return n
 
     def names(self, collection_url: str) -> set[str]:
-        """Noms (dernier segment décodé) des ressources non-collection de la collection."""
+        """Names (last decoded segment) of the non-collection resources of the collection."""
         from urllib.parse import unquote, urlparse
         url = _slash(collection_url)
         out: set[str] = set()

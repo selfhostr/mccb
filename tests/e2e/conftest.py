@@ -1,4 +1,4 @@
-"""Fixtures e2e (voir helpers.py). Ignorés sans les services de docker-compose.test.yml."""
+"""E2E fixtures (see helpers.py). Skipped without the docker-compose.test.yml services."""
 import sys
 from pathlib import Path
 

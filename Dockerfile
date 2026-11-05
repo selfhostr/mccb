@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
     DATA_DIR=/data PORT=22362
 
-# build-essential/zlib : compilation de libpff-python (pypff) si pas de wheel
+# build-essential/zlib: to compile libpff-python (pypff) when no wheel is available
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential zlib1g-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*

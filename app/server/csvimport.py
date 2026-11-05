@@ -1,5 +1,5 @@
-"""Import CSV des comptes : `email;password[;login]`, séparateur `;` ou `,`, entête optionnel,
-encodage UTF-8 (avec ou sans BOM) ou cp1252."""
+"""CSV import of accounts: `email;password[;login]`, `;` or `,` separator, optional header,
+UTF-8 encoding (with or without BOM) or cp1252."""
 from __future__ import annotations
 
 import csv
@@ -30,7 +30,7 @@ def sniff_delimiter(text: str) -> str:
 
 
 def parse(data: bytes) -> tuple[list[dict], list[dict]]:
-    """Retourne (lignes valides [{line,email,password,login}], erreurs [{line,msg}])."""
+    """Returns (valid rows [{line,email,password,login}], errors [{line,msg}])."""
     text = decode_bytes(data)
     delim = sniff_delimiter(text)
     rows, errors = [], []
@@ -58,13 +58,13 @@ def parse(data: bytes) -> tuple[list[dict], list[dict]]:
             return rec[i] if i < len(rec) else ""
         email, password, login = get("email"), get("password"), get("login")
         if not EMAIL_RE.match(email):
-            errors.append({"line": lineno, "msg": f"adresse e-mail invalide : {email!r}"})
+            errors.append({"line": lineno, "msg": f"invalid email address: {email!r}"})
             continue
         if not password:
-            errors.append({"line": lineno, "msg": f"mot de passe manquant pour {email}"})
+            errors.append({"line": lineno, "msg": f"missing password for {email}"})
             continue
         rows.append({"line": lineno, "email": email, "password": password, "login": login})
     return rows, errors
 
 
-TEMPLATE = "email;password;login\r\njean.dupont@exemple.fr;MotDePasse;\r\n"
+TEMPLATE = "email;password;login\r\njohn.doe@example.com;Password;\r\n"

@@ -30,17 +30,17 @@ def test_resumable_upload_roundtrip(client, env, tmp_path):
     cs = up["chunk_size"]
     assert cs == 64 * 1024 and up["received"] == []
     chunks = [data[i:i + cs] for i in range(0, len(data), cs)]
-    # chunk au hash faux → 422, non enregistré
+    # chunk with wrong hash → 422, not recorded
     assert _put(client, up["id"], 0, chunks[0], sha="0" * 64).status_code == 422
     # chunk de taille incorrecte → 422
     assert _put(client, up["id"], 1, chunks[1][:-1]).status_code == 422
-    # désordre + doublon
+    # out of order + duplicate
     for n in (2, 0, 2):
         assert _put(client, up["id"], n, chunks[n]).status_code == 200
     assert _put(client, up["id"], 99, b"x").status_code == 416
-    # complete prématuré → 409
+    # premature complete → 409
     assert client.post(f"/api/uploads/{up['id']}/complete").status_code == 409
-    # reprise : même fichier = même upload
+    # resume: same file = same upload
     r2 = client.post("/api/uploads", json=meta).json()
     assert r2["id"] == up["id"] and r2["received"] == [0, 2]
     for n in range(len(chunks)):
@@ -57,10 +57,10 @@ def test_resumable_upload_roundtrip(client, env, tmp_path):
     assert p["status"] == "valid", p
     assert p["scan"]["totals"]["mail"] == 11 and p["filename"] == "client été.pst"
     assert client.get("/api/psts").json()[0]["id"] == up["id"]
-    # chunk renvoyé après validation : idempotent si identique, refusé sinon
+    # chunk resent after validation: idempotent if identical, refused otherwise
     assert _put(client, up["id"], 0, chunks[0]).status_code == 200
     assert _put(client, up["id"], 0, b"y" * len(chunks[0])).status_code == 409
-    # association à un compte puis suppression
+    # association with an account then deletion
     sid = client.post("/api/servers", json={"name": "s", "imap_host": "h"}).json()["id"]
     aid = client.post("/api/accounts", json={"server_id": sid, "email": "u@example.test", "password": "p"}).json()["id"]
     assert client.put(f"/api/accounts/{aid}/pst", json={"pst_id": up["id"]}).json()["pst_id"] == up["id"]
@@ -85,7 +85,7 @@ def test_disk_space_checked(client, env):
 
 
 def test_streaming_large_chunk(client, env, monkeypatch):
-    """Un chunk de plusieurs Mo est écrit en streaming à son offset."""
+    """A multi-MB chunk is written by streaming at its offset."""
     from app.server.config import settings
     monkeypatch.setattr(settings, "chunk_size", 8 * 1024 * 1024)
     data = b"!BDN" + os.urandom(8 * 1024 * 1024 + 1000 - 4)
@@ -98,7 +98,7 @@ def test_streaming_large_chunk(client, env, monkeypatch):
 
 
 def test_validation_crash_marks_invalid(client, env, monkeypatch):
-    """L'analyse tourne dans un sous-processus : un crash natif (SIGSEGV simulé) → PST « invalid »."""
+    """The scan runs in a subprocess: a native crash (simulated SIGSEGV) → PST « invalid »."""
     monkeypatch.setenv("PSTMIG_TEST_CRASH", "validate")
     data = make_fake_pst(str(env.data_dir / "c.pst"), 70_000)
     up = client.post("/api/uploads", json={"filename": "c.pst", "size": len(data), "last_modified": 3}).json()
@@ -108,5 +108,5 @@ def test_validation_crash_marks_invalid(client, env, monkeypatch):
     assert client.post(f"/api/uploads/{up['id']}/complete").json()["status"] == "validating"
     _validate(env)
     p = client.get(f"/api/psts/{up['id']}").json()
-    assert p["status"] == "invalid" and "crash libpff pendant l'analyse" in p["error"], p
+    assert p["status"] == "invalid" and "libpff crash during analysis" in p["error"], p
     assert "SIGSEGV" in p["error"]

@@ -31,8 +31,8 @@ def test_servers_crud(client):
     assert s["carddav_url"] == "https://dav/{email}/"
     sid = s["id"]
     assert client.get(f"/api/servers/{sid}").json()["name"] == "Prod"
-    upd = dict(SRV, name="Prod 2", root_folder="Import PST", workers=2)
-    assert client.put(f"/api/servers/{sid}", json=upd).json()["root_folder"] == "Import PST"
+    upd = dict(SRV, name="Prod 2", root_folder="PST Import", workers=2)
+    assert client.put(f"/api/servers/{sid}", json=upd).json()["root_folder"] == "PST Import"
     assert len(client.get("/api/servers").json()) == 1
     assert client.post("/api/servers", json=dict(SRV, imap_security="bad")).status_code == 422
     assert client.delete(f"/api/servers/{sid}").status_code == 200

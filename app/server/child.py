@@ -1,12 +1,12 @@
-"""Sous-processus d'exécution isolé : un job ou une analyse de PST par process.
+"""Isolated execution subprocess: one job or one PST analysis per process.
 
-libpff (code natif) peut planter (SIGSEGV) sur un PST corrompu : le worker parent survit, constate la mort du
-sous-processus et applique la reprise (élément fautif marqué « crash libpff », voir worker.py).
+libpff (native code) may crash (SIGSEGV) on a corrupted PST: the parent worker survives, notices the death of the
+subprocess and applies recovery (faulty item marked "libpff crash", see worker.py).
 
     python -m app.server.child job <job_id> <worker_id>
     python -m app.server.child validate <pst_id>
 
-Crochet de test PSTMIG_TEST_CRASH : voir crash.maybe_crash (actif uniquement dans ce sous-processus).
+Test hook PSTMIG_TEST_CRASH: see crash.maybe_crash (active only in this subprocess).
 """
 from __future__ import annotations
 
@@ -26,14 +26,14 @@ def main(argv: list[str]) -> int:
     crash.die_with_parent()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _terminated)
-    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C : géré par le parent
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C: handled by the parent
     from . import db
     if len(argv) >= 3 and argv[0] == "job":
         job_id, worker_id = int(argv[1]), argv[2]
         from .runner import run_job
         try:
             run_job(job_id, worker_id)
-        except Exception as e:  # dernier filet : le job ne reste jamais « running »
+        except Exception as e:  # last safety net: the job never stays "running"
             logging.getLogger("child").exception("job %s", job_id)
             db.ex("UPDATE jobs SET status='failed', error=?, worker_id=NULL, finished_at=? WHERE id=?",
                   (f"{type(e).__name__}: {e}", time.time(), job_id))

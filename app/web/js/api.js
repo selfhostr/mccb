@@ -26,7 +26,7 @@ export const post = (p, b, o) => api('POST', p, b ?? {}, o);
 export const put = (p, b, o) => api('PUT', p, b, o);
 export const del = (p, o) => api('DELETE', p, undefined, o);
 
-// SSE avec reconnexion automatique (backoff) ; émet sur le bus : job / upload / pst / account / sse-state
+// SSE with automatic reconnection (backoff); emits on the bus: job / upload / pst / account / sse-state
 let es = null, retry = 0, timer = null, wanted = false;
 export function startEvents() {
   wanted = true; if (es) return;

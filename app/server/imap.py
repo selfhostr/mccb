@@ -1,4 +1,4 @@
-"""Client IMAP (imaplib) : connexion, UTF-7 modifié, dossiers, APPEND, recherche, quota."""
+"""IMAP client (imaplib): connection, modified UTF-7, folders, APPEND, search, quota."""
 from __future__ import annotations
 
 import base64
@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-imaplib._MAXLINE = 10_000_000  # réponses LIST volumineuses
+imaplib._MAXLINE = 10_000_000  # large LIST responses
 
 SPECIAL_FLAGS = {"sent": "\\Sent", "drafts": "\\Drafts", "trash": "\\Trash", "junk": "\\Junk"}
 SPECIAL_NAMES = {
@@ -22,7 +22,7 @@ SPECIAL_NAMES = {
 SPECIAL_DEFAULT = {"sent": "Sent", "drafts": "Drafts", "trash": "Trash", "junk": "Junk"}
 
 
-# ---------------------------------------------------------------- UTF-7 modifié (RFC 3501 §5.1.3)
+# ---------------------------------------------------------------- modified UTF-7 (RFC 3501 §5.1.3)
 def _b64enc(s: str) -> str:
     return base64.b64encode(s.encode("utf-16-be")).decode("ascii").rstrip("=").replace("/", ",")
 
@@ -67,29 +67,29 @@ def quote(s: str) -> str:
 
 
 def _login(M: imaplib.IMAP4, login: str, password: str) -> None:
-    """AUTHENTICATE PLAIN en UTF-8 si annoncé, sinon LOGIN avec chaînes
-    correctement citées (imaplib.login ne cite pas et force l'ASCII)."""
+    """AUTHENTICATE PLAIN in UTF-8 if advertised, otherwise LOGIN with properly
+    quoted strings (imaplib.login does not quote and forces ASCII)."""
     caps = {c.upper() for c in getattr(M, "capabilities", ())}
     if "AUTH=PLAIN" in caps:
         blob = b"\0".join((b"", login.encode("utf-8"), password.encode("utf-8")))
         M.authenticate("PLAIN", lambda _challenge: blob)
         return
-    # imaplib encode les commandes en ASCII par défaut : passer en UTF-8
+    # imaplib encodes commands in ASCII by default: switch to UTF-8
     old = M._encoding
     M._encoding = "utf-8"
     try:
         typ, data = M._simple_command("LOGIN", quote(login), quote(password))
         if typ != "OK":
-            raise imaplib.IMAP4.error(_text(data) or "LOGIN refusé")
+            raise imaplib.IMAP4.error(_text(data) or "LOGIN refused")
         M.state = "AUTH"
     finally:
         M._encoding = old
 
 
-# ---------------------------------------------------------------- erreurs
+# ---------------------------------------------------------------- errors
 class ImapError(Exception):
-    """Erreur IMAP. kind : 'temp' (réessayer), 'perm' (définitive pour l'élément), 'fatal' (arrêter la boîte),
-    'auth' (identifiants), 'trycreate' (dossier absent)."""
+    """IMAP error. kind: 'temp' (retry), 'perm' (permanent for the item), 'fatal' (stop the mailbox),
+    'auth' (credentials), 'trycreate' (folder missing)."""
 
     def __init__(self, msg: str, kind: str = "perm"):
         super().__init__(msg)
@@ -133,7 +133,7 @@ def wrap_exc(e: BaseException) -> ImapError:
     if isinstance(e, ImapError):
         return e
     if isinstance(e, (imaplib.IMAP4.abort, OSError, socket.timeout, ssl.SSLError, EOFError)):
-        return ImapError(f"connexion IMAP : {e}", "temp")
+        return ImapError(f"IMAP connection: {e}", "temp")
     if isinstance(e, imaplib.IMAP4.error):
         return ImapError(str(e), classify_response(str(e)))
     return ImapError(f"{type(e).__name__}: {e}", "perm")
@@ -145,7 +145,7 @@ LIST_RE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?P<delim>NIL|"(?:[^"\\]|\\.)*")\
 
 @dataclass
 class Mailbox:
-    name: str          # nom brut (UTF-7 modifié)
+    name: str          # raw name (modified UTF-7)
     flags: list[str]
     delim: str | None
 
@@ -173,7 +173,7 @@ def parse_list(data) -> list[Mailbox]:
         i += 1
         if d is None:
             continue
-        if isinstance(d, tuple):  # nom en littéral
+        if isinstance(d, tuple):  # name as literal
             line = d[0].decode("utf-8", "replace") if isinstance(d[0], bytes) else d[0]
             literal = d[1].decode("utf-8", "replace") if isinstance(d[1], bytes) else d[1]
             m = LIST_RE.match(line.strip())
@@ -192,7 +192,7 @@ def parse_list(data) -> list[Mailbox]:
     return out
 
 
-# ---------------------------------------------------------------- connexion
+# ---------------------------------------------------------------- connection
 @dataclass
 class ImapParams:
     host: str
@@ -220,7 +220,7 @@ class ImapConn:
         self.selected: str | None = None
         self._delim: str | None = None
 
-    # -- cycle de vie
+    # -- lifecycle
     def connect(self) -> "ImapConn":
         self.close()
         p = self.p
@@ -232,7 +232,7 @@ class ImapConn:
                 if p.security == "starttls":
                     M.starttls(ssl_context=_ssl_ctx(p.verify_tls))
         except Exception as e:
-            raise ImapError(f"connexion à {p.host}:{p.port} impossible : {e}", "temp") from e
+            raise ImapError(f"cannot connect to {p.host}:{p.port}: {e}", "temp") from e
         try:
             _login(M, p.login, p.password)
         except imaplib.IMAP4.error as e:
@@ -241,7 +241,7 @@ class ImapConn:
             except Exception:
                 pass
             k = classify_response(str(e))
-            raise ImapError(f"authentification refusée : {e}", "temp" if k == "temp" else "auth") from e
+            raise ImapError(f"authentication refused: {e}", "temp" if k == "temp" else "auth") from e
         except Exception as e:
             raise wrap_exc(e) from e
         self.M = M
@@ -276,10 +276,10 @@ class ImapConn:
     def _check(self, typ, data, what: str):
         if typ != "OK":
             t = _text(data)
-            raise ImapError(f"{what} : {typ} {t}", classify_response(t))
+            raise ImapError(f"{what}: {typ} {t}", classify_response(t))
         return data
 
-    # -- dossiers
+    # -- folders
     def list(self) -> list[Mailbox]:
         try:
             typ, data = self._m().list('""', '"*"')
@@ -322,7 +322,7 @@ class ImapConn:
             t = _text(data).upper()
             if "ALREADYEXISTS" in t or "EXISTS" in t:
                 return
-            raise ImapError(f"CREATE {name} : {_text(data)}", classify_response(t))
+            raise ImapError(f"CREATE {name}: {_text(data)}", classify_response(t))
         try:
             M.subscribe(quote(name))
         except Exception:
@@ -352,7 +352,7 @@ class ImapConn:
 
     # -- messages
     def append(self, name: str, raw: bytes, flags: list[str], internaldate: datetime | None) -> str | None:
-        """Retourne l'UID (APPENDUID) si disponible."""
+        """Returns the UID (APPENDUID) if available."""
         M = self._m()
         fl = "(" + " ".join(flags) + ")" if flags else None
         dt = imaplib.Time2Internaldate(internaldate) if internaldate else None
@@ -362,7 +362,7 @@ class ImapConn:
             raise wrap_exc(e) from e
         if typ != "OK":
             t = _text(data)
-            raise ImapError(f"APPEND : {typ} {t}", classify_response(t))
+            raise ImapError(f"APPEND: {typ} {t}", classify_response(t))
         m = re.search(r"APPENDUID\s+\d+\s+(\d+)", _text(data) + " " + _text(M.untagged_responses.get("APPENDUID", [])))
         return m.group(1) if m else None
 
@@ -382,7 +382,7 @@ class ImapConn:
         return [u for u in t.split() if u.isdigit()]
 
     def fetch_header_values(self, name: str, uids: list[str], header: str) -> dict[str, list[str]]:
-        """{uid: [valeurs dépliées de l'en-tête]} via UID FETCH BODY.PEEK[HEADER.FIELDS (header)]."""
+        """{uid: [unfolded header values]} via UID FETCH BODY.PEEK[HEADER.FIELDS (header)]."""
         if not uids:
             return {}
         if self.selected != name:
@@ -408,9 +408,9 @@ class ImapConn:
         return out
 
     def find_import_id(self, name: str, header: str, import_id: str) -> list[str]:
-        """UIDs dont l'en-tête `header` vaut EXACTEMENT import_id. SEARCH HEADER est une recherche de
-        sous-chaîne (`sha-f-12` trouverait `sha-f-123`) : les candidats sont relus et comparés.
-        import_id est délimité (`<sha-clé>`) ; la forme historique non délimitée (`sha-clé`) est aussi acceptée."""
+        """UIDs whose `header` header equals EXACTLY import_id. SEARCH HEADER is a
+        substring search (`sha-f-12` would find `sha-f-123`): the candidates are re-read and compared.
+        import_id is delimited (`<sha-key>`); the legacy undelimited form (`sha-key`) is also accepted."""
         bare = import_id.strip()
         if bare.startswith("<") and bare.endswith(">"):
             bare = bare[1:-1]
@@ -422,8 +422,8 @@ class ImapConn:
         return [u for u in cands if any(v in wanted for v in vals.get(u, []))]
 
     def count_import_prefix(self, name: str, header: str, prefix: str) -> int:
-        """Nombre de messages du dossier dont l'en-tête `header` contient prefix (empreinte du PST + « - ») :
-        ne compte que nos propres messages, pas le contenu préexistant du dossier."""
+        """Number of messages in the folder whose `header` header contains prefix (PST fingerprint + "-"):
+        counts only our own messages, not the folder's pre-existing content."""
         return len(self.search_header(name, header, prefix))
 
     def fetch_raw(self, name: str, uid: str) -> bytes | None:
@@ -440,7 +440,7 @@ class ImapConn:
         return None
 
     def quota(self) -> dict | None:
-        """{'used': octets, 'limit': octets} ou None si non supporté."""
+        """{'used': bytes, 'limit': bytes} or None if unsupported."""
         if "QUOTA" not in self.caps:
             return None
         M = self._m()
@@ -468,7 +468,7 @@ class ImapConn:
             raise wrap_exc(e) from e
 
 
-# ---------------------------------------------------------------- dossiers spéciaux
+# ---------------------------------------------------------------- special folders
 def find_special(boxes: list[Mailbox], special: str) -> str | None:
     flag = SPECIAL_FLAGS.get(special)
     if flag:
@@ -487,7 +487,7 @@ def find_special(boxes: list[Mailbox], special: str) -> str | None:
 
 
 def with_retry(fn, conn: ImapConn, retries: int = 5, base_delay: float = 1.0, should_stop=None):
-    """Exécute fn(conn) avec reconnexion + backoff exponentiel sur erreurs temporaires."""
+    """Runs fn(conn) with reconnection + exponential backoff on temporary errors."""
     attempt = 0
     while True:
         try:
@@ -511,7 +511,7 @@ def with_retry(fn, conn: ImapConn, retries: int = 5, base_delay: float = 1.0, sh
 
 
 def personal_prefix(conn: ImapConn) -> str:
-    """Préfixe de l'espace de noms personnel (ex. « INBOX. » chez Courier/Cyrus), sinon ''."""
+    """Personal namespace prefix (e.g. "INBOX." on Courier/Cyrus), otherwise ''."""
     if "NAMESPACE" not in conn.caps:
         return ""
     try:

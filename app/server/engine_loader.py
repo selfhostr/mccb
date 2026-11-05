@@ -1,4 +1,4 @@
-"""Chargement du module ENGINE (remplaçable par un faux engine via PSTMIG_ENGINE)."""
+"""Loading of the ENGINE module (replaceable by a fake engine via PSTMIG_ENGINE)."""
 from __future__ import annotations
 
 import importlib
@@ -11,7 +11,7 @@ def engine():
 
 
 def check_signature(path: str) -> bool:
-    """Signature PST « !BDN » (vérifiée ici ET par l'engine)."""
+    """PST signature "!BDN" (checked here AND by the engine)."""
     try:
         with open(path, "rb") as f:
             if f.read(4) != b"!BDN":

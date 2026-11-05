@@ -1,8 +1,8 @@
-"""Bout en bout : VRAI engine (libpff), VRAIE API HTTP (uvicorn) et VRAI worker en sous-processus,
-contre GreenMail (IMAP, authentification active) et Radicale (CalDAV/CardDAV, htpasswd) de docker-compose.test.yml.
+"""End to end: REAL engine (libpff), REAL HTTP API (uvicorn) and REAL worker in a subprocess,
+against GreenMail (IMAP, authentication enabled) and Radicale (CalDAV/CardDAV, htpasswd) from docker-compose.test.yml.
 
-Chaque « Stack » = un DATA_DIR temporaire + `python -m app.server.web` + `python -m app.server.worker` lancés avec
-un environnement propre (aucune variable PSTMIG_* héritée de tests/server : pas de faux engine).
+Each "Stack" = a temporary DATA_DIR + `python -m app.server.web` + `python -m app.server.worker` started with
+a clean environment (no PSTMIG_* variable inherited from tests/server: no fake engine).
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ class Stack:
     def _popen(self, mod: str, name: str, env: dict) -> subprocess.Popen:
         log = open(self.base / f"{name}.log", "ab")
         self._logs.append(log)
-        # nouvelle session : le groupe de processus = ce process + ses sous-processus (kill ciblé possible)
+        # new session: the process group = this process + its subprocesses (targeted kill possible)
         return subprocess.Popen([sys.executable, "-m", mod], cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
 
@@ -86,8 +86,8 @@ class Stack:
                     break
             except httpx.TransportError:
                 pass
-            assert self.web.poll() is None, "web arrêté au démarrage :\n" + self.tail("web")
-            assert time.time() < end, "web ne répond pas :\n" + self.tail("web")
+            assert self.web.poll() is None, "web stopped at startup:\n" + self.tail("web")
+            assert time.time() < end, "web not responding:\n" + self.tail("web")
             time.sleep(0.2)
         r = self.client.post("/api/login", json={"password": ADMIN})
         assert r.status_code == 200, r.text
@@ -148,7 +148,7 @@ class Stack:
             if j["status"] in statuses and (cond is None or cond(j)):
                 return j
             time.sleep(0.1)
-        raise AssertionError(f"job {jid} bloqué : {j}\n{self.job_log(jid)}\n--- worker\n{self.tail('worker')}")
+        raise AssertionError(f"job {jid} stuck: {j}\n{self.job_log(jid)}\n--- worker\n{self.tail('worker')}")
 
     def create_server(self, **kw) -> dict:
         body = {"name": "e2e", "imap_host": IMAP_HOST, "imap_port": IMAP_PORT, "imap_security": "none",
@@ -162,7 +162,7 @@ class Stack:
                         json={"server_id": server_id, "email": email_addr, "password": password}).json()
 
     def upload(self, path: Path, bad_chunk: int | None = 0, name: str | None = None) -> dict:
-        """Upload par chunks via l'API ; `bad_chunk` est d'abord envoyé avec un hash faux (refusé), puis renvoyé."""
+        """Chunked upload via the API; `bad_chunk` is first sent with a wrong hash (rejected), then resent."""
         data = path.read_bytes()
         st = path.stat()
         up = self.api("POST", "/api/uploads", 200,
@@ -190,14 +190,14 @@ class Stack:
             p = self.api("GET", f"/api/psts/{up['id']}").json()
             if p["status"] in ("valid", "invalid"):
                 return p
-            assert time.time() < end, f"validation bloquée : {p}\n{self.tail('worker')}"
+            assert time.time() < end, f"validation stuck : {p}\n{self.tail('worker')}"
             time.sleep(0.2)
 
 
 # ====================================================================== source (engine lu directement)
 def attachments_of(msg) -> list[tuple]:
-    """(nom, taille décodée | 'rfc822') des pièces jointes/inline nommées du message, dans l'ordre du MIME
-    (sans descendre dans les messages joints, qui comptent pour une pièce jointe)."""
+    """(name, decoded size | 'rfc822') of the message's named attachments/inline parts, in MIME order
+    (without descending into attached messages, which count as one attachment)."""
     out = []
 
     def walk(part):
@@ -219,17 +219,17 @@ def attachments_of(msg) -> list[tuple]:
 
 
 def fffd_problems(msg, where: str = "") -> list[str]:
-    """U+FFFD dans les en-têtes décodés ou les corps texte/HTML (y compris des messages joints)."""
+    """U+FFFD in decoded headers or text/HTML bodies (including attached messages)."""
     bad = []
     for part in msg.walk():
         for k, v in part.items():
             if "\ufffd" in str(v):
-                bad.append(f"{where} en-tête {k}")
+                bad.append(f"{where} header {k}")
         if part.get_content_maintype() == "text" and not part.is_multipart():
             try:
                 txt = part.get_content()
             except Exception as e:  # noqa: BLE001
-                bad.append(f"{where} corps {part.get_content_type()} illisible : {e}")
+                bad.append(f"{where} body {part.get_content_type()} unreadable : {e}")
                 continue
             if "\ufffd" in txt:
                 bad.append(f"{where} corps {part.get_content_type()}")
@@ -244,13 +244,13 @@ _SOURCE_CACHE: dict = {}
 
 
 def source_model(path: Path, pst_sha: str) -> dict:
-    """Modèle de référence construit avec l'engine : mails par dossier (import id, sujet, PJ), objets DAV."""
+    """Reference model built with the engine: mails per folder (import id, subject, attachments), DAV objects."""
     key = (str(path), pst_sha)
     if key in _SOURCE_CACHE:
         return _SOURCE_CACHE[key]
     from app.engine import PstFile
     from app.server.runner import import_id_of
-    # skipped : éléments que l'engine ne convertit pas (ex. rendez-vous supprimés rangés dans « Deleted Items »)
+    # skipped: items the engine does not convert (e.g. deleted appointments filed in "Deleted Items")
     model = {"mail": {}, "calendar": {}, "contacts": {}, "errors": [], "skipped": {"mail": 0, "calendar": 0, "contacts": 0}}
     with PstFile(str(path)) as p:
         for f in p.folders():
@@ -290,7 +290,7 @@ _LIST_RE = re.compile(rb'^\((?P<flags>[^)]*)\) (?P<delim>"[^"]*"|NIL) (?P<name>.
 
 
 class ImapView:
-    """Contenu IMAP d'une boîte : {import_id: [(mailbox, uid)]}, nombre de messages par mailbox."""
+    """IMAP content of a mailbox: {import_id: [(mailbox, uid)]}, message count per mailbox."""
 
     def __init__(self, user: str, password: str = "pw"):
         self._cred = (user, password)
@@ -301,7 +301,7 @@ class ImapView:
         self.M.login(*self._cred)
 
     def _reading(self, fn, *args):
-        """Lecture seule : GreenMail ferme parfois la connexion (EOF) sous charge → reconnexion et nouvel essai."""
+        """Read-only: GreenMail sometimes closes the connection (EOF) under load → reconnect and retry."""
         for attempt in range(3):
             try:
                 return fn(*args)
@@ -367,11 +367,11 @@ class ImapView:
                 flags = set(re.search(rb"FLAGS \(([^)]*)\)", meta).group(1).decode().split()) - {"\\Recent"}
                 idate = time.mktime(imaplib.Internaldate2tuple(meta))
                 return d[1], flags, idate
-        raise AssertionError(f"UID {uid} introuvable dans {mb}")
+        raise AssertionError(f"UID {uid} not found in {mb}")
 
 
 def dav_names(url: str, user: str, password: str = "pw") -> set[str]:
-    """Noms des ressources (non-collections) d'une collection DAV (PROPFIND Depth 1)."""
+    """Names of the resources (non-collections) of a DAV collection (PROPFIND Depth 1)."""
     from urllib.parse import unquote, urlparse
     body = b'<?xml version="1.0"?><propfind xmlns="DAV:"><prop><resourcetype/><getetag/></prop></propfind>'
     r = httpx.request("PROPFIND", url, content=body, auth=(user, password), timeout=60,
@@ -398,7 +398,7 @@ def dav_get(url: str, name: str, user: str, password: str = "pw") -> str:
 
 
 def verify_on_servers(stack, user: str, pst: dict, model: dict, report: dict, check_all: bool = True) -> dict:
-    """Contrôle direct GreenMail/Radicale vs source. Retourne {mail, calendar, contacts} importés."""
+    """Direct GreenMail/Radicale check vs source. Returns the imported {mail, calendar, contacts}."""
     sha = pst["pst_sha"]
     errors = report["errors"]
     err_keys = {(e["kind"], e["item_key"]) for e in errors}
@@ -408,14 +408,14 @@ def verify_on_servers(stack, user: str, pst: dict, model: dict, report: dict, ch
         ours = {k: locs for k, locs in ids.items() if k.startswith(f"<{sha}-")}
         dups = {k: locs for k, locs in ours.items() if len(locs) != 1}
         assert not dups, f"doublons : {dups}"
-        assert len(ours) == len(ids), "messages inattendus sur le serveur"
-        # nombre par dossier = source − éléments en erreur (listés dans le rapport)
+        assert len(ours) == len(ids), "unexpected messages on the server"
+        # count per folder = source − items in error (listed in the report)
         target_of = {tuple(f["path"]): f["target"] for f in report["folders"]}
         from app.server.imap import utf7_decode
         delim = report.get("imap_delimiter") or "."
         for pth, tgt in target_of.items():
             if tgt.upper() != "INBOX" and tgt not in ("Sent", "Drafts", "Trash", "Junk", "Outbox"):
-                # nom de dossier : accents intacts (UTF-7 modifié décodé = nom source)
+                # folder name: accents intact (decoded modified UTF-7 = source name)
                 assert utf7_decode(tgt).split(delim)[-1] == pth[-1].replace(delim, "_"), (pth, tgt)
         expected_ids = set()
         for path, items in model["mail"].items():
@@ -424,13 +424,13 @@ def verify_on_servers(stack, user: str, pst: dict, model: dict, report: dict, ch
             if not items:
                 continue
             tgt = target_of.get(path)
-            assert tgt, f"dossier {path} absent du rapport : {report['folders']}"
+            assert tgt, f"folder {path} missing from the report : {report['folders']}"
             got = sum(1 for locs in ours.values() if locs[0][0] == tgt)
             assert got == len(exp) == counts.get(tgt, 0), (path, tgt, got, len(exp), counts.get(tgt))
             fr = next(f for f in report["folders"] if f["target"] == tgt)
             assert fr["present"] == fr["sent"] == len(exp) and fr["ok"], fr
         assert set(ours) == expected_ids
-        # contenu : PJ (noms + tailles) identiques à la sortie de l'engine, pas de U+FFFD
+        # content: attachments (names + sizes) identical to the engine output, no U+FFFD
         n_att = 0
         for path, items in model["mail"].items():
             for it in items:
@@ -443,12 +443,12 @@ def verify_on_servers(stack, user: str, pst: dict, model: dict, report: dict, ch
                 msg = parse(raw)
                 assert msg["X-PST-Import-Id"].strip() == it["import_id"]
                 assert attachments_of(msg) == it["attachments"], (path, it["subject"])
-                # toutes les PJ MAPI de la source sont présentes (nommées) dans le MIME
+                # all MAPI attachments of the source are present (named) in the MIME
                 assert len(it["attachments"]) == it["n_att"], (path, it["subject"], it["attachments"], it["n_att"])
                 assert all(n for n, _ in it["attachments"]), it["attachments"]
                 assert flags == it["flags"], (path, it["subject"], flags, it["flags"])
-                # INTERNALDATE = date source. Particularité GreenMail 2.1.2 (pas notre client) : une heure 12:xx
-                # envoyée est relue 00:xx (analyse en format 12 h) → décalage de −12 h toléré dans ce seul cas.
+                # INTERNALDATE = source date. GreenMail 2.1.2 quirk (not our client): a 12:xx hour
+                # sent is read back as 00:xx (12-hour parsing) → a −12 h offset is tolerated in this one case.
                 d = idate - it["internaldate"]
                 noon = datetime.fromtimestamp(it["internaldate"], it["tz"]).hour == 12
                 assert abs(d) < 2 or (noon and abs(d + 43200) < 2), (path, it["subject"], idate, it["internaldate"])

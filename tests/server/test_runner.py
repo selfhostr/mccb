@@ -1,4 +1,4 @@
-"""Intégration : runner + faux engine contre le vrai IMAP (GreenMail/Dovecot) et Radicale de docker-compose.test.yml."""
+"""Integration: runner + fake engine against the real IMAP (GreenMail/Dovecot) and Radicale of docker-compose.test.yml."""
 import hashlib
 import os
 import threading
@@ -15,7 +15,7 @@ IMAP_HOST = os.environ.get("TEST_IMAP_HOST")
 IMAP_PORT = int(os.environ.get("TEST_IMAP_PORT", "3143"))
 DAV_URL = os.environ.get("TEST_DAV_URL")
 
-pytestmark = pytest.mark.skipif(not IMAP_HOST or not DAV_URL, reason="TEST_IMAP_HOST / TEST_DAV_URL non définis")
+pytestmark = pytest.mark.skipif(not IMAP_HOST or not DAV_URL, reason="TEST_IMAP_HOST / TEST_DAV_URL not set")
 
 DEFAULT_FOLDERS = list(fake_engine.CONFIG["folders"])
 N_MAIL = sum(n for p, k, c, s, n in DEFAULT_FOLDERS if k == "mail")
@@ -25,7 +25,7 @@ N_CONTACT = sum(n for p, k, c, s, n in DEFAULT_FOLDERS if k == "contacts")
 
 @pytest.fixture(scope="module", autouse=True)
 def wait_services():
-    """Attend que GreenMail et Radicale acceptent les connexions (démarrage à froid)."""
+    """Wait for GreenMail and Radicale to accept connections (cold start)."""
     import socket
     from urllib.parse import urlparse
     u = urlparse(DAV_URL)
@@ -74,7 +74,7 @@ def wait_job(client, jid, statuses, timeout=90, cond=None):
             return j
         time.sleep(0.2)
     log = client.get(f"/api/jobs/{jid}/log").json()["lines"]
-    raise AssertionError(f"job {jid} bloqué : {j}\n" + "\n".join(l["msg"] for l in log[-30:]))
+    raise AssertionError(f"job {jid} stuck: {j}\n" + "\n".join(l["msg"] for l in log[-30:]))
 
 
 def setup_account(client, env, root_folder=None, workers=3):
@@ -84,7 +84,7 @@ def setup_account(client, env, root_folder=None, workers=3):
         "verify_tls": False, "root_folder": root_folder, "caldav_url": DAV_URL, "carddav_url": DAV_URL,
         "dav_enabled": True, "workers": workers, "notes": ""}).json()
     acc = client.post("/api/accounts", json={"server_id": srv["id"], "email": email, "password": "pw"}).json()
-    # upload + validation du faux PST
+    # upload + validation of the fake PST
     from app.server.uploads import validate
     data = make_fake_pst(str(env.data_dir / "src.pst"), 200_000)
     up = client.post("/api/uploads", json={"filename": f"{email}.pst", "size": len(data), "last_modified": 1}).json()
@@ -106,7 +106,7 @@ def imap_conn(email):
 
 
 def server_import_ids(email):
-    """{import_id: nombre d'exemplaires} sur tous les dossiers."""
+    """{import_id: number of copies} across all folders."""
     import email as em
     c = imap_conn(email)
     out = {}
@@ -143,7 +143,7 @@ def test_full_import(client, env):
     assert j["status"] == "done", client.get(f"/api/jobs/{jid}/log").json()
     assert j["progress"]["mail"] == {"done": N_MAIL, "total": N_MAIL, "errors": 0}
     assert j["progress"]["calendar"]["done"] == N_EVENT and j["progress"]["contacts"]["done"] == N_CONTACT
-    assert j["rate"] is not None and j["rate"] > 0 and j["eta"] is None  # débit moyen conservé en fin de job
+    assert j["rate"] is not None and j["rate"] > 0 and j["eta"] is None  # average rate kept at job end
     ids = server_import_ids(email)
     assert len(ids) == N_MAIL and set(ids.values()) == {1}
     c = imap_conn(email)
@@ -154,11 +154,11 @@ def test_full_import(client, env):
     assert rep["totals"]["mail"]["sent"] == N_MAIL and rep["totals"]["mail"]["errors"] == 0
     assert rep["mail"]["sent"] == N_MAIL and rep["contacts"]["present"] == N_CONTACT
     assert all(f["present"] >= f["sent"] for f in rep["folders"]) and isinstance(rep["folders"][0]["path"], list)
-    assert "relu" in rep["sample_check"]
+    assert "re-read" in rep["sample_check"]
     assert rep["verify"]["sample"]["ok"] == rep["verify"]["sample"]["checked"] > 0
     assert rep["dav"]["calendar"]["present"] == N_EVENT and rep["dav"]["contacts"]["present"] == N_CONTACT
     assert (env.reports_dir / f"job-{jid}.json").exists() and (env.logs_dir / f"job-{jid}.log").exists()
-    # relance complète : aucun doublon (items ok sautés, PUT DAV idempotent)
+    # full restart: no duplicates (ok items skipped, DAV PUT idempotent)
     client.post(f"/api/jobs/{jid}/retry")
     with WorkerThread():
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"))
@@ -167,7 +167,7 @@ def test_full_import(client, env):
 
 
 def test_root_folder(client, env):
-    aid, email = setup_account(client, env, root_folder="Import PST")
+    aid, email = setup_account(client, env, root_folder="PST Import")
     jid = run(client, aid)
     with WorkerThread():
         assert wait_job(client, jid, ("done", "done_with_errors", "failed"))["status"] == "done"
@@ -176,7 +176,7 @@ def test_root_folder(client, env):
     d = c.delimiter()
     assert c.status_messages("INBOX") == 0
     c.close()
-    assert f"Import PST{d}Boîte de réception" in names and f"Import PST{d}Éléments envoyés" in names
+    assert f"PST Import{d}Boîte de réception" in names and f"PST Import{d}Éléments envoyés" in names
 
 
 def test_pause_resume(client, env):
@@ -220,8 +220,8 @@ def test_stop_then_retry_without_duplicates(client, env):
 
 
 def test_inflight_crash_recovery(client, env):
-    """Crash simulé : un mail APPENDé mais resté `inflight`, un autre `inflight` jamais envoyé,
-    et le job resté `running` avec un worker mort → reprise sans doublon ni perte."""
+    """Simulated crash: one mail APPENDed but left `inflight`, another `inflight` never sent,
+    and the job left `running` with a dead worker → resume without duplicates or loss."""
     from app.server import db
     aid, email = setup_account(client, env)
     jid = run(client, aid)
@@ -230,7 +230,7 @@ def test_inflight_crash_recovery(client, env):
     rows = db.q("SELECT * FROM items WHERE account_id=? AND kind='mail' AND status='ok' ORDER BY id LIMIT 2", (aid,))
     pst_sha = db.q1("SELECT p.pst_sha FROM psts p JOIN accounts a ON a.pst_id=p.id WHERE a.id=?", (aid,))["pst_sha"]
     appended, lost = rows[0], rows[1]
-    # « lost » : marqué inflight mais absent du serveur (crash avant la fin de l'APPEND)
+    # « lost »: marked inflight but absent from the server (crash before the APPEND finished)
     c = imap_conn(email)
     c.select(lost["target"], readonly=False)
     uids = c.search_header(lost["target"], "X-PST-Import-Id", f"{pst_sha}-{lost['item_key']}")
@@ -239,7 +239,7 @@ def test_inflight_crash_recovery(client, env):
     c.M.expunge()
     c.close()
     db.ex("UPDATE items SET status='inflight' WHERE id IN (?,?)", (appended["id"], lost["id"]))
-    # job « running » appartenant à un worker mort
+    # « running » job belonging to a dead worker
     db.ex("UPDATE jobs SET status='running', worker_id='morte:1:1', heartbeat=0, finished_at=NULL WHERE id=?", (jid,))
     with WorkerThread():
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"), cond=lambda j: j["finished_at"])
@@ -249,7 +249,7 @@ def test_inflight_crash_recovery(client, env):
     st = {r["id"]: r["status"] for r in db.q("SELECT id, status FROM items WHERE id IN (?,?)", (appended["id"], lost["id"]))}
     assert set(st.values()) == {"ok"}
     log = "\n".join(l["msg"] for l in client.get(f"/api/jobs/{jid}/log").json()["lines"])
-    assert "orphelin" in log and "inflight" in log
+    assert "Orphan job" in log and "inflight" in log
 
 
 def test_errors_then_retry_errors(client, env):
@@ -274,7 +274,7 @@ def test_errors_then_retry_errors(client, env):
 
 
 def test_auth_failure_marks_job_failed(client, env):
-    """GreenMail en mode auth désactivée accepte tout : on simule un serveur injoignable."""
+    """GreenMail with auth disabled accepts everything: we simulate an unreachable server."""
     from app.server import db
     aid, email = setup_account(client, env)
     sid = client.get(f"/api/accounts/{aid}").json()["server_id"]
@@ -285,7 +285,7 @@ def test_auth_failure_marks_job_failed(client, env):
     assert "IMAP" in j["error"]
 
 
-# ------------------------------------------------------------------ isolation des crashs natifs (libpff)
+# ------------------------------------------------------------------ native crash isolation (libpff)
 def _items(aid, kind="mail"):
     from app.server import db
     return {r["item_key"]: dict(r) for r in db.q("SELECT * FROM items WHERE account_id=? AND kind=?", (aid, kind))}
@@ -296,7 +296,7 @@ def _log(client, jid):
 
 
 def test_child_crash_on_item_continues(client, env, monkeypatch):
-    """SIGSEGV du sous-processus sur un élément : marqué « crash libpff », les autres importés, aucun doublon."""
+    """Subprocess SIGSEGV on an item: marked "libpff crash", the others imported, no duplicates."""
     inbox = (["Boîte de réception"], "mail", "IPF.Note", "inbox", 6)
     fake_engine.CONFIG["folders"] = [inbox, (["Contacts"], "contacts", "IPF.Contact", None, 2)]
     bad = fake_engine.item_key(inbox[0], 3)
@@ -309,26 +309,26 @@ def test_child_crash_on_item_continues(client, env, monkeypatch):
     assert j["progress"]["mail"] == {"done": 5, "total": 6, "errors": 1}
     assert j["progress"]["contacts"]["done"] == 2
     items = _items(aid)
-    assert items[bad]["status"] == "error" and items[bad]["error"].startswith("crash libpff")
+    assert items[bad]["status"] == "error" and items[bad]["error"].startswith("libpff crash")
     assert all(r["status"] == "ok" for k, r in items.items() if k != bad)
     ids = server_import_ids(email)
     assert len(ids) == 5 and set(ids.values()) == {1}
     log = _log(client, jid)
-    assert "Crash du sous-processus (signal SIGSEGV, 1/3)" in log and bad in log
-    # relance complète (crochet toujours actif) : l'élément fautif est sauté, pas de nouveau crash ni doublon
+    assert "Subprocess crash (signal SIGSEGV, 1/3)" in log and bad in log
+    # full restart (hook still active): the faulty item is skipped, no new crash or duplicate
     client.post(f"/api/jobs/{jid}/retry")
     with WorkerThread():
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"), cond=lambda j: j["finished_at"])
     assert j["status"] == "done_with_errors" and j["progress"]["mail"]["errors"] == 1
-    assert _log(client, jid).count("Crash du sous-processus") == 1
+    assert _log(client, jid).count("Subprocess crash") == 1
     ids = server_import_ids(email)
     assert len(ids) == 5 and set(ids.values()) == {1}
 
 
 def test_retry_errors_retries_crash_item_after_fix(client, env, monkeypatch):
-    """Régression (e2e intermittent) : un run « erreurs » qui replante laisse le compteur de crashs à 0 dès que le
-    statut final est visible ; et toute relance repart d'un compteur à 0 (cas d'un worker arrêté avant d'avoir
-    remis le compteur à zéro). Crochet retiré → « relancer les erreurs » importe l'élément."""
+    """Regression (intermittent e2e): an « errors » run that crashes again leaves the crash counter at 0 as soon as the
+    final status is visible; and any restart starts from a counter at 0 (case of a worker stopped before it
+    reset the counter to zero). Hook removed → « retry errors » imports the item."""
     from app.server import crash, db
     inbox = (["Boîte de réception"], "mail", "IPF.Note", "inbox", 4)
     fake_engine.CONFIG["folders"] = [inbox]
@@ -342,9 +342,9 @@ def test_retry_errors_retries_crash_item_after_fix(client, env, monkeypatch):
         client.post(f"/api/jobs/{jid}/retry-errors")
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"), cond=lambda j: j["finished_at"])
         assert j["status"] == "done_with_errors", _log(client, jid)
-        assert crash.get_crashes(jid) == 0  # remis à zéro par le run lui-même, avant le statut final
-    assert _log(client, jid).count("Crash du sous-processus") == 2
-    # compteur résiduel (worker arrêté entre la fin du run et la sortie du sous-processus)
+        assert crash.get_crashes(jid) == 0  # reset by the run itself, before the final status
+    assert _log(client, jid).count("Subprocess crash") == 2
+    # residual counter (worker stopped between the end of the run and the subprocess exit)
     db.kv_set(f"job:{jid}:crashes", "1")
     monkeypatch.setenv("PSTMIG_TEST_CRASH", "")
     client.post(f"/api/jobs/{jid}/retry-errors")
@@ -358,7 +358,7 @@ def test_retry_errors_retries_crash_item_after_fix(client, env, monkeypatch):
 
 
 def test_child_crash_on_fetch_skips_index(client, env, monkeypatch):
-    """Crash pendant la lecture (iter_items) de l'élément n° 2 : index sauté, élément d'erreur synthétique."""
+    """Crash while reading (iter_items) item no. 2: index skipped, synthetic error item."""
     fake_engine.CONFIG["folders"] = [(["Boîte de réception"], "mail", "IPF.Note", "inbox", 5)]
     monkeypatch.setenv("PSTMIG_TEST_CRASH", "fetch:2")
     aid, email = setup_account(client, env)
@@ -369,7 +369,7 @@ def test_child_crash_on_fetch_skips_index(client, env, monkeypatch):
     items = _items(aid)
     errs = {k: r for k, r in items.items() if r["status"] == "error"}
     assert len(errs) == 1 and next(iter(errs)).endswith("#crash2")
-    assert next(iter(errs.values()))["error"].startswith("crash libpff")
+    assert next(iter(errs.values()))["error"].startswith("libpff crash")
     assert sum(r["status"] == "ok" for r in items.values()) == 4
     assert fake_engine.item_key(["Boîte de réception"], 2) not in items
     ids = server_import_ids(email)
@@ -377,23 +377,23 @@ def test_child_crash_on_fetch_skips_index(client, env, monkeypatch):
 
 
 def test_child_crash_always_fails_after_n(client, env, monkeypatch):
-    """Crash systématique : le job passe en échec après MAX_CHILD_CRASHES (3) crashs, sans boucle infinie."""
+    """Systematic crash: the job fails after MAX_CHILD_CRASHES (3) crashes, with no infinite loop."""
     fake_engine.CONFIG["folders"] = [(["Boîte de réception"], "mail", "IPF.Note", "inbox", 6)]
     monkeypatch.setenv("PSTMIG_TEST_CRASH", "*")
     aid, email = setup_account(client, env)
     jid = run(client, aid)
     with WorkerThread():
         j = wait_job(client, jid, ("failed", "done", "done_with_errors"), cond=lambda j: j["finished_at"])
-        time.sleep(1.5)  # pas de relance après l'échec
+        time.sleep(1.5)  # no restart after the failure
         assert client.get(f"/api/jobs/{jid}").json()["status"] == "failed"
     assert j["status"] == "failed"
-    assert j["error"] == "Le sous-processus a planté 3 fois (crash libpff probable)"
+    assert j["error"] == "The subprocess crashed 3 times (probable libpff crash)"
     log = _log(client, jid)
-    assert "planté 3 fois" in log and log.count("Crash du sous-processus") == 3
+    assert "crashed 3 times" in log and log.count("Subprocess crash") == 3
     items = _items(aid)
-    assert sum(r["status"] == "error" and r["error"].startswith("crash libpff") for r in items.values()) == 3
+    assert sum(r["status"] == "error" and r["error"].startswith("libpff crash") for r in items.values()) == 3
     from app.server import crash
-    assert crash.get_crashes(jid) == 0  # compteur remis à zéro : une relance repart de 0
+    assert crash.get_crashes(jid) == 0  # counter reset: a restart starts from 0
 
 
 def test_child_crash_at_open_fails(client, env, monkeypatch):
@@ -404,12 +404,12 @@ def test_child_crash_at_open_fails(client, env, monkeypatch):
     jid = run(client, aid)
     with WorkerThread():
         j = wait_job(client, jid, ("failed", "done", "done_with_errors"), cond=lambda j: j["finished_at"])
-    assert j["status"] == "failed" and "planté 2 fois" in j["error"]
-    assert "hors élément (étape open)" in _log(client, jid)
+    assert j["status"] == "failed" and "crashed 2 times" in j["error"]
+    assert "outside any item (phase open)" in _log(client, jid)
 
 
 def test_worker_shutdown_terminates_child_and_requeues(client, env):
-    """Arrêt du worker pendant un job : sous-processus terminé, job remis en file, reprise sans doublon."""
+    """Worker stopped during a job: subprocess terminated, job re-queued, resume without duplicates."""
     fake_engine.CONFIG["folders"] = [(["Boîte de réception"], "mail", "IPF.Note", "inbox", 30)]
     fake_engine.CONFIG["delay"] = 0.1
     aid, email = setup_account(client, env)
@@ -422,7 +422,7 @@ def test_worker_shutdown_terminates_child_and_requeues(client, env):
     assert all(p.poll() is not None for p in procs)
     j = client.get(f"/api/jobs/{jid}").json()
     assert j["status"] == "queued" and j["progress"]["mail"]["done"] < 30
-    assert "Worker arrêté" in _log(client, jid) and "Crash" not in _log(client, jid)
+    assert "Worker stopped" in _log(client, jid) and "Crash" not in _log(client, jid)
     fake_engine.CONFIG["delay"] = 0.0
     with WorkerThread():
         j = wait_job(client, jid, ("done", "done_with_errors", "failed"))
@@ -432,7 +432,7 @@ def test_worker_shutdown_terminates_child_and_requeues(client, env):
 
 
 def test_rate_eta_on_short_job(client, env):
-    """Job court (quelques secondes) : débit et temps restant calculés dès le début de la phase, pas « — »."""
+    """Short job (a few seconds): rate and remaining time computed from the start of the phase, not « — »."""
     fake_engine.CONFIG["folders"] = [(["Boîte de réception"], "mail", "IPF.Note", "inbox", 12)]
     fake_engine.CONFIG["delay"] = 0.15
     aid, email = setup_account(client, env)

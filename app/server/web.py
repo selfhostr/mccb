@@ -1,4 +1,4 @@
-"""API FastAPI (Contrat API de docs/SPEC.md) + SPA statique. Lancer : python -m app.server.web"""
+"""API FastAPI (Contrat API de docs/SPEC.md) + SPA statique. Run: python -m app.server.web"""
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +19,8 @@ from . import crash, csvimport, db, preview, repo, uploads
 from .config import settings
 from .dav import DavClient
 from .imap import ImapConn, ImapError, ImapParams
-from .security import check_password, check_session, decrypt, encrypt, make_session
+from .security import (admin_created, check_password, check_session, decrypt, encrypt, ensure_admin_password,
+                       make_session, password_from_env, set_admin_password)
 
 log = logging.getLogger("web")
 COOKIE = "psttoimap_session"
@@ -27,12 +28,27 @@ PUBLIC_API = {"/api/login", "/api/health", "/api/logout"}
 
 
 
+def _admin_startup() -> None:
+    if password_from_env():
+        log.info("Admin password taken from the ADMIN_PASSWORD environment variable")
+        return
+    pw = ensure_admin_password()
+    if pw:
+        lines = ["", "=" * 64, "  FIRST START: an admin password was generated for you",
+                 "", f"  Admin password: {pw}", "",
+                 "  Shown ONCE only. Change it in the web UI under Settings",
+                 "  or set ADMIN_PASSWORD in the environment.", "=" * 64, ""]
+        log.warning("\n".join(lines))
+    else:
+        log.warning("Admin password already set (generated on %s). To reset it: delete /data/admin.json "
+                    "and restart, or set ADMIN_PASSWORD.", admin_created())
+
+
 @asynccontextmanager
 async def lifespan(_app):
     settings.ensure_dirs()
     db.conn()
-    if not settings.admin_password:
-        log.warning("ADMIN_PASSWORD non défini : connexion impossible tant qu'il n'est pas configuré")
+    _admin_startup()
     task = asyncio.get_running_loop().create_task(_prune_events())
     try:
         yield
@@ -49,7 +65,7 @@ async def auth_mw(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and path not in PUBLIC_API:
         if not check_session(request.cookies.get(COOKIE)):
-            return JSONResponse({"detail": "non authentifié"}, status_code=401)
+            return JSONResponse({"detail": "not authenticated"}, status_code=401)
     return await call_next(request)
 
 
@@ -70,12 +86,32 @@ def login(body: LoginIn, request: Request):
     fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < LOGIN_WINDOW]
     _LOGIN_FAILS[ip] = fails
     if len(fails) >= LOGIN_MAX_FAILS:
-        raise HTTPException(429, "trop de tentatives, réessayez plus tard")
+        raise HTTPException(429, "too many attempts, try again later")
     if not check_password(body.password):
         fails.append(now)
         time.sleep(0.5)
-        raise HTTPException(401, "mot de passe incorrect")
+        raise HTTPException(401, "incorrect password")
     resp = JSONResponse({"ok": True, "authenticated": True})
+    resp.set_cookie(COOKIE, make_session(), max_age=settings.session_max_age, httponly=True, samesite="lax",
+                    secure=settings.cookie_secure or request.url.scheme == "https", path="/")
+    return resp
+
+
+class PasswordIn(BaseModel):
+    current: str
+    new: str = Field(min_length=8, max_length=256)
+
+
+@app.post("/api/password")
+def change_password(body: PasswordIn, request: Request):
+    """Change the admin password (only when it is not forced by ADMIN_PASSWORD). Sessions are invalidated."""
+    if password_from_env():
+        raise HTTPException(409, "the password is set by ADMIN_PASSWORD; change the environment variable instead")
+    if not check_password(body.current):
+        time.sleep(0.5)
+        raise HTTPException(403, "current password is incorrect")
+    set_admin_password(body.new)
+    resp = JSONResponse({"ok": True})
     resp.set_cookie(COOKIE, make_session(), max_age=settings.session_max_age, httponly=True, samesite="lax",
                     secure=settings.cookie_secure or request.url.scheme == "https", path="/")
     return resp
@@ -101,7 +137,7 @@ def health():
             "time": time.time()}
 
 
-# ======================================================================= serveurs
+# ======================================================================= servers
 class ServerIn(BaseModel):
     name: str
     imap_host: str
@@ -119,7 +155,7 @@ class ServerIn(BaseModel):
 def _server_or_404(sid: int):
     r = db.q1("SELECT * FROM servers WHERE id=?", (sid,))
     if r is None:
-        raise HTTPException(404, "serveur inconnu")
+        raise HTTPException(404, "unknown server")
     return r
 
 
@@ -161,7 +197,7 @@ def delete_server(sid: int):
     busy = db.q1("SELECT j.id FROM jobs j JOIN accounts a ON a.id=j.account_id WHERE a.server_id=? AND "
                  "j.status IN ('queued','running','paused','stopping')", (sid,))
     if busy:
-        raise HTTPException(409, "des jobs sont en cours sur ce serveur")
+        raise HTTPException(409, "jobs are running on this server")
     db.ex("DELETE FROM servers WHERE id=?", (sid,))
     return {"ok": True}
 
@@ -188,35 +224,35 @@ def test_server(sid: int):
             M.logout()
         except Exception:
             pass
-        res["imap"] = {"ok": True, "msg": f"serveur IMAP joignable ({r['imap_host']}:{r['imap_port']})", "capabilities": caps}
+        res["imap"] = {"ok": True, "msg": f"IMAP server reachable ({r['imap_host']}:{r['imap_port']})", "capabilities": caps}
     except Exception as e:
-        res["imap"] = {"ok": False, "msg": f"connexion impossible : {e}"}
+        res["imap"] = {"ok": False, "msg": f"connection failed: {e}"}
     for kind, col in (("caldav", "caldav_url"), ("carddav", "carddav_url")):
         res[kind] = _probe_dav(r, kind, r[col])
     return res
 
 
 def _probe_dav(r, kind: str, template: str | None) -> dict:
-    """Test sans identifiants : le point d'entrée DAV répond-il (401/207/200…) ?"""
+    """Test without credentials: does the DAV entry point respond (401/207/200...)?"""
     import httpx
     if not r["dav_enabled"]:
-        return {"ok": True, "msg": "DAV désactivé pour ce serveur"}
+        return {"ok": True, "msg": "DAV disabled for this server"}
     if template and "{" in template:
-        return {"ok": True, "msg": "URL gabarit : vérifiée au test de chaque compte"}
+        return {"ok": True, "msg": "template URL: checked when each account is tested"}
     urls = [template] if template else [f"https://{r['imap_host']}/.well-known/{kind}"]
     for url in urls:
         try:
             with httpx.Client(verify=bool(r["verify_tls"]), timeout=15, follow_redirects=True) as c:
                 resp = c.request("PROPFIND", url, headers={"Depth": "0"})
             if resp.status_code < 500 and resp.status_code != 404:
-                return {"ok": True, "msg": f"{url} joignable (HTTP {resp.status_code})"}
-            return {"ok": False, "msg": f"{url} : HTTP {resp.status_code}"}
+                return {"ok": True, "msg": f"{url} reachable (HTTP {resp.status_code})"}
+            return {"ok": False, "msg": f"{url}: HTTP {resp.status_code}"}
         except Exception as e:
-            return {"ok": False, "msg": f"{url} injoignable : {e}"}
-    return {"ok": False, "msg": "aucune URL"}
+            return {"ok": False, "msg": f"{url} unreachable: {e}"}
+    return {"ok": False, "msg": "no URL"}
 
 
-# ======================================================================= comptes
+# ======================================================================= accounts
 class AccountIn(BaseModel):
     server_id: int
     email: str
@@ -238,7 +274,7 @@ class AccountUpdate(BaseModel):
 def _account_or_404(aid: int):
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "compte inconnu")
+        raise HTTPException(404, "unknown account")
     return r
 
 
@@ -256,9 +292,9 @@ def create_account(a: AccountIn):
     _server_or_404(a.server_id)
     email = a.email.strip()
     if not csvimport.EMAIL_RE.match(email):
-        raise HTTPException(422, "adresse e-mail invalide")
+        raise HTTPException(422, "invalid email address")
     if db.q1("SELECT id FROM accounts WHERE server_id=? AND email=?", (a.server_id, email)):
-        raise HTTPException(409, "ce compte existe déjà sur ce serveur")
+        raise HTTPException(409, "this account already exists on this server")
     o = a.options or {}
     cur = db.ex("INSERT INTO accounts(server_id,email,login,password_enc,opt_mail,opt_calendar,opt_contacts,pst_id,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -282,7 +318,7 @@ def update_account(aid: int, a: AccountUpdate):
         sets.append("server_id=?"); vals.append(a.server_id)
     if a.email is not None:
         if not csvimport.EMAIL_RE.match(a.email.strip()):
-            raise HTTPException(422, "adresse e-mail invalide")
+            raise HTTPException(422, "invalid email address")
         sets.append("email=?"); vals.append(a.email.strip())
     if a.login is not None:
         sets.append("login=?"); vals.append(a.login.strip())
@@ -295,7 +331,7 @@ def update_account(aid: int, a: AccountUpdate):
                 sets.append(f"opt_{k}=?"); vals.append(int(bool(a.options[k])))
     if "pst_id" in a.model_fields_set:
         if a.pst_id is not None and not repo.get_pst(a.pst_id):
-            raise HTTPException(404, "PST inconnu")
+            raise HTTPException(404, "unknown PST")
         sets.append("pst_id=?"); vals.append(a.pst_id)
     target_changed = ((a.server_id is not None and a.server_id != r["server_id"])
                       or (a.email is not None and a.email.strip() != r["email"])
@@ -305,11 +341,11 @@ def update_account(aid: int, a: AccountUpdate):
     if sets:
         try:
             db.ex(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", (*vals, aid))
-            if target_changed:  # nouvelle cible : tout doit être renvoyé
+            if target_changed:  # new target: everything must be re-sent
                 db.ex("DELETE FROM items WHERE account_id=?", (aid,))
         except Exception as e:
             if "UNIQUE" in str(e):
-                raise HTTPException(409, "ce compte existe déjà sur ce serveur")
+                raise HTTPException(409, "this account already exists on this server")
             raise
     return repo.get_account(r["id"])
 
@@ -318,7 +354,7 @@ def update_account(aid: int, a: AccountUpdate):
 def delete_account(aid: int):
     _account_or_404(aid)
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping')", (aid,)):
-        raise HTTPException(409, "un job est en cours pour ce compte")
+        raise HTTPException(409, "a job is running for this account")
     db.ex("DELETE FROM accounts WHERE id=?", (aid,))
     return {"ok": True}
 
@@ -328,7 +364,7 @@ def set_account_pst(aid: int, body: dict = Body(...)):
     _account_or_404(aid)
     pid = body.get("pst_id")
     if pid is not None and not repo.get_pst(int(pid)):
-        raise HTTPException(404, "PST inconnu")
+        raise HTTPException(404, "unknown PST")
     db.ex("UPDATE accounts SET pst_id=? WHERE id=?", (pid, aid))
     return repo.get_account(aid)
 
@@ -345,7 +381,7 @@ def test_account_row(r) -> dict:
     res: dict[str, Any] = {}
     status = "ok"
     if not pw:
-        res["imap"] = {"ok": False, "msg": perr or "mot de passe absent", "quota": None}
+        res["imap"] = {"ok": False, "msg": perr or "password missing", "quota": None}
         status = "error"
     else:
         params = ImapParams(srv["imap_host"], srv["imap_port"], srv["imap_security"], bool(srv["verify_tls"]),
@@ -353,16 +389,16 @@ def test_account_row(r) -> dict:
         try:
             with ImapConn(params) as c:
                 quota = c.quota()
-            res["imap"] = {"ok": True, "msg": "connexion IMAP réussie", "quota": quota}
+            res["imap"] = {"ok": True, "msg": "IMAP connection successful", "quota": quota}
         except ImapError as e:
             res["imap"] = {"ok": False, "msg": str(e), "quota": None}
             status = "auth_failed" if e.kind == "auth" else "error"
     for kind, tmpl in (("caldav", "caldav_url"), ("carddav", "carddav_url")):
         if not srv["dav_enabled"]:
-            res[kind] = {"ok": True, "msg": "DAV désactivé pour ce serveur"}
+            res[kind] = {"ok": True, "msg": "DAV disabled for this server"}
             continue
         if not pw:
-            res[kind] = {"ok": False, "msg": "mot de passe absent"}
+            res[kind] = {"ok": False, "msg": "password missing"}
             continue
         try:
             with DavClient(login_name, pw, bool(srv["verify_tls"]), timeout=30) as d:
@@ -388,7 +424,7 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
     _server_or_404(server_id)
     data = await file.read(5 * 1024 * 1024 + 1)
     if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(413, "fichier CSV trop gros (5 Mo max)")
+        raise HTTPException(413, "CSV file too large (5 MB max)")
     rows, errors = csvimport.parse(data)
     created = updated = 0
     for row in rows:
@@ -407,7 +443,7 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
 @app.get("/api/accounts/csv-template")
 def csv_template():
     return Response(csvimport.TEMPLATE.encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": 'attachment; filename="comptes.csv"'})
+                    headers={"Content-Disposition": 'attachment; filename="accounts.csv"'})
 
 
 # ======================================================================= uploads / PST
@@ -426,7 +462,7 @@ def create_upload(u: UploadIn):
 def get_upload(pid: int):
     v = repo.get_upload(pid)
     if v is None:
-        raise HTTPException(404, "upload inconnu")
+        raise HTTPException(404, "unknown upload")
     return v
 
 
@@ -450,7 +486,7 @@ def list_psts():
 def get_pst(pid: int):
     v = repo.get_pst(pid)
     if v is None:
-        raise HTTPException(404, "PST inconnu")
+        raise HTTPException(404, "unknown PST")
     return v
 
 
@@ -458,14 +494,14 @@ def get_pst(pid: int):
 async def preview_pst(pid: int, limit: int = 20):
     row = db.q1("SELECT * FROM psts WHERE id=?", (pid,))
     if row is None:
-        raise HTTPException(404, "PST inconnu")
+        raise HTTPException(404, "unknown PST")
     if row["status"] != "valid":
-        raise HTTPException(409, "PST non valide")
+        raise HTTPException(409, "PST not valid")
     limit = max(1, min(200, limit))
     try:
         zpath, tmp = await preview.build_zip(row["path"], limit)
     except preview.PreviewCrash:
-        return JSONResponse({"detail": "crash libpff pendant l'aperçu"}, status_code=500)
+        return JSONResponse({"detail": "libpff crash during preview"}, status_code=500)
     except preview.PreviewError as e:
         return JSONResponse({"detail": str(e)}, status_code=500)
     base = Path(row["filename"]).stem
@@ -491,14 +527,14 @@ def create_runs(body: RunIn):
     for aid in body.account_ids:
         a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
         if a is None:
-            errors.append({"account_id": aid, "msg": "compte inconnu"})
+            errors.append({"account_id": aid, "msg": "unknown account"})
             continue
         if not a["password_enc"]:
-            errors.append({"account_id": aid, "msg": "mot de passe absent"})
+            errors.append({"account_id": aid, "msg": "password missing"})
             continue
         p = db.q1("SELECT status FROM psts WHERE id=?", (a["pst_id"],)) if a["pst_id"] else None
         if p is None or p["status"] != "valid":
-            errors.append({"account_id": aid, "msg": "aucun PST valide associé"})
+            errors.append({"account_id": aid, "msg": "no valid PST linked"})
             continue
         active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
                        "ORDER BY id DESC LIMIT 1", (aid,))
@@ -507,19 +543,19 @@ def create_runs(body: RunIn):
             continue
         cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, created_at) VALUES (?, 'queued', 'precheck', ?, ?)",
                     (aid, db.jdump(repo.empty_progress()), time.time()))
-        repo.log(cur.lastrowid, "Job mis en file")
+        repo.log(cur.lastrowid, "Job queued")
         jobs.append(repo.get_job(cur.lastrowid))
     if errors and not jobs:
-        raise HTTPException(422, {"msg": "aucun job créé", "errors": errors})
+        raise HTTPException(422, {"msg": "no job created", "errors": errors})
     for e in errors:
-        log.warning("run refusé pour le compte %s : %s", e["account_id"], e["msg"])
+        log.warning("run refused for account %s : %s", e["account_id"], e["msg"])
     return jobs
 
 
 def _job_or_404(jid: int):
     r = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
     if r is None:
-        raise HTTPException(404, "job inconnu")
+        raise HTTPException(404, "unknown job")
     return r
 
 
@@ -547,9 +583,9 @@ def get_job(jid: int):
 def pause_job(jid: int):
     r = _job_or_404(jid)
     if r["status"] not in ("queued", "running"):
-        raise HTTPException(409, f"impossible de mettre en pause un job « {r['status']} »")
+        raise HTTPException(409, f"cannot pause a job in status '{r['status']}'")
     db.ex("UPDATE jobs SET status='paused' WHERE id=? AND status IN ('queued','running')", (jid,))
-    repo.log(jid, "Pause demandée")
+    repo.log(jid, "Pause requested")
     return repo.get_job(jid)
 
 
@@ -557,12 +593,12 @@ def pause_job(jid: int):
 def resume_job(jid: int):
     r = _job_or_404(jid)
     if r["status"] != "paused":
-        raise HTTPException(409, f"le job n'est pas en pause (« {r['status']} »)")
+        raise HTTPException(409, f"the job is not paused ('{r['status']}')")
     if r["worker_id"]:
-        # le worker n'a pas encore pris en compte la pause : on le laisse continuer
+        # the worker has not yet taken the pause into account: let it continue
         db.ex("UPDATE jobs SET status='running' WHERE id=? AND status='paused' AND worker_id IS NOT NULL", (jid,))
     db.ex("UPDATE jobs SET status='queued' WHERE id=? AND status='paused'", (jid,))
-    repo.log(jid, "Reprise demandée")
+    repo.log(jid, "Resume requested")
     return repo.get_job(jid)
 
 
@@ -574,21 +610,21 @@ def stop_job(jid: int):
     elif r["status"] in ("running", "paused"):
         db.ex("UPDATE jobs SET status='stopping' WHERE id=?", (jid,))
     elif r["status"] != "stopping":
-        raise HTTPException(409, f"job déjà terminé (« {r['status']} »)")
-    repo.log(jid, "Arrêt demandé")
+        raise HTTPException(409, f"job already finished ('{r['status']}')")
+    repo.log(jid, "Stop requested")
     return repo.get_job(jid)
 
 
 def _requeue(jid: int, mode: str) -> dict:
     r = _job_or_404(jid)
     if r["status"] not in repo.JOB_FINAL:
-        raise HTTPException(409, f"job encore actif (« {r['status']} »)")
+        raise HTTPException(409, f"job still active ('{r['status']}')")
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND id<>? AND status IN ('queued','running','paused','stopping')",
              (r["account_id"], jid)):
-        raise HTTPException(409, "un autre job est actif pour ce compte")
+        raise HTTPException(409, "another job is active for this account")
     db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck' WHERE id=?", (mode, jid))
-    crash.reset_crashes(jid)  # nouvelle relance : « relancer les erreurs » retente une fois les éléments « crash libpff »
-    repo.log(jid, "Relance (erreurs uniquement)" if mode == "errors" else "Relance complète (éléments déjà importés ignorés)")
+    crash.reset_crashes(jid)  # new rerun: "retry errors" retries the "libpff crash" items once
+    repo.log(jid, "Rerun (errors only)" if mode == "errors" else "Full rerun (already imported items skipped)")
     return repo.get_job(jid)  # type: ignore[return-value]
 
 
@@ -616,9 +652,9 @@ def job_report(jid: int, download: int = 0):
     r = _job_or_404(jid)
     p = Path(r["report_path"]) if r["report_path"] else settings.reports_dir / f"job-{jid}.json"
     if not p.exists():
-        raise HTTPException(404, "rapport pas encore disponible")
+        raise HTTPException(404, "report not available yet")
     data = json.loads(p.read_text(encoding="utf-8"))
-    headers = {"Content-Disposition": f'attachment; filename="rapport-job-{jid}.json"'} if download else {}
+    headers = {"Content-Disposition": f'attachment; filename="job-report-{jid}.json"'} if download else {}
     return JSONResponse(data, headers=headers)
 
 
@@ -637,8 +673,8 @@ def job_errors(jid: int, limit: int = 1000):
 # ======================================================================= SSE
 @app.get("/api/events")
 async def events(request: Request, max_seconds: float = 0):
-    """SSE alimenté par la table `events` (triggers SQLite) : le worker est un autre process.
-    `max_seconds` > 0 ferme le flux après ce délai (le navigateur se reconnecte seul)."""
+    """SSE fed by the `events` table (SQLite triggers): the worker is another process.
+    `max_seconds` > 0 closes the stream after that delay (the browser reconnects by itself)."""
     deadline = time.time() + max_seconds if max_seconds > 0 else None
 
     async def gen():
@@ -681,10 +717,10 @@ async def _prune_events() -> None:
         await asyncio.sleep(300)
 
 
-# ======================================================================= SPA statique
+# ======================================================================= static SPA
 @app.api_route("/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 def api_404(rest: str):
-    raise HTTPException(404, "route API inconnue")
+    raise HTTPException(404, "unknown API route")
 
 
 @app.get("/{path:path}")
@@ -697,7 +733,7 @@ def spa(path: str):
     index = root / "index.html"
     if index.is_file():
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
-    return PlainTextResponse("Interface web absente (app/web/index.html)", status_code=200)
+    return PlainTextResponse("Web interface missing (app/web/index.html)", status_code=200)
 
 
 def main() -> None:

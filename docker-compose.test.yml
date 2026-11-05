@@ -1,4 +1,4 @@
-# Environnement d'intégration : IMAP (GreenMail) + CalDAV/CardDAV (Radicale) + exécution pytest.
+# Integration environment: IMAP (GreenMail) + CalDAV/CardDAV (Radicale) + pytest run.
 #   docker compose -f docker-compose.test.yml run --rm --build tests
 #   docker compose -f docker-compose.test.yml down -v
 name: psttoimap-test
@@ -7,8 +7,8 @@ services:
   imap:
     image: greenmail/standalone:2.1.2
     environment:
-      # authentification ACTIVE : les utilisateurs sont créés par les tests via l'API REST (port 8080),
-      # un mauvais mot de passe est refusé (→ auth_failed)
+      # authentication ENABLED: users are created by the tests through the REST API (port 8080),
+      # a wrong password is rejected (-> auth_failed)
       GREENMAIL_OPTS: "-Dgreenmail.setup.test.all -Dgreenmail.startup.timeout=30000 -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=e2e:e2e-pw@example.test -Dgreenmail.users.login=email -Dgreenmail.verbose=false"
 
   radicale:

@@ -35,9 +35,9 @@ def test_plan_folders():
     assert p["Éléments envoyés"] == ("INBOX.Sent", None)
     assert p["Brouillons"] == ("INBOX.Drafts", "\\Drafts")
     assert p["Archives"][0] == "INBOX.Archives"
-    p = plan_folders(fs, boxes, "/", "Import PST", "")
-    assert p["Boîte de réception"][0] == "Import PST/Bo&AO4-te de r&AOk-ception"
-    assert p["Boîte de réception/Sous\\/dossier"][0] == "Import PST/Bo&AO4-te de r&AOk-ception/Sous_dossier"
+    p = plan_folders(fs, boxes, "/", "PST Import", "")
+    assert p["Boîte de réception"][0] == "PST Import/Bo&AO4-te de r&AOk-ception"
+    assert p["Boîte de réception/Sous\\/dossier"][0] == "PST Import/Bo&AO4-te de r&AOk-ception/Sous_dossier"
 
 
 def test_norm_hash_line_endings():

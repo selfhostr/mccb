@@ -9,8 +9,8 @@ export default async function (root) {
   const J = new Map(jobs.map(j => [j.id, j]));
   const stats = h('div', { class: 'stats' });
   const list = h('div', { class: 'grid cards' });
-  root.append(h('div', { class: 'page-h' }, h('h1', null, 'Tableau de bord'), h('p', { class: 'muted' }, 'Vue d\'ensemble des migrations en cours.')),
-    stats, h('h2', null, 'Jobs actifs'), list);
+  root.append(h('div', { class: 'page-h' }, h('h1', null, 'Dashboard'), h('p', { class: 'muted' }, 'Overview of ongoing migrations.')),
+    stats, h('h2', null, 'Active jobs'), list);
 
   function stat(label, value, sub, cls = '') { return h('div', { class: 'stat ' + cls }, h('small', null, label), h('b', null, value), h('span', null, sub || '')); }
   function draw() {
@@ -18,12 +18,12 @@ export default async function (root) {
     const run = act.filter(j => j.status === 'running').length;
     const valid = psts.filter(p => p.status === 'valid');
     clear(stats).append(
-      stat('Jobs actifs', fmtNum(act.length), `${run} en cours · ${act.length - run} en file/pause`, act.length ? 'hot' : ''),
-      stat('Serveurs', fmtNum(servers.length), 'destinations configurées'),
-      stat('Comptes', fmtNum(accounts.length), `${accounts.filter(a => a.pst_id).length} avec PST associé`),
-      stat('Fichiers PST', fmtNum(psts.length), `${valid.length} valides · ${fmtBytes(psts.reduce((s, p) => s + (p.size || 0), 0))}`));
+      stat('Active jobs', fmtNum(act.length), `${run} running · ${act.length - run} queued/paused`, ''),
+      stat('Servers', fmtNum(servers.length), 'configured destinations'),
+      stat('Accounts', fmtNum(accounts.length), `${accounts.filter(a => a.pst_id).length} with a PST assigned`),
+      stat('PST files', fmtNum(psts.length), `${valid.length} valid · ${fmtBytes(psts.reduce((s, p) => s + (p.size || 0), 0))}`));
     clear(list);
-    if (!act.length) list.append(empty('Aucun job actif', 'Sélectionnez des comptes dans « Comptes » puis lancez un import.'));
+    if (!act.length) list.append(empty('No active jobs', 'Select accounts under Accounts, then start an import.'));
     else act.sort((a, b) => a.id - b.id).forEach(j => list.append(jobCard(j, emails.get(j.account_id))));
   }
   draw();

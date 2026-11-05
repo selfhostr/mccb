@@ -1,4 +1,4 @@
-// Gestionnaire d'uploads reprenables, global (survit à la navigation entre pages).
+// Global resumable upload manager (survives page navigation).
 import { get, post, put, emit, on, ApiError } from './api.js';
 import { sha256Hex } from './sha256.js';
 import { toast } from './ui.js';
@@ -14,7 +14,7 @@ const saveLS = o => { try { localStorage.setItem(LS, JSON.stringify(o)); } catch
 const lsSet = t => { const o = loadLS(); o[t.key] = { key: t.key, id: t.id, filename: t.filename, size: t.size, lastModified: t.lastModified, ts: Date.now() }; saveLS(o); };
 const lsDel = key => { const o = loadLS(); delete o[key]; saveLS(o); };
 
-// Uploads connus du navigateur mais dont le fichier n'est pas (ou plus) sélectionné
+// Uploads known to the browser whose file is not (or no longer) selected
 export function pendingResumables() {
   return Object.values(loadLS()).filter(r => !tasks.has(r.key)).sort((a, b) => b.ts - a.ts);
 }
@@ -26,7 +26,7 @@ const changed = () => emit('uploader');
 export function addFile(file, { onValid } = {}) {
   const key = fileKey(file);
   const old = tasks.get(key);
-  if (old && ['uploading', 'starting', 'hashing'].includes(old.status)) { toast(`« ${file.name} » est déjà en cours d'envoi.`, 'warn'); return old; }
+  if (old && ['uploading', 'starting', 'hashing'].includes(old.status)) { toast(`"${file.name}" is already uploading.`, 'warn'); return old; }
   const t = {
     key, file, filename: file.name, size: file.size, lastModified: file.lastModified, id: null, chunkSize: 0,
     status: 'starting', received: new Set(), total: 0, sentBytes: 0, startBytes: 0, samples: [], rate: 0, eta: null,
@@ -70,7 +70,7 @@ async function run(t) {
     if (ctl.cancel) { if (t.ctl === ctl) { t.status = ctl.reason || 'paused'; changed(); } return; }
     if (failed) throw failed;
 
-    // contrôle final côté serveur (au cas où des chunks manquent encore)
+    // final server-side check (in case chunks are still missing)
     const st = await retrying(t, ctl, () => get(`/uploads/${t.id}`, { signal: ctl.ac.signal }));
     if (ctl.cancel) return;
     const missing = []; for (let n = 0; n < t.total; n++) if (!(st.received || []).includes(n)) missing.push(n);
@@ -81,12 +81,12 @@ async function run(t) {
     if (ctl.cancel) return;
     t.pstId = res?.pst_id ?? res?.pst?.id ?? res?.id ?? t.id;
     t.status = 'done'; t.rate = 0; t.eta = 0; lsDel(t.key); changed();
-    toast(`« ${t.filename} » envoyé, validation en cours…`, 'ok');
+    toast(`"${t.filename}" uploaded, validating…`, 'ok');
     if (t.onValid) watchPst(t);
   } catch (e) {
     if (ctl.cancel) return;
     t.status = 'error'; t.error = e.message || String(e); changed();
-    toast(`Échec de l'envoi de « ${t.filename} » : ${t.error}. Vous pouvez reprendre.`, 'bad', 8000);
+    toast(`Upload of "${t.filename}" failed: ${t.error}. You can resume it.`, 'bad', 8000);
   }
 }
 
@@ -96,7 +96,7 @@ async function watchPst(t) {
     return p.status === 'valid' || p.status === 'invalid';
   };
   const off = on('pst', async p => { if (p.id === t.pstId && await finish(p)) off(); });
-  for (let i = 0; i < 600; i++) { // filet de sécurité si SSE indisponible
+  for (let i = 0; i < 600; i++) { // safety net if SSE is unavailable
     await sleep(3000);
     try { const p = await get('/psts/' + t.pstId); if (p.status === 'valid' || p.status === 'invalid') { off(); return finish(p); } } catch {}
   }
@@ -108,19 +108,19 @@ async function sendChunk(t, ctl, n) {
   const buf = await t.file.slice(start, end).arrayBuffer();
   const hash = await sha256Hex(buf);
   for (let attempt = 0; ; attempt++) {
-    if (ctl.cancel) throw new Error('annulé');
+    if (ctl.cancel) throw new Error('cancelled');
     try {
       await put(`/uploads/${t.id}/chunks/${n}`, buf, { headers: { 'X-Chunk-Sha256': hash, 'Content-Type': 'application/octet-stream' }, noAuthRedirect: false, signal: ctl.ac.signal });
-      if (ctl.cancel) throw new Error('annulé');
+      if (ctl.cancel) throw new Error('cancelled');
       t.received.add(n); t.retries = 0;
       t.sentBytes += end - start; sample(t); lsSet(t); changed();
       return;
     } catch (e) {
-      if (ctl.cancel) throw new Error('annulé');
-      if (e instanceof ApiError && [400, 401, 403, 404, 413].includes(e.status)) throw e; // non réessayable
+      if (ctl.cancel) throw new Error('cancelled');
+      if (e instanceof ApiError && [400, 401, 403, 404, 413].includes(e.status)) throw e; // not retryable
       t.retries++;
       if (attempt + 1 >= MAX_TRIES) throw e;
-      t.status = 'uploading'; t.warn = `Nouvelle tentative (${attempt + 1}/${MAX_TRIES - 1})…`; changed();
+      t.status = 'uploading'; t.warn = `Retrying (${attempt + 1}/${MAX_TRIES - 1})…`; changed();
       await backoff(ctl, attempt);
       t.warn = null;
     }
@@ -130,7 +130,7 @@ async function sendChunk(t, ctl, n) {
 async function retrying(t, ctl, fn) {
   for (let a = 0; ; a++) {
     try { return await fn(); } catch (e) {
-      if (ctl.cancel) throw new Error('annulé');
+      if (ctl.cancel) throw new Error('cancelled');
       if ((e instanceof ApiError && e.status < 500 && e.status !== 408 && e.status !== 429) || a + 1 >= MAX_TRIES) throw e;
       await backoff(ctl, a);
     }
@@ -157,6 +157,6 @@ export function cancel(t) { t.ctl.cancel = true; t.ctl.ac.abort(); t.ctl.reason 
 export function dismiss(t) { tasks.delete(t.key); changed(); }
 
 addEventListener('beforeunload', e => {
-  if (hasActiveUploads()) { e.preventDefault(); e.returnValue = 'Un envoi de PST est en cours. Quitter la page l\'interrompra (il pourra être repris).'; return e.returnValue; }
+  if (hasActiveUploads()) { e.preventDefault(); e.returnValue = 'A PST upload is in progress. Leaving the page will interrupt it (it can be resumed).'; return e.returnValue; }
 });
 addEventListener('online', () => { for (const t of tasks.values()) if (t.status === 'error') resume(t); });

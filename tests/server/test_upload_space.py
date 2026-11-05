@@ -13,7 +13,7 @@ def test_sparse_subtracts_other_uploads(client, env, monkeypatch):
     r = client.post("/api/uploads", json={"filename": "a.pst", "size": 700_000, "last_modified": 1})
     assert r.status_code == 200
     r = client.post("/api/uploads", json={"filename": "b.pst", "size": 400_000, "last_modified": 2})
-    assert r.status_code == 507 and "espace disque insuffisant" in r.text
+    assert r.status_code == 507 and "insufficient disk space" in r.text
     r = client.post("/api/uploads", json={"filename": "c.pst", "size": 200_000, "last_modified": 3})
     assert r.status_code == 200
 
@@ -34,7 +34,7 @@ def test_resume_checks_space_when_file_missing(client, env, monkeypatch):
     os.unlink(db.q1("SELECT path FROM psts WHERE id=?", (up["id"],))["path"])
     monkeypatch.setattr(uploads, "free_space", lambda: 100_000)
     r = client.post("/api/uploads", json=meta)
-    assert r.status_code == 507 and "espace disque insuffisant" in r.text
+    assert r.status_code == 507 and "insufficient disk space" in r.text
 
 
 def test_resume_sparse_checks_remaining(client, env, monkeypatch):

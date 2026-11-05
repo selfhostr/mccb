@@ -581,7 +581,7 @@ class MessageBuilder:
         if "message-id" not in present:
             mid = (bag.string(mapi.PR_INTERNET_MESSAGE_ID) or "").strip()
             if not mid or not mid.isascii() or " " in mid or len(mid) > _MAX_TOKEN:
-                mid = "<%s@pst-import.invalid>" % hashlib.sha1(self.import_id.strip("<>").encode()).hexdigest()[:32]  # stable quel que soit le format d'id
+                mid = "<%s@pst-import.invalid>" % hashlib.sha1(self.import_id.strip("<>").encode()).hexdigest()[:32]  # stable regardless of the id format
             add.append(_fold_ascii("Message-ID", mid))
         if "in-reply-to" not in present:
             v = (bag.string(mapi.PR_IN_REPLY_TO_ID) or "").strip()

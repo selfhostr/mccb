@@ -62,7 +62,7 @@ def test_update_account_purges_items(client):
         return db.q1("SELECT COUNT(*) c FROM items WHERE account_id=?", (aid,))["c"]
     add()
     client.put(f"/api/accounts/{aid}", json={"options": {"mail": True}})
-    assert n() == 1  # modif sans effet sur la cible
+    assert n() == 1  # change has no effect on the target
     for body in ({"email": "b@example.test"}, {"login": "other"}):
         db.ex("INSERT OR IGNORE INTO items(account_id,pst_id,kind,item_key,updated_at) VALUES (?,?,?,?,?)", (aid, 1, "mail", "k", 0))
         assert client.put(f"/api/accounts/{aid}", json=body).status_code == 200
@@ -73,7 +73,7 @@ def test_update_account_purges_items(client):
     assert n() == 0
 
 
-# ---------------------------------------------------------------- C. sécurité web
+# ---------------------------------------------------------------- C. web security
 def test_docs_disabled(client):
     for p in ("/api/docs", "/api/redoc", "/api/openapi.json"):
         assert client.get(p).status_code in (401, 404)
@@ -143,7 +143,7 @@ def test_imap_login_fallback_quoted():
 
 
 def test_dav_get_sends_auth():
-    """Régression (e2e Radicale avec htpasswd) : GET/exists envoyait la requête sans Authorization → 401."""
+    """Regression (Radicale e2e with htpasswd): GET/exists sent the request without Authorization → 401."""
     def h(req):
         if "authorization" not in req.headers:
             return httpx.Response(401)
@@ -155,7 +155,7 @@ def test_dav_get_sends_auth():
 
 
 def test_test_item_delay_hook_only_in_child(monkeypatch):
-    """Crochet PSTMIG_TEST_ITEM_DELAY (tests e2e) : sans effet hors sous-processus, borné et tolérant."""
+    """PSTMIG_TEST_ITEM_DELAY hook (e2e tests): no effect outside a subprocess, bounded and tolerant."""
     import time as _t
 
     from app.server import crash
@@ -168,4 +168,4 @@ def test_test_item_delay_hook_only_in_child(monkeypatch):
     crash.maybe_delay()
     assert _t.monotonic() - t0 >= 0.2
     monkeypatch.setenv(crash.TEST_DELAY_ENV, "abc")
-    crash.maybe_delay()  # valeur invalide ignorée
+    crash.maybe_delay()  # invalid value ignored
