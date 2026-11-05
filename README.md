@@ -23,7 +23,7 @@
 mccb imports Outlook PST (and OST) files into the mailboxes you host: mail over IMAP, appointments over CalDAV, contacts over CardDAV.
 
 - **Built for batches.** Add a server, add accounts one by one or by CSV, attach a PST to each, run them all and read one report per mailbox.
-- **Built for big files.** Resumable uploads of 50 GB and more, with a preview of accents and attachments before anything is written.
+- **Built for big files.** Resumable uploads of large files, with a preview of accents and attachments before anything is written.
 - **Safe to interrupt.** Pause, stop, crash or restart: a resume checks the server and never duplicates a message.
 
 Free, for good. MIT licence, no paid edition.
