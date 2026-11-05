@@ -10,6 +10,7 @@ import hashlib
 import html as htmlmod
 import io
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.generator import BytesGenerator
@@ -142,6 +143,16 @@ def html_to_text(h: str) -> str:
     h = re.sub(r"[ \t\r\f\v]+", " ", h)
     h = re.sub(r"\n\s*\n\s*\n+", "\n\n", h)
     return h.strip() + "\n"
+
+
+# Word "Save as HTML" companions referenced from mail HTML but never shipped as attachments: not a defect
+WORD_ARTEFACTS = frozenset({"filelist.xml", "editdata.mso", "oledata.mso", "themedata.thmx",
+                            "colorschememapping.xml", "header.htm"})
+
+
+def is_word_artefact(ref: str) -> bool:
+    name = ref.split("@", 1)[0].replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    return name in WORD_ARTEFACTS
 
 
 _CID_RE = re.compile(r"""cid:([^"'\s>)]+)""", re.I)
@@ -422,6 +433,28 @@ def message_dates(bag):
 
 
 # ---------------------------------------------------------------------------
+_B64_LINE = 76  # = email.contentmanager._encode_base64(max_line_length=78): 57 bytes per line
+
+
+def _b64_lines(data: bytes) -> bytes:
+    """Byte-identical to email.contentmanager._encode_base64(data, 78), encoded in one C call."""
+    if not data:
+        return b""
+    enc = binascii.b2a_base64(data, newline=False)
+    n = _B64_LINE
+    return b"\n".join([enc[i:i + n] for i in range(0, len(enc), n)]) + b"\n"
+
+
+class _FastGenerator(BytesGenerator):
+    """BytesGenerator writing a payload in one call instead of one write per line (same output:
+    every \\r\\n, \\r or \\n becomes the policy line separator, like Generator._write_lines)."""
+
+    def _write_lines(self, lines):
+        if not lines:
+            return
+        self.write(lines.replace("\r\n", "\n").replace("\r", "\n").replace("\n", self._NL))
+
+
 class MessageBuilder:
     def __init__(self, import_id: str):
         self.import_id = import_id
@@ -514,7 +547,8 @@ class MessageBuilder:
                     by_cid[ref.lower()] = a
             if a is None:
                 parts.cid_unresolved.add(ref)
-                parts.warnings.append("cid-unresolved:%s" % ref)
+                if not is_word_artefact(ref):
+                    parts.warnings.append("cid-unresolved:%s" % ref)
                 continue
             a.related = True
         for a in parts.atts:
@@ -526,7 +560,8 @@ class MessageBuilder:
     @staticmethod
     def _text_part(s: str, subtype: str) -> MIMEPart:
         p = MIMEPart(policy=POLICY)
-        non_ascii = sum(1 for c in s if ord(c) > 127)
+        # count of non-ASCII characters, computed in C (a per-character loop was a hotspot on big bodies)
+        non_ascii = 0 if s.isascii() else len(s) - len(s.encode("ascii", "ignore"))
         cte = "base64" if non_ascii > len(s) * 0.3 else "quoted-printable"
         p.set_content(s, subtype=subtype, charset="utf-8", cte=cte)
         return p
@@ -537,6 +572,10 @@ class MessageBuilder:
         m["Content-Type"] = "multipart/" + subtype
         for k, v in params.items():
             m.set_param(k, v)
+        # boundary chosen here: otherwise the generator regex-searches the whole flattened subtree for a
+        # collision, once per nesting level (superlinear on big attachments). 128 random bits cannot collide
+        # with content in practice; check_raw re-validates the structure anyway.
+        m.set_boundary("=_%s" % uuid.uuid4().hex)
         m.set_payload(list(parts))
         return m
 
@@ -557,8 +596,11 @@ class MessageBuilder:
         kw = {}
         if a.cid:
             kw["cid"] = "<%s>" % re.sub(r"[\s<>]", "", a.cid)
-        p.set_content(a.data, maintype=maintype, subtype=subtype, disposition=disp,
-                      filename=a.name, params={"name": a.name}, **kw)
+        # same headers and bytes as set_content(cte="base64"), with the base64 body encoded in C
+        # (email.contentmanager._encode_base64 loops in Python over 57-byte chunks)
+        p.set_content(_b64_lines(a.data), maintype=maintype, subtype=subtype, disposition=disp,
+                      filename=a.name, params={"name": a.name}, cte="7bit", **kw)
+        p.replace_header("Content-Transfer-Encoding", "base64")
         return p
 
     def mime_tree(self, parts: _Parts, simple: bool = False) -> MIMEPart:
@@ -585,7 +627,7 @@ class MessageBuilder:
     @staticmethod
     def serialize(root: MIMEPart) -> bytes:
         buf = io.BytesIO()
-        BytesGenerator(buf, policy=POLICY, mangle_from_=False).flatten(root)
+        _FastGenerator(buf, policy=POLICY, mangle_from_=False).flatten(root)
         return buf.getvalue()
 
     # headers --------------------------------------------------------------
@@ -697,15 +739,17 @@ class MessageBuilder:
             errors = check_raw(raw, expect)
         except Exception as ex:  # noqa: BLE001
             errors = ["build failed: %s" % ex]
+        checked = errors
         if errors:
             parts.warnings.append("fallback")
             parts.warnings.extend("rich-error:" + e for e in errors[:5])
             expect = expectations(parts, simple=True)
+            checked = None  # the simple build is checked by verify_message
             try:
                 raw = self.assemble(src, parts, simple=True)
             except Exception:  # noqa: BLE001
                 raw = self.assemble(src, parts, simple=True, minimal=True)
-        return _Built(raw=raw, parts=parts, expect=expect)
+        return _Built(raw=raw, parts=parts, expect=expect, checked=checked)
 
 
 @dataclass
@@ -713,6 +757,8 @@ class _Built:
     raw: bytes
     parts: _Parts
     expect: dict
+    # check_raw(raw, expect) result already computed for this exact raw (None = not checked yet)
+    checked: list | None = None
 
     @property
     def warnings(self):

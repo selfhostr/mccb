@@ -56,6 +56,12 @@ export function fmtBytes(n) {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2)).toString() + ' ' + u[i];
 }
+export function fmtRate(rate, rateBytes) {
+  const s = `${rate ? Number(rate).toFixed(1) : '0'} items/s`;
+  if (typeof rateBytes !== 'number' || !(rateBytes > 0)) return s;
+  const k = rateBytes / 1024;
+  return s + ' · ' + (k < 1024 ? k.toFixed(1) + ' KB/s' : (k / 1024).toFixed(1) + ' MB/s');
+}
 export function fmtDur(s) {
   if (s == null || !isFinite(s)) return '—';
   s = Math.round(s); if (s < 60) return s + 's';

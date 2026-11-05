@@ -110,6 +110,8 @@ They are defined in `.env` (read by the `web` and `worker` services). The file i
 | `UPLOAD_CHUNK_SIZE` | `33554432` (32 MiB) | Upload chunk size, in bytes (16 to 64 MiB recommended). **Do not change it during a migration**, see [resuming](#how-resuming-works). |
 | `UPLOAD_DISK_MARGIN` | `536870912` (512 MiB) | Free disk space margin required on top of the PST size. |
 | `WORKER_CONCURRENCY` | `2` | Number of mailboxes migrated simultaneously by the worker. |
+| `BUILD_PROCESSES` | min(CPUs − 1, 8) | Processes building MIME messages for one mailbox (each opens the PST read-only). A builder killed by a libpff crash marks its item "libpff crash" and is restarted; crashes count towards `MAX_CHILD_CRASHES`. `0` = build inside the job process (previous behaviour). Total CPU use is about `WORKER_CONCURRENCY` × `BUILD_PROCESSES`. |
+| `BUILD_MAX_INFLIGHT_MB` | `256` | Memory budget for built messages waiting for their APPEND. |
 | `VERIFY_SAMPLE` | `20` | Number of mails re-read for the sample check at the end of a job. |
 | `IMAP_MAX_RETRIES` | `5` | Attempts on temporary IMAP errors (exponential backoff). |
 | `MAX_CHILD_CRASHES` | `3` | Subprocess (libpff) crashes tolerated per job before it is marked `failed` (minimum 1). |

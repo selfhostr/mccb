@@ -1,4 +1,4 @@
-import { h, jobBadge, progressBar, pct, fmtNum, fmtDur, fmtBytes, PHASES } from './ui.js';
+import { h, jobBadge, progressBar, pct, fmtNum, fmtDur, fmtBytes, fmtRate, PHASES } from './ui.js';
 
 export const KINDS = [['mail', 'Mail'], ['calendar', 'Calendar'], ['contacts', 'Contacts']];
 export function totals(job) {
@@ -22,5 +22,5 @@ export function jobCard(job, email) {
     h('div', { class: 'muted small' }, PHASES[job.phase] || job.phase || '', job.current_folder ? ' · ' + job.current_folder : ''),
     progressBar(t.pct, { label: t.pct + '%', striped: job.status === 'running', kind: t.errors ? 'warn' : '' }),
     h('div', { class: 'row between small muted' }, h('span', null, `${fmtNum(t.done)} / ${fmtNum(t.total)} items`),
-      h('span', null, job.status === 'running' ? `${job.rate ? Number(job.rate).toFixed(1) : '0'}/s · ${fmtDur(job.eta)}` : '')));
+      h('span', null, job.status === 'running' ? `${fmtRate(job.rate, job.rate_bytes)} · ${fmtDur(job.eta)}` : '')));
 }

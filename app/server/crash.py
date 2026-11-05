@@ -145,6 +145,17 @@ def _blame(marker: dict, job_id: int, why: str) -> str | None:
     return desc
 
 
+def record_builder_crash(job_id: int, marker: dict, rc: int | None) -> tuple[int, str | None, str]:
+    """A builder process (see builders.py) died holding the item described by `marker`: the item becomes
+    an error "libpff crash" (like a crash of the job process itself) and the job's crash counter, shared
+    with handle_job_crash (MAX_CHILD_CRASHES guard), is incremented. Returns (count, description, why)."""
+    why = describe_rc(rc)
+    desc = _blame(marker, job_id, why)
+    n = get_crashes(job_id) + 1
+    db.kv_set(f"job:{job_id}:crashes", str(n))
+    return n, desc, why
+
+
 def handle_job_crash(job_id: int, rc: int | None) -> str:
     """The job's subprocess died abnormally. Returns the new job status."""
     why = describe_rc(rc)

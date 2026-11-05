@@ -33,7 +33,10 @@ def job_view(r) -> dict:
     prog = db.jload(r["progress"], None) or empty_progress()
     return {
         "id": r["id"], "account_id": r["account_id"], "status": r["status"], "phase": r["phase"],
-        "progress": prog, "current_folder": r["current_folder"], "rate": r["rate"], "eta": r["eta"],
+        "progress": prog, "current_folder": r["current_folder"], "rate": r["rate"],
+        # byte rate only alongside an item rate (rate is reset to NULL on pause/crash, rate_bytes may lag)
+        "rate_bytes": (r["rate_bytes"] if "rate_bytes" in r.keys() else None) if r["rate"] is not None else None,
+        "eta": r["eta"],
         "started_at": r["started_at"], "finished_at": r["finished_at"], "error": r["error"],
         "mode": r["mode"], "created_at": r["created_at"],
     }

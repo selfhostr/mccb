@@ -372,6 +372,8 @@ class PstFile:
                               attachments=len(built.parts.atts), size=len(built.raw),
                               warnings=list(built.warnings))
             bm._expect = built.expect
+            # check_raw already ran on this raw inside build_raw: verify_message reuses it (same checks, once)
+            bm._checked = (built.raw, built.checked) if built.checked is not None else None
             return bm
         except ItemError:
             raise

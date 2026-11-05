@@ -50,6 +50,7 @@ All variables are optional (set them in `.env`, see [`.env.example`](.env.exampl
 | `ADMIN_PASSWORD` | generated | UI password; always wins when set |
 | `SECRET_KEY` | generated in `data/secret.key` | Encrypts mailbox passwords, signs sessions |
 | `WORKER_CONCURRENCY` | `2` | Mailboxes migrated in parallel |
+| `BUILD_PROCESSES` | min(CPUs − 1, 8) | Message-builder processes per mailbox (`0` = build in the job process) |
 | `UPLOAD_CHUNK_SIZE` | `33554432` | Upload chunk size in bytes; keep constant during a migration |
 | `COOKIE_SECURE` | `0` | `1` behind an HTTPS reverse proxy |
 

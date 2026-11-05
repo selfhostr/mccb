@@ -21,6 +21,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKER_STALE_SECONDS", "60")
     monkeypatch.setenv("PSTMIG_FAKE_CONFIG", str(tmp_path / "fake_engine.json"))
     monkeypatch.delenv("PSTMIG_TEST_CRASH", raising=False)
+    # parallel builders, kept small so that timing-based tests (pause/stop mid-folder) stay meaningful
+    monkeypatch.setenv("BUILD_PROCESSES", os.environ.get("TEST_BUILD_PROCESSES", "2"))
     from app.server import db, security
     from app.server.config import settings
     settings.reload()

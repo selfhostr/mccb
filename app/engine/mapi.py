@@ -7,6 +7,7 @@ decoded here from its raw bytes, PT_STRING8 with the item's codepage.
 """
 from __future__ import annotations
 
+import re
 import struct
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -550,8 +551,11 @@ def decode_utf16(d: bytes) -> str:
     return s.split("\x00", 1)[0]
 
 
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _has_lone_surrogate(s: str) -> bool:
-    return any(0xD800 <= ord(c) <= 0xDFFF for c in s)
+    return not s.isascii() and _SURROGATE.search(s) is not None
 
 
 def split_mv(data: bytes) -> list[bytes]:

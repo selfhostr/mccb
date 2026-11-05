@@ -68,6 +68,7 @@ CONFIG: dict = _Config({
     "fail_keys": set(),    # item_keys whose construction raises an exception
     "reject_keys": set(),  # item_keys rejected by verify_message
     "unreadable": set(),   # "<path joined by />#<index>" unreadable during iteration (fallback key <fid>-x<i>)
+    "warnings": {},        # item_key -> list of (non-blocking) build warnings
 })
 
 
@@ -167,7 +168,8 @@ class PstFile:
         m.add_attachment(b"%PDF-1.4 fake", maintype="application", subtype="pdf", filename="Compte-rendu été.pdf")
         raw = m.as_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
         return BuiltMessage(raw=raw, internaldate=dt, flags=["\\Seen"] if i % 2 == 0 else [],
-                            subject=str(m["Subject"]), attachments=1, size=len(raw), warnings=[])
+                            subject=str(m["Subject"]), attachments=1, size=len(raw),
+                            warnings=list(CONFIG.get("warnings", {}).get(handle["key"], [])))
 
     def build_event(self, handle) -> DavObject | None:
         self._wait()

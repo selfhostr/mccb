@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress TEXT NOT NULL DEFAULT '{}',
     current_folder TEXT,
     rate REAL,
+    rate_bytes REAL,
     eta REAL,
     mode TEXT NOT NULL DEFAULT 'full',
     worker_id TEXT,
@@ -151,6 +152,12 @@ def pst_key_of(pst_row) -> str | None:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migration: items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
+    if "rate_bytes" not in {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}:
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN rate_bytes REAL")  # bytes/s (sliding 60 s)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():  # added in the meantime by the other process
+                raise
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")

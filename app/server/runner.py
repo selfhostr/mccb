@@ -7,7 +7,6 @@ DAV: deterministic UIDs -> idempotent PUT.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import queue
 import random
@@ -16,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import crash, db, repo
+from . import builders, crash, db, repo
 from .config import settings
 from .dav import DavClient, DavError
 from .engine_loader import engine
@@ -29,6 +28,8 @@ KIND_OF_PHASE = {"mail": "mail", "calendar": "event", "contacts": "contact"}
 PROGRESS_KEY = {"mail": "mail", "event": "calendar", "contact": "contacts"}
 # engine fallback key for an item unreadable during iteration ("<fnid>-x<index>", see pst.iter_items)
 FALLBACK_KEY_RE = re.compile(r"-x(\d+)$")
+# unresolved cid warnings: aggregated per folder in the log (still recorded per item in items.warnings)
+CID_WARNING_RE = re.compile(r"^(embedded:)*cid-unresolved:")
 
 
 class PauseRequested(Exception):
@@ -43,10 +44,7 @@ class JobFailed(Exception):
     pass
 
 
-def norm_hash(raw: bytes) -> str:
-    """Line-ending-insensitive hash (the server stores CRLF)."""
-    data = raw.replace(b"\r\n", b"\n").rstrip(b"\n")
-    return hashlib.sha256(data).hexdigest()
+norm_hash = builders.norm_hash  # line-ending-insensitive hash (the server stores CRLF)
 
 
 def import_id_of(pst_sha: str, item_key: str) -> str:
@@ -288,10 +286,16 @@ class JobRunner:
         self.current_folder: str | None = None
         self._last_flush = 0.0
         self._last_check = 0.0
-        self._rate_window: list[tuple[float, int]] = []
+        # samples (time, items done, bytes appended by this run)
+        self._rate_window: list[tuple[float, int, int]] = []
         # average rate over the import phases of this run (first / last sample): displayed at the end of the job
-        self._rate_first: tuple[float, int] | None = None
-        self._rate_last: tuple[float, int] | None = None
+        self._rate_first: tuple[float, int, int] | None = None
+        self._rate_last: tuple[float, int, int] | None = None
+        self._bytes_done = 0                     # bytes APPENDed by this run (rate_bytes)
+        self._inflight_bytes: dict[int, int] = {}  # item_id -> size: built, submitted, not yet APPENDed
+        self.build_procs = builders.default_processes()
+        self.byte_budget = builders.byte_budget()
+        self._phase = ""
         self._item_phase = False
         self.report: dict = {"folders": [], "warnings": [], "verify": {}, "dav": {}, "precheck": {}}
         self.consecutive_temp = 0
@@ -374,20 +378,33 @@ class JobRunner:
         now = time.time()
         db.ex("UPDATE jobs SET phase=?, heartbeat=? WHERE id=?", (phase, now, self.job_id))
         self.log(f"Phase: {phase}")
+        self._phase = phase
         self._item_phase = phase in ("mail", "calendar", "contacts")
         if self._item_phase and self.account_id and self.pst_key:
             # rate window seeded at the start of the phase: a short job has a rate from the 1st flush
             self.recompute_progress()
             done = sum(p["done"] for p in self.progress.values())
-            self._rate_window = [(now, done)]
+            self._rate_window = [(now, done, self._bytes_done)]
             if self._rate_first is None:
-                self._rate_first = (now, done)
+                self._rate_first = (now, done, self._bytes_done)
 
     def _avg_rate(self) -> float | None:
         if not (self._rate_first and self._rate_last):
             return None
-        (t0, d0), (t1, d1) = self._rate_first, self._rate_last
+        (t0, d0, _b0), (t1, d1, _b1) = self._rate_first, self._rate_last
         return round((d1 - d0) / (t1 - t0), 2) if t1 - t0 > 0 and d1 >= d0 else None
+
+    def _avg_rate_bytes(self) -> float | None:
+        if not (self._rate_first and self._rate_last):
+            return None
+        (t0, _d0, b0), (t1, _d1, b1) = self._rate_first, self._rate_last
+        return round((b1 - b0) / (t1 - t0), 1) if t1 - t0 > 0 and b1 > b0 else None
+
+    def _mail_avg_size(self) -> float | None:
+        """Average size of the mails of this PST already sent (all runs): converts remaining items to bytes."""
+        r = db.q1("SELECT COUNT(size) n, SUM(size) s FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+                  "AND status='ok'", (self.account_id, self.pst_key))
+        return (r["s"] / r["n"]) if r and r["n"] else None
 
     def recompute_progress(self) -> None:
         for kind, pk in PROGRESS_KEY.items():
@@ -405,16 +422,29 @@ class JobRunner:
         self.recompute_progress()
         done = sum(p["done"] for p in self.progress.values())
         total = sum(p["total"] for p in self.progress.values())
-        self._rate_window.append((now, done))
+        self._rate_window.append((now, done, self._bytes_done))
         # sliding average over 60 s, otherwise since the start of the phase (first sample kept)
         self._rate_window = [x for x in self._rate_window if now - x[0] <= 60]
-        t0, d0 = self._rate_window[0]
+        t0, d0, b0 = self._rate_window[0]
         rate = (done - d0) / (now - t0) if now - t0 >= 0.2 else None
+        rate_bytes = (self._bytes_done - b0) / (now - t0) if now - t0 >= 0.2 else None
         if self._item_phase:
-            self._rate_last = (now, done)
-        eta = (max(0, total - done) / rate) if rate is not None and rate > 0 else (0 if total and done >= total else None)
-        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, eta=?, heartbeat=? WHERE id=?",
+            self._rate_last = (now, done, self._bytes_done)
+        eta = None
+        if self._phase == "mail" and rate_bytes and rate_bytes > 0:
+            # big messages lower items/s while MB/s stays steady: remaining mails converted to bytes
+            # (average size of the mails already sent) divided by the byte rate
+            avg = self._mail_avg_size()
+            if avg:
+                m = self.progress.get("mail") or {}
+                rem_mail = max(0, m.get("total", 0) - m.get("done", 0))
+                rem_other = max(0, total - done - rem_mail)
+                eta = rem_mail * avg / rate_bytes + (rem_other / rate if rate else 0)
+        if eta is None:
+            eta = (max(0, total - done) / rate) if rate is not None and rate > 0 else (0 if total and done >= total else None)
+        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, rate_bytes=?, eta=?, heartbeat=? WHERE id=?",
               (db.jdump(self.progress), self.current_folder, round(rate, 2) if rate is not None else None,
+               round(rate_bytes, 1) if rate_bytes is not None else None,
                round(eta) if eta is not None else None, now, self.job_id))
 
     def item_rows(self, kind: str, fkey: str, path: list[str] | None = None) -> dict[str, dict]:
@@ -577,9 +607,9 @@ class JobRunner:
         # `job:<id>:crashes` > 0 and the next "errors" rerun skipped the "libpff crash" items.
         crash.reset_crashes(self.job_id)
         # average rate of the import phases kept (displayed for finished jobs, even very short ones)
-        db.ex("UPDATE jobs SET status=?, error=?, finished_at=?, worker_id=NULL, rate=?, eta=NULL, "
+        db.ex("UPDATE jobs SET status=?, error=?, finished_at=?, worker_id=NULL, rate=?, rate_bytes=?, eta=NULL, "
               "report_path=COALESCE(?, report_path), current_folder=NULL WHERE id=?",
-              (status, error, now, self._avg_rate(), path, self.job_id))
+              (status, error, now, self._avg_rate(), self._avg_rate_bytes(), path, self.job_id))
 
     # ------------------------------------------------------------ precheck
     def precheck(self) -> None:
@@ -675,6 +705,7 @@ class JobRunner:
             for f in mail_folders:
                 self._mail_folder(f, plan[folder_key(f.path)][0], conn, pool)
         finally:
+            self._close_builders()  # in-flight builds discarded (pause/stop/failure): nothing recorded for them
             if pool is not None:
                 try:
                     self._wait_pool(pool)
@@ -685,12 +716,15 @@ class JobRunner:
                     except JobFailed:
                         pass
             conn.close()
+        self.flush(force=True)  # last sample of the phase (end-of-job average rates)
 
     def _handle_results(self, results: list[AppendResult]) -> None:
         fatal = None
         for r in results:
+            size = self._inflight_bytes.pop(r.item_id, 0)
             if r.ok:
                 self.consecutive_temp = 0
+                self._bytes_done += r.size or size
                 self.set_item(r.item_id, "ok")
             elif r.kind == "cancel":
                 self.set_item(r.item_id, "pending")  # never sent (pause/stop before the APPEND)
@@ -762,15 +796,23 @@ class JobRunner:
         self._resolve_on_server(conn, rows)
         fallback = self.fallback_rows(rows)
         pst_sha = self.pst_row["pst_sha"]
-        for idx, key, handle in self._iter(f, "mail", fkey):
-            self.check()
-            self._handle_results(pool.drain())
-            r, fb = self._resolve_key(rows, fallback, idx, key)
-            if not self.wants(r):
-                continue
-            self._mail_item(f, fkey, idx, key, handle, target, pool, pst_sha)
-            self._drop_fallback(fb)
+        self._cid_msgs = 0
+        bpool = self._builders(f)
+        if bpool is None:
+            for idx, key, handle in self._iter(f, "mail", fkey):
+                self.check()
+                self._handle_results(pool.drain())
+                r, fb = self._resolve_key(rows, fallback, idx, key)
+                if not self.wants(r):
+                    continue
+                self._mail_item(f, fkey, idx, key, handle, target, pool, pst_sha)
+                self._drop_fallback(fb)
+        else:
+            self._mail_folder_parallel(f, fkey, target, pool, bpool, rows, fallback, pst_sha)
         self._wait_pool(pool)
+        if self._cid_msgs:
+            self.log(f"{fkey}: {self._cid_msgs} message(s) reference images missing from the PST "
+                     f"(quoted replies) — harmless")
         # post-folder check: messages bearing our fingerprint >= sent (ok) to this folder
         self.check_folder_status(conn, fkey, target)
 
@@ -797,24 +839,118 @@ class JobRunner:
         if built is None:
             self.upsert_item("mail", key, fkey, "skipped", target=target, error="not a mail")
             return
-        try:
-            errs = list(self.eng.verify_message(built, handle) or [])
-        except Exception as e:
-            errs = [f"verification: {type(e).__name__}: {e}"]
-        if IMPORT_HEADER.lower().encode() not in built.raw[:65536].lower():
-            errs.append(f"header {IMPORT_HEADER} missing")
-        warnings = db.jdump(built.warnings) if built.warnings else None
-        if errs:
-            self.upsert_item("mail", key, fkey, "error", target=target, subject=built.subject,
-                             error="; ".join(errs)[:2000], warnings=warnings)
-            self.log(f"Mail rejected '{built.subject}': {'; '.join(errs)}", "error")
+        self._record_built(fkey, idx, key, target, pool, import_id, builders.finish_built(self.eng, built, handle))
+
+    def _record_built(self, fkey: str, idx: int, key: str, target: str, pool: AppendPool, import_id: str,
+                      res: dict) -> None:
+        """Bookkeeping of one build result (in-process or from a builder process), then APPEND submission."""
+        st = res["status"]
+        if st == "error":
+            self.upsert_item("mail", key, fkey, "error", target=target, error=res["error"])
+            self.log(f"Cannot build ({fkey} #{idx}): {res['error'].removeprefix('construction: ')}", "error")
             return
-        if built.warnings:
-            self.log(f"Warning '{built.subject}': {', '.join(built.warnings)}", "warning")
-        item_id = self.upsert_item("mail", key, fkey, "inflight", target=target, subject=built.subject,
-                                   hash=norm_hash(built.raw), size=len(built.raw), warnings=warnings)
-        pool.submit(AppendTask(item_id, target, built.raw, list(built.flags or []), built.internaldate, len(built.raw),
-                               import_id))
+        if st == "skipped":
+            self.upsert_item("mail", key, fkey, "skipped", target=target, error="not a mail")
+            return
+        warns = res.get("warnings") or []
+        warnings = db.jdump(warns) if warns else None
+        if st == "rejected":
+            errs = res["errs"]
+            self.upsert_item("mail", key, fkey, "error", target=target, subject=res["subject"],
+                             error="; ".join(errs)[:2000], warnings=warnings)
+            self.log(f"Mail rejected '{res['subject']}': {'; '.join(errs)}", "error")
+            return
+        others = [w for w in warns if not CID_WARNING_RE.match(w)]
+        if len(others) != len(warns):
+            self._cid_msgs = getattr(self, "_cid_msgs", 0) + 1
+        if others:
+            self.log(f"Warning '{res['subject']}': {', '.join(others)}", "warning")
+        raw = res["raw"]
+        item_id = self.upsert_item("mail", key, fkey, "inflight", target=target, subject=res["subject"],
+                                   hash=res["hash"], size=len(raw), warnings=warnings)
+        self._submit(pool, AppendTask(item_id, target, raw, res["flags"], res["internaldate"], len(raw), import_id))
+
+    def _submit(self, pool: AppendPool, task: AppendTask) -> None:
+        """APPEND submission within the byte budget of built messages in flight (memory capped whatever the
+        message sizes); the item is already `inflight` (committed) at this point."""
+        while self._inflight_bytes and sum(self._inflight_bytes.values()) + task.size > self.byte_budget \
+                and pool.pending > 0:
+            if not pool.abort.is_set() and self._should_stop():
+                pool.abort.set()
+            self._handle_results(pool.drain(block=True, timeout=0.5))
+        self._inflight_bytes[task.item_id] = task.size
+        pool.submit(task)
+
+    # ------------------------------------------------------------ parallel builders
+    def _builders(self, f) -> builders.BuilderPool | None:
+        """Builder processes (started on first use, shared by the folders of the mail phase)."""
+        if self.build_procs <= 0 or not int(f.count or 0):
+            return None
+        bp = getattr(self, "_bpool", None)
+        if bp is None:
+            bp = builders.BuilderPool(self.pst_row["path"], self.build_procs, in_child=crash.IN_CHILD)
+            self._bpool = bp
+            self.log(f"{bp.size} builder process(es)")
+        return bp
+
+    def _close_builders(self) -> None:
+        bp = getattr(self, "_bpool", None)
+        self._bpool = None
+        if bp is not None:
+            bp.close()
+
+    def _folder_index(self, f) -> int:
+        for i, x in enumerate(self.folders):
+            if x is f:
+                return i
+        raise JobFailed(f"folder not found: {f.path}")
+
+    def _mail_folder_parallel(self, f, fkey: str, target: str, pool: AppendPool, bpool: builders.BuilderPool,
+                              rows: dict, fallback: dict, pst_sha: str) -> None:
+        """The job process iterates (keys, idempotence decisions) and records; builders build.
+        At most one task per builder; results are recorded as they arrive (any order)."""
+        fi = self._folder_index(f)
+        it = self._iter(f, "mail", fkey)
+        exhausted = False
+        try:
+            while True:
+                self.check()
+                self._handle_results(pool.drain())
+                while not exhausted and bpool.can_dispatch() and \
+                        sum(self._inflight_bytes.values()) < self.byte_budget:
+                    try:
+                        idx, key, _handle = next(it)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    self._mark()  # item fetched: a later death of this process is not blamed on its index
+                    r, fb = self._resolve_key(rows, fallback, idx, key)
+                    if not self.wants(r):
+                        self.check()
+                        continue
+                    bpool.dispatch(builders.BuildTask(fi, list(f.path), idx, key, import_id_of(pst_sha, key),
+                                                      meta=fb))
+                if exhausted and not bpool.busy():
+                    return
+                for ev in bpool.wait(0.2):
+                    self._on_built(ev, fkey, target, pool)
+        finally:
+            it.close()
+
+    def _on_built(self, ev: builders.BuildEvent, fkey: str, target: str, pool: AppendPool) -> None:
+        t = ev.task
+        if ev.crashed is not None:
+            marker = {"a": self.account_id, "p": self.pst_id, "s": self.pst_key, "kind": "mail", "folder": fkey,
+                      "idx": t.index, "key": t.key}
+            n, desc, why = crash.record_builder_crash(self.job_id, marker, ev.crashed)
+            self.crashes = n
+            self.log(f"Subprocess crash ({why}, {n}/{settings.max_child_crashes}): {desc} — marked as error "
+                     f"'{crash.CRASH_MSG}', resuming after this item (builder process restarted)", "error")
+            if n >= settings.max_child_crashes:
+                raise JobFailed(f"The subprocess crashed {n} times (probable libpff crash)")
+            return
+        self._record_built(fkey, t.index, t.key, target, pool, t.import_id, ev.result)
+        self._drop_fallback(t.meta)
 
     def _path_of(self, fkey: str) -> list[str]:
         for f in getattr(self, "folders", []):
