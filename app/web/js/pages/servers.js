@@ -30,7 +30,7 @@ export default async function (root) {
     toast(`Testing "${s.name}"…`, 'info', 1500);
     try {
       const r = await post(`/servers/${s.id}/test`);
-      const row = (n, x) => x ? h('li', { class: x.ok ? 'ok' : 'bad' }, h('b', null, n), ' ', x.ok ? '✔' : '✘', ' ', x.msg || '') : null;
+      const row = (n, x) => x ? h('li', { class: x.ok ? 'ok' : 'bad' }, h('b', null, n), ' ', x.ok ? 'OK' : 'FAIL', ' ', x.msg || '') : null;
       modal({ title: `Test of ${s.name}`, body: h('ul', { class: 'testlist' }, row('IMAP', r.imap), row('CalDAV', r.caldav), row('CardDAV', r.carddav),
         (!r.imap && r.ok != null) ? h('li', { class: r.ok ? 'ok' : 'bad' }, r.msg || (r.ok ? 'OK' : 'Failed')) : null), actions: [{ label: 'Close', onClick: c => c() }] });
     } catch (e) { toast(e.message, 'bad'); }

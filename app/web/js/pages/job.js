@@ -25,7 +25,7 @@ export default async function (root, { params }) {
         ['done_with_errors', 'stopped', 'failed'].includes(st) ? btn('Retry errors', { ico: 'retry', onClick: () => act('retry-errors', 'Retrying errors.') }) : null)));
     const steps = h('div', { class: 'steps' }, ORDER.map((p, i) => {
       const cur = ORDER.indexOf(job.phase), cls = isActive(st) || st === 'running' ? (i < cur ? 'past' : i === cur ? 'cur' : '') : (['done', 'done_with_errors'].includes(st) ? 'past' : i < cur ? 'past' : i === cur ? 'cur' : '');
-      return h('div', { class: 'step ' + cls }, h('i', null, cls === 'past' ? '✓' : i + 1), h('span', null, PHASES[p]));
+      return h('div', { class: 'step ' + cls }, h('i', null, cls === 'past' ? 'OK' : i + 1), h('span', null, PHASES[p]));
     }));
     clear(body).append(
       h('div', { class: 'card' }, steps,
@@ -99,7 +99,7 @@ export default async function (root, { params }) {
       if (secs.length) pane.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' }, h('thead', null, h('tr', null, ['Type', 'Sent', 'On server', 'Errors', 'Warnings', 'Skipped'].map(t => h('th', null, t)))),
         h('tbody', null, secs.map(([k, l, s]) => {
           const sent = s.sent ?? s.ok ?? s.done, pres = s.present ?? s.server, mismatch = pres != null && sent != null && pres < sent;
-          return h('tr', null, h('td', null, h('b', null, l)), h('td', { class: 'num' }, fmtNum(sent)), h('td', { class: 'num ' + (mismatch ? 'err' : pres != null ? 'okt' : '') }, fmtNum(pres), mismatch ? ' ⚠' : ''),
+          return h('tr', null, h('td', null, h('b', null, l)), h('td', { class: 'num' }, fmtNum(sent)), h('td', { class: 'num ' + (mismatch ? 'err' : pres != null ? 'okt' : '') }, fmtNum(pres), mismatch ? ' !' : ''),
             h('td', { class: 'num' }, fmtNum(s.errors ?? 0)), h('td', { class: 'num' }, fmtNum(s.warnings ?? 0)), h('td', { class: 'num' }, fmtNum(s.skipped ?? 0))); })))));
       if (Array.isArray(r.folders) && r.folders.length) pane.append(h('h4', null, 'By folder'), h('div', { class: 'table-wrap' }, h('table', { class: 'tbl small' },
         h('thead', null, h('tr', null, ['Folder', 'Sent', 'Present'].map(t => h('th', null, t)))), h('tbody', null, r.folders.map(f => h('tr', null, h('td', null, Array.isArray(f.path) ? f.path.join(' / ') : (f.path || f.name)), h('td', { class: 'num' }, fmtNum(f.sent)), h('td', { class: 'num ' + (f.present < f.sent ? 'err' : '') }, fmtNum(f.present))))))));
