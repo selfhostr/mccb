@@ -1,10 +1,16 @@
-"""CalDAV and CardDAV as targets: one collection per account, deterministic resource names, idempotent PUT."""
+"""CalDAV and CardDAV. As targets: one collection per account and item kind, deterministic resource names, idempotent
+PUT. As sources: every collection, each object as it is on the server."""
 from __future__ import annotations
+
+import hashlib
+import re
+from typing import Iterator
 
 from ..server.dav import DavClient, DavError
 from . import registry
-from .base import (CALENDAR, CAP_READBACK, CONTACTS, ConnectorError, FolderPlan, OutgoingItem, SourceFolder, Target,
-                   TargetSession)
+from .base import (CALENDAR, CAP_FOLDERS, CAP_READBACK, CONTACTS, TASKS, ConnectorError, FetchedItem, FolderPlan,
+                   OutgoingItem, Source, SourceFolder, SourceItem, Target, TargetSession)
+from .imap import folder_hash
 
 
 def convert(e: DavError) -> ConnectorError:
@@ -16,8 +22,9 @@ def convert(e: DavError) -> ConnectorError:
 
 
 class DavSession(TargetSession):
-    def __init__(self, dav_kind: str, config: dict, secrets: dict):
+    def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT"):
         self.dav_kind = dav_kind  # caldav | carddav
+        self.component = component  # VTODO: a calendar that accepts tasks
         self.config = config
         self.password = secrets.get("password") or ""
         self.client: DavClient | None = None
@@ -44,7 +51,7 @@ class DavSession(TargetSession):
         cfg = self.config
         try:
             return self._c().discover(self.dav_kind, cfg.get("url") or None, cfg.get("email") or cfg.get("login") or "",
-                                      cfg.get("discovery_host") or "")
+                                      cfg.get("discovery_host") or "", component=self.component)
         except DavError as e:
             raise convert(e) from e
 
@@ -55,7 +62,7 @@ class DavSession(TargetSession):
 
     def ensure_folder(self, name: str, flag: str | None = None) -> None:
         try:
-            self._c().ensure_collection(self.dav_kind, name)
+            self._c().ensure_collection(self.dav_kind, name, self.component)
         except DavError as e:
             raise convert(e) from e
 
@@ -93,20 +100,109 @@ class DavSession(TargetSession):
 class DavTarget(Target):
     capabilities = frozenset({CAP_READBACK})
     dav_kind = "caldav"
+    component = "VEVENT"
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
         self.secrets = secrets
 
     def session(self) -> DavSession:
-        return DavSession(self.dav_kind, self.config, self.secrets)
+        return DavSession(self.dav_kind, self.config, self.secrets, self.component)
+
+    def for_item(self, item: str) -> "DavTarget":
+        """The target to use for this item kind (wiring.py): tasks need a calendar that accepts VTODO."""
+        return self
+
+
+class CardDavTarget(DavTarget):
+    dav_kind = "carddav"
+
+
+class CalDavTasksTarget(DavTarget):
+    dav_kind = "caldav"
+    component = "VTODO"
 
 
 class CalDavTarget(DavTarget):
     dav_kind = "caldav"
 
+    def for_item(self, item: str) -> DavTarget:
+        return CalDavTasksTarget(self.config, self.secrets) if item == TASKS else self
 
-class CardDavTarget(DavTarget):
+
+# ------------------------------------------------------------------ source
+_SUMMARY = re.compile(rb"^(?:SUMMARY|FN)[^:\r\n]*:(.*)$", re.M)
+
+
+class DavSource(Source):
+    """Reads every collection of the account. Objects are copied as they are: nothing is parsed but the kind."""
+    dav_kind = "caldav"
+
+    def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
+        self.config = config
+        self.password = secrets.get("password") or ""
+        self.client: DavClient | None = None
+
+    def open(self) -> None:
+        self.close()
+        self.client = DavClient(self.config.get("login") or "", self.password, bool(self.config.get("verify_tls", True)))
+
+    def close(self) -> None:
+        if self.client is not None:
+            self.client.close()
+        self.client = None
+
+    def _c(self) -> DavClient:
+        if self.client is None:
+            raise ConnectorError("DAV source not connected", ConnectorError.TRANSIENT)
+        return self.client
+
+    def folders(self) -> list[SourceFolder]:
+        cfg = self.config
+        try:
+            rows = self._c().collections(self.dav_kind, cfg.get("url") or None, cfg.get("email") or cfg.get("login") or "",
+                                         cfg.get("discovery_host") or "")
+        except DavError as e:
+            raise convert(e) from e
+        out: list[SourceFolder] = []
+        seen: set[str] = set()
+        for url, label, comps in rows:
+            kinds = [CONTACTS] if self.dav_kind == "carddav" else [
+                k for k, c in ((CALENDAR, "VEVENT"), (TASKS, "VTODO")) if not comps or c in comps]
+            for kind in kinds:
+                out.append(SourceFolder(path=[label], kind=kind, special="default" if kind not in seen else None, ref=url))
+                seen.add(kind)
+        return out
+
+    def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
+        try:
+            names = sorted(self._c().names(folder.ref))
+        except DavError as e:
+            raise convert(e) from e
+        for name in names:
+            digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - identifier, not security
+            yield SourceItem(key=f"{folder_hash(folder.path)}-{digest}", ref=name)
+
+    def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
+        try:
+            text = self._c().get(folder.ref, item.ref)
+        except DavError as e:
+            raise convert(e) from e
+        if text is None:
+            return None
+        raw = text.encode("utf-8")
+        wanted = {CALENDAR: b"BEGIN:VEVENT", TASKS: b"BEGIN:VTODO", CONTACTS: b"BEGIN:VCARD"}[folder.kind]
+        if wanted not in raw.upper():
+            return None  # a collection holding events and tasks is listed once per kind
+        m = _SUMMARY.search(raw)
+        return FetchedItem(raw=raw, subject=m.group(1).decode("utf-8", "replace").strip() if m else "")
+
+
+class CalDavSource(DavSource):
+    dav_kind = "caldav"
+
+
+class CardDavSource(DavSource):
     dav_kind = "carddav"
 
 
@@ -125,8 +221,10 @@ _FIELDS = (
 )
 
 registry.register(registry.ConnectorSpec(
-    kind="caldav", label="CalDAV", description="Calendars on a CalDAV server.",
-    target=registry.Role(CalDavTarget, (CALENDAR,), CalDavTarget.capabilities, _FIELDS, identity)))
+    kind="caldav", label="CalDAV", description="Calendars and tasks on a CalDAV server.",
+    source=registry.Role(CalDavSource, (CALENDAR, TASKS), frozenset({CAP_FOLDERS}), _FIELDS, identity),
+    target=registry.Role(CalDavTarget, (CALENDAR, TASKS), CalDavTarget.capabilities, _FIELDS, identity)))
 registry.register(registry.ConnectorSpec(
     kind="carddav", label="CardDAV", description="Address books on a CardDAV server.",
+    source=registry.Role(CardDavSource, (CONTACTS,), frozenset({CAP_FOLDERS}), _FIELDS, identity),
     target=registry.Role(CardDavTarget, (CONTACTS,), CardDavTarget.capabilities, _FIELDS, identity)))

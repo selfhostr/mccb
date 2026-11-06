@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Exchange in both directions: `exchange_ews` for Exchange on premises, `m365_graph` for Exchange Online, with mail, calendar, contacts and tasks. Tested against simulated servers, not real Exchange: see docs/exchange.md.
+- One credential for many mailboxes: EWS impersonation, Graph app-only, Dovecot-style master user on IMAP. OAuth2 on IMAP (`imap_oauth2`).
+- CalDAV and CardDAV can be sources. Tasks are carried to targets that can hold them.
+- Exchange inbox rules converted to Sieve, best effort, uploaded over ManageSieve or offered as a script.
 - New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
 - Live events update only what changed, at most once per frame. Rows are keyed and long lists are windowed, so clicks are not lost and open selects stay open during imports.
 - Selection is explicit: what a filter hides is counted, shown and left out of any action. The selection bar is fixed and shifts nothing.

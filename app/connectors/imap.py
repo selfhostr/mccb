@@ -12,7 +12,7 @@ from typing import Iterator
 
 from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, parse_list,
                            personal_prefix, quote, wrap_exc)
-from . import registry
+from . import oauth, registry
 from .base import (CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK,
                    IMPORT_HEADER, MAIL, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem, Source,
                    SourceFolder, SourceItem, Target, TargetSession, subject_of)
@@ -48,10 +48,29 @@ def _guard(connecting: bool = False):
         raise convert(e, connecting) from e
 
 
+def login_of(config: dict) -> str:
+    """Dovecot-style master user: "<user><separator><master>", with the password of the master. The login alone names
+    the mailbox: changing the master keeps the migration state."""
+    login = config.get("login") or ""
+    master = config.get("master_user") or ""
+    return f"{login}{config.get('master_separator') or '*'}{master}" if master else login
+
+
 def params_of(config: dict, secrets: dict) -> ImapParams:
     return ImapParams(host=config["host"], port=int(config.get("port") or 993),
                       security=config.get("security") or "ssl", verify_tls=bool(config.get("verify_tls", True)),
-                      login=config.get("login") or "", password=secrets.get("password") or "")
+                      login=login_of(config), password=secrets.get("password") or "")
+
+
+def oauth_params_of(config: dict, secrets: dict) -> ImapParams:
+    """XOAUTH2: the access token is refreshed by `token`, and asked for at each connection."""
+    source = oauth.OAuthToken(config.get("token_url") or "", config.get("client_id") or "",
+                              secrets.get("client_secret") or "", config.get("scope") or "",
+                              secrets.get("refresh_token") or "", bool(config.get("verify_tls", True)))
+    params = params_of(config, secrets)
+    params.password = ""
+    params.token_source = source.token
+    return params
 
 
 def identity(config: dict) -> str:
@@ -186,8 +205,10 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
 
 # ------------------------------------------------------------------ source
 class ImapSource(Source):
+    make_params = staticmethod(params_of)
+
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
-        self.params = params_of(config, secrets)
+        self.params = self.make_params(config, secrets)
         self.conn: ImapConn | None = None
         self._uv: dict[str, int] = {}
 
@@ -387,22 +408,45 @@ class ImapSession(TargetSession):
 
 class ImapTarget(Target):
     capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK})
+    make_params = staticmethod(params_of)
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
-        self.params = params_of(config, secrets)
+        self.params = self.make_params(config, secrets)
         self.root = (config.get("root_folder") or "").strip() or None
 
     def session(self) -> ImapSession:
         return ImapSession(self.params, self.root)
 
 
-_CONNECTION = (
+class ImapOAuthSource(ImapSource):
+    make_params = staticmethod(oauth_params_of)
+
+
+class ImapOAuthTarget(ImapTarget):
+    make_params = staticmethod(oauth_params_of)
+
+
+_SERVER = (
     registry.Field("host", "Server", required=True),
     registry.Field("port", "Port", "number", default=993),
     registry.Field("security", "Security", "select", default="ssl", options=("ssl", "starttls", "none")),
     registry.Field("verify_tls", "Verify the TLS certificate", "boolean", default=True),
     registry.Field("login", "Login", required=True),
+)
+_CONNECTION = _SERVER + (
     registry.Field("password", "Password", "password", required=True, secret=True),
+    registry.Field("master_user", "Master user",
+                   help="Dovecot-style admin access: the password above is the master's, the login is the mailbox to reach."),
+    registry.Field("master_separator", "Master user separator", help="Between the login and the master user. Empty: *"),
+)
+_OAUTH_CONNECTION = _SERVER + (
+    registry.Field("token_url", "Token endpoint", "url", required=True,
+                   help="For Microsoft 365: https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token"),
+    registry.Field("client_id", "Client ID", required=True),
+    registry.Field("scope", "Scope", help="For Microsoft 365 app-only: https://outlook.office365.com/.default"),
+    registry.Field("client_secret", "Client secret", "password", secret=True),
+    registry.Field("refresh_token", "Refresh token", "password", secret=True,
+                   help="Empty: the client credentials grant, for app-only access."),
 )
 
 registry.register(registry.ConnectorSpec(
@@ -412,4 +456,12 @@ registry.register(registry.ConnectorSpec(
     target=registry.Role(ImapTarget, (MAIL,), ImapTarget.capabilities,
                          _CONNECTION + (registry.Field("root_folder", "Root folder",
                                                        help="Put everything under this folder."),), identity),
+))
+registry.register(registry.ConnectorSpec(
+    kind="imap_oauth2", label="IMAP (OAuth2)", description="An IMAP mailbox reached with an OAuth2 token (XOAUTH2).",
+    source=registry.Role(ImapOAuthSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+                         _OAUTH_CONNECTION, identity),
+    target=registry.Role(ImapOAuthTarget, (MAIL,), ImapOAuthTarget.capabilities,
+                         _OAUTH_CONNECTION + (registry.Field("root_folder", "Root folder",
+                                                             help="Put everything under this folder."),), identity),
 ))

@@ -154,15 +154,15 @@ class DavClient:
         return rt.find(tag) is not None
 
     @staticmethod
-    def _accepts_events(props: dict[str, ET.Element]) -> bool:
+    def _accepts(props: dict[str, ET.Element], component: str = "VEVENT") -> bool:
         comp = props.get(_q(NS_CAL, "supported-calendar-component-set"))
         if comp is None or len(comp) == 0:
             return True
-        return any(c.get("name", "").upper() == "VEVENT"
+        return any(c.get("name", "").upper() == component
                    for c in comp.findall(_q(NS_CAL, "comp")))
 
     # ---- discovery -------------------------------------------------
-    def _resolve(self, kind: str, start: str, create: bool
+    def _resolve(self, kind: str, start: str, create: bool, component: str = "VEVENT"
                  ) -> tuple[str | None, str | None]:
         """Returns (collection, home). collection None if absent."""
         if kind not in ("caldav", "carddav"):
@@ -181,9 +181,9 @@ class DavClient:
             # target URL (server template) does not exist: the collection is created at this address
             if not create:
                 return None, _slash(start)
-            created = self._mkcol(kind, _slash(start))
+            created = self._mkcol(kind, _slash(start), component)
             # canonical URL (href returned by the server, e.g. encoded "@"): identical to subsequent discoveries
-            return self._resolve(kind, created, False)[0] or created, None
+            return self._resolve(kind, created, False, component)[0] or created, None
         if not entries:
             raise DavError(f"PROPFIND {start}: empty response")
         here, props = entries[0]
@@ -209,18 +209,19 @@ class DavClient:
                 (NS_CAL, "supported-calendar-component-set")], 1):
             if _slash(href) == home or not self._is_kind(p, kind):
                 continue
-            if kind == "caldav" and not self._accepts_events(p):
+            if kind == "caldav" and not self._accepts(p, component):
                 continue
             return _slash(href), home
         if not create:
             return None, home
-        return self._create_collection(kind, home), home
+        return self._create_collection(kind, home, component), home
 
-    def _create_collection(self, kind: str, home: str) -> str:
-        # distinct slugs: CalDAV and CardDAV often share the same home (Radicale...)
-        return self._mkcol(kind, home + IMPORT_NAME + ("-agenda/" if kind == "caldav" else "-contacts/"))
+    def _create_collection(self, kind: str, home: str, component: str = "VEVENT") -> str:
+        # distinct slugs: CalDAV and CardDAV often share the same home (Radicale...), and a calendar may refuse tasks
+        slug = "-contacts/" if kind != "caldav" else "-tasks/" if component == "VTODO" else "-agenda/"
+        return self._mkcol(kind, home + IMPORT_NAME + slug, component)
 
-    def _mkcol(self, kind: str, url: str) -> str:
+    def _mkcol(self, kind: str, url: str, component: str = "VEVENT") -> str:
         """Creates the "PST Import" collection at `url`: MKCALENDAR (CalDAV) or extended MKCOL (CardDAV, RFC 5689).
         Server refusal -> explicit DavError (non-temporary except 5xx/429)."""
         if kind == "caldav":
@@ -228,7 +229,7 @@ class DavClient:
             setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
             ET.SubElement(setp, _q(NS_DAV, "displayname")).text = IMPORT_DISPLAY
             comps = ET.SubElement(setp, _q(NS_CAL, "supported-calendar-component-set"))
-            ET.SubElement(comps, _q(NS_CAL, "comp")).set("name", "VEVENT")
+            ET.SubElement(comps, _q(NS_CAL, "comp")).set("name", component)
             method = "MKCALENDAR"
         else:
             root = ET.Element(_q(NS_DAV, "mkcol"))
@@ -259,11 +260,11 @@ class DavClient:
             return False
         return bool(entries) and self._is_kind(entries[0][1], kind)
 
-    def ensure_collection(self, kind: str, url: str) -> str:
+    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT") -> str:
         """The collection `url` exists (otherwise it is created). Useful if it disappeared after discovery."""
         if self._is_collection(kind, url):
             return url
-        return self._mkcol(kind, _slash(url))
+        return self._mkcol(kind, _slash(url), component)
 
     def _starts(self, kind: str, template_url: str | None, email: str,
                 imap_host: str) -> list[str]:
@@ -276,19 +277,19 @@ class DavClient:
         return starts
 
     def _discover(self, kind: str, template_url: str | None, email: str,
-                  imap_host: str, create: bool) -> tuple[str | None, str | None]:
+                  imap_host: str, create: bool, component: str = "VEVENT") -> tuple[str | None, str | None]:
         last: DavError | None = None
         for start in self._starts(kind, template_url, email, imap_host):
             try:
-                return self._resolve(kind, start, create)
+                return self._resolve(kind, start, create, component)
             except DavError as e:
                 last = e
         assert last is not None
         raise last
 
     def discover(self, kind: str, template_url: str | None, email: str,
-                 imap_host: str, create: bool = True) -> str:
-        coll, _ = self._discover(kind, template_url, email, imap_host, create)
+                 imap_host: str, create: bool = True, component: str = "VEVENT") -> str:
+        coll, _ = self._discover(kind, template_url, email, imap_host, create, component)
         if coll is None:
             raise DavError(f"no {kind} collection found")
         return coll
@@ -305,6 +306,33 @@ class DavClient:
             return True, f"{kind} connection successful: {coll}"
         return True, (f"{kind} connection successful; no collection found in "
                       f"{home}, the '{IMPORT_DISPLAY}' collection will be created.")
+
+    def collections(self, kind: str, template_url: str | None, email: str,
+                    imap_host: str) -> list[tuple[str, str, list[str]]]:
+        """Every collection of this kind, to read them: [(url, display name, accepted components)]. Empty components:
+        the server does not say."""
+        coll, home = self._discover(kind, template_url, email, imap_host, False)
+        if home is None:
+            starts = [coll] if coll else []
+            rows = [e for s in starts for e in self._propfind(s, [
+                (NS_DAV, "displayname"), (NS_DAV, "resourcetype"),
+                (NS_CAL, "supported-calendar-component-set")], 0)]
+        else:
+            rows = self._propfind(home, [(NS_DAV, "resourcetype"), (NS_DAV, "displayname"),
+                                         (NS_CAL, "supported-calendar-component-set")], 1)
+        out = []
+        for href, p in rows:
+            if home is not None and _slash(href) == home:
+                continue
+            if not self._is_kind(p, kind):
+                continue
+            name = p.get(_q(NS_DAV, "displayname"))
+            label = (name.text or "").strip() if name is not None else ""
+            comp = p.get(_q(NS_CAL, "supported-calendar-component-set"))
+            comps = [c.get("name", "").upper() for c in comp.findall(_q(NS_CAL, "comp"))] if comp is not None else []
+            url = _slash(href)
+            out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps))
+        return out
 
     # ---- objects -----------------------------------------------------
     @staticmethod

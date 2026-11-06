@@ -26,6 +26,7 @@ CAP_INCREMENTAL = "incremental"      # source: changed_since() lists only what c
 CAP_QUOTA = "quota"                  # target: reports used / limit
 CAP_PARALLEL = "parallel_writes"     # target: several sessions may write at once (auto-tuned)
 CAP_READBACK = "readback"            # target: read() returns what was written (verify phase re-reads a sample)
+CAP_RULES = "rules"                  # source: read_rules() returns the mail rules of the mailbox (see sieve.py)
 
 
 class ConnectorError(Exception):
@@ -151,6 +152,10 @@ class Source(abc.ABC):
         """Items changed since `cursor`. Default for protocols that cannot tell: a full listing."""
         return Changes(list(self.iter_items(folder)), None, reset=True)
 
+    def read_rules(self) -> list[dict]:
+        """Mail rules as sieve.py expects them. Only for sources declaring CAP_RULES, called after open()."""
+        return []
+
 
 class TargetSession(abc.ABC):
     """One connection to a target, used by a single thread."""
@@ -241,7 +246,7 @@ def subject_of(raw: bytes) -> str:
 
 __all__ = [
     "CALENDAR", "CAP_FLAGS", "CAP_FOLDERS", "CAP_INCREMENTAL", "CAP_INTERNAL_DATE", "CAP_PARALLEL", "CAP_QUOTA",
-    "CAP_READBACK", "CONTACTS", "Changes", "ConnectorError", "FetchedItem", "FolderPlan", "IMPORT_HEADER",
+    "CAP_READBACK", "CAP_RULES", "CONTACTS", "Changes", "ConnectorError", "FetchedItem", "FolderPlan", "IMPORT_HEADER",
     "ITEM_KINDS", "MAIL", "OutgoingItem", "Source", "SourceFolder", "SourceItem", "TASKS", "Target",
     "TargetSession", "stamp_import_id", "subject_of",
 ]
