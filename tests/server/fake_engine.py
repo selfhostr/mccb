@@ -1,4 +1,4 @@
-"""Fake ENGINE honoring the "ENGINE contract" (docs/SPEC.md) to test the server without pypff.
+"""Fake ENGINE honoring the "ENGINE contract" (docs/specification.md) to test the server without pypff.
 
 Content is driven by CONFIG (modifiable by tests); the "PST" is a file starting with !BDN.
 The worker runs jobs in a subprocess: every CONFIG change is therefore copied to the

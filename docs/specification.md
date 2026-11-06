@@ -1,10 +1,12 @@
-# PST → IMAP / CalDAV / CardDAV Migrator — Specification
+# Specification
+
+Design notes and contracts of MCCB: purpose, checks, resume logic, architecture and the engine contract. The HTTP API is in [API](api.md).
 
 ## Purpose
 Web tool (Docker, port **22362**) to mass-migrate POP/Outlook clients to our servers:
 for each mailbox, we provide the address + password + the client's PST; a "Run" imports
 **mails (IMAP)**, **appointments (CalDAV)**, **contacts (CardDAV)**, mailbox by mailbox, with
-checks everywhere, and pause/stop/resume without duplicates. UI in French, modern.
+checks everywhere, and pause/stop/resume without duplicates. Modern web UI.
 
 ## Non-goals (failure even if "it works")
 - Broken accents (U+FFFD, "Ã©" mojibake) in subject, text body, HTML body, attachment names, folder names.
@@ -51,7 +53,7 @@ Each item has a stable `item_key` = pypff node identifier (`msg.identifier`) + f
 real key and the fallback row is deleted). Each mail carries the header `X-PST-Import-Id: <pst_sha-item_key>`
 (value **delimited by `<>`**: no id is a prefix of another). `items` table (account_id, **pst_key**, kind,
 item_key, status pending|inflight|ok|error|skipped, error, …): `pst_key` = `psts.pst_sha` (block fingerprint +
-size), **not the PST id** — deleting then re-uploading the same file recovers the state (automatic migration of
+size), **not the PST id**, deleting then re-uploading the same file recovers the state (automatic migration of
 old `pst_id` rows at startup; `kv` `pst:<pst_sha>:crash_skips`). Folder key: path joined by `/`,
 `/` and `\` in names escaped; unique target IMAP names (deterministic suffix ` (2)`, ` (3)`… on collision
 after sanitizing). Mail lookup: `UID SEARCH HEADER X-PST-Import-Id <sha-key>` (substring) then
@@ -133,7 +135,7 @@ class PstFile:  # context manager
     def build_event(self, handle) -> DavObject | None    # appointment, recurrence if possible (RRULE), attendees, reminder
     def scan(self) -> dict    # {'folders':[{path,kind,count}], 'totals':{'mail':n,'contacts':n,'calendar':n}, 'errors':[...]}
     def item_date(self, handle, kind: str) -> datetime | None  # optional: sort date, cheap (no MIME build);
-        # kind 'mail' (mail_date(): same date as internaldate, see OPERATIONS) | 'event' (start) | 'contact' (last modification > creation)
+        # kind 'mail' (mail_date(): same date as internaldate, see [How an import behaves](how-it-works.md)) | 'event' (start) | 'contact' (last modification > creation)
 
 def verify_message(built: BuiltMessage, handle) -> list[str]   # blocking errors (empty = OK)
 def check_pst_signature(path: str) -> bool
@@ -141,42 +143,8 @@ def check_pst_signature(path: str) -> bool
 Clean exceptions, never a process crash on a corrupted item (the error bubbles up per item).
 Bounded memory: never load the whole PST; read attachments in blocks if possible.
 
-## API contract (SERVER ↔ WEB) — JSON, `/api` prefix, session cookie
-- `POST /api/login {password}` ; `POST /api/logout` ; `GET /api/me`
-- `POST /api/password {current, new}` — change the admin password (`new` ≥ 8 characters). Requires a valid session and a correct
-  `current`. Returns **409** if the `ADMIN_PASSWORD` env var is set (the env var always wins, so the password cannot be changed
-  through the API). On success, the new hash is stored in `data/admin.json`, **all other sessions are invalidated** and a
-  fresh session cookie is returned for the caller.
-- Servers: `GET/POST /api/servers`, `GET/PUT/DELETE /api/servers/{id}`, `POST /api/servers/{id}/test`
-  Server = `{id,name,imap_host,imap_port,imap_security:'ssl'|'starttls'|'none',verify_tls,`
-  `root_folder:str|null,caldav_url:str|null,carddav_url:str|null,dav_enabled:bool,workers:int,notes,`
-  `tuning:'auto'|'manual',builders:int|null}` (manual: `workers` IMAP connections, `builders` builder processes, null =
-  machine default; `tuning` omitted on creation = `manual` if `workers` is not 2 or 4 (earlier defaults) else `auto`, omitted on update = unchanged)
-  (`caldav_url`/`carddav_url`: empty = `.well-known` auto-discovery, otherwise a template with `{email}`, `{user}`, `{domain}`)
-- Accounts: `GET /api/accounts?server_id=`, `POST /api/accounts {server_id,email,password,login?}`,
-  `PUT/DELETE /api/accounts/{id}`, `POST /api/accounts/{id}/test` → `{imap:{ok,msg,quota},caldav:{ok,msg},carddav:{ok,msg}}`,
-  `POST /api/accounts/import-csv` (multipart file + server_id; columns `email;password[;login]`, `,` or `;`, optional header)
-  → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
-  Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
-  `pst_id|null,options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
-- PST upload (resumable):
-  `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
-  `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 / 422 if wrong hash
-  `GET /api/uploads/{id}` → `{id,filename,size,chunk_size,received:[...],status}`
-  `POST /api/uploads/{id}/complete` → starts validation (signature + scan); `GET /api/psts`, `GET /api/psts/{id}`,
-  `DELETE /api/psts/{id}` ; `GET /api/psts/{id}/preview?limit=20` (limit 1..200) → zip (.eml/.ics/.vcf per folder, sample spread across mails/appointments/contacts) generated by the engine in a subprocess (`app.server.preview`, 120 s timeout); 404 unknown, 409 if PST not `valid`, 500 `{detail:"crash libpff pendant l'aperçu"}` if the subprocess dies; PST = `{id,filename,size,status:'uploading'|'validating'|'valid'|'invalid',scan:{...},error}`
-  `PUT /api/accounts/{id}/pst {pst_id}`
-- Jobs: `POST /api/runs {account_ids:[...]}` (queues), `POST /api/jobs/{id}/pause|resume|stop|retry`,
-  `GET /api/jobs?active=1`, `GET /api/jobs/{id}` → `{id,account_id,status:'queued'|'running'|'paused'|'stopping'|'stopped'|'done'|'done_with_errors'|'failed',`
-  `phase:'precheck'|'mail'|'calendar'|'contacts'|'verify',progress:{mail:{done,total,errors},calendar:{...},contacts:{...}},`
-  `current_folder,rate,eta,started_at,finished_at,error,tuning:{mode,builders,connections,fallback}|null}`
-  `GET /api/jobs/{id}/log?after=` (lines), `GET /api/jobs/{id}/report` (JSON), `GET /api/jobs/{id}/errors`,
-  `POST /api/jobs/{id}/retry-errors`
-- Real time: `GET /api/events` (SSE) emits `job` / `upload` / `pst` / `account` with the full object.
-- `GET /api/health`.
-
-## UI (French)
-Pages: Dashboard (running jobs, global stats) · Servers · Accounts (table: email, test state 🟢/🔴,
+## UI
+Pages: Dashboard (running jobs, global stats) · Servers · Accounts (table: email, test state ok/failed,
 associated PST + status, mail/calendar/contacts options, progress, actions) · Uploads · Job detail (progress per phase,
 current folder, rate, ETA, live log, errors, report). Multi-select + "Run". PST drag-and-drop.
 Resumable upload after a refresh (key `filename+size+lastModified`), 3 parallel chunks, auto retry.
