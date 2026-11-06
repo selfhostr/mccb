@@ -23,7 +23,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("PSTMIG_TEST_CRASH", raising=False)
     # parallel builders, kept small so that timing-based tests (pause/stop mid-folder) stay meaningful
     monkeypatch.setenv("BUILD_PROCESSES", os.environ.get("TEST_BUILD_PROCESSES", "2"))
-    # auto-tuned jobs: short build benchmark at job start (the real one lasts ~1.5 s)
+    # auto-tuned jobs: short build benchmark at job start (the real one lasts 0.25 s)
     monkeypatch.setenv("AUTOTUNE_BENCH_SECONDS", "0.05")
     from app.server import db, security
     from app.server.config import settings

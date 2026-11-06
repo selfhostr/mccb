@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS notify_sent (
 );
 
 CREATE TRIGGER IF NOT EXISTS ev_job_i AFTER INSERT ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
-CREATE TRIGGER IF NOT EXISTS ev_job_u AFTER UPDATE ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
+{JOB_UPDATE_TRIGGER};
 CREATE TRIGGER IF NOT EXISTS ev_acc_i AFTER INSERT ON accounts BEGIN INSERT INTO events(kind, ref_id) VALUES ('account', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_acc_u AFTER UPDATE ON accounts BEGIN INSERT INTO events(kind, ref_id) VALUES ('account', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_pst_i AFTER INSERT ON psts BEGIN INSERT INTO events(kind, ref_id) VALUES ('pst', NEW.id); END;
@@ -158,7 +158,13 @@ CREATE TRIGGER IF NOT EXISTS ev_pst_u AFTER UPDATE ON psts BEGIN INSERT INTO eve
 CREATE TRIGGER IF NOT EXISTS ev_chunk_i AFTER INSERT ON upload_chunks BEGIN INSERT INTO events(kind, ref_id) VALUES ('upload', NEW.pst_id); END;
 """
 
-SCHEMA = SCHEMA_TEMPLATE.replace("{ITEMS}", ITEMS_DDL.replace("{name}", "items"))
+# Every visible column but the heartbeat: the worker writes it each second for each job, and each event makes the
+# web process read and send the job to every open page.
+JOB_UPDATE_TRIGGER = ("CREATE TRIGGER IF NOT EXISTS ev_job_u AFTER UPDATE OF status, phase, progress, current_folder, rate, "
+                      "rate_bytes, eta, mode, worker_id, started_at, finished_at, error, report_path, tuning ON jobs "
+                      "BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END")
+SCHEMA = (SCHEMA_TEMPLATE.replace("{ITEMS}", ITEMS_DDL.replace("{name}", "items"))
+          .replace("{JOB_UPDATE_TRIGGER}", JOB_UPDATE_TRIGGER))
 
 
 def pst_key_of(pst_row) -> str | None:
@@ -208,6 +214,24 @@ def _migrate_tuning(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_job_trigger(conn: sqlite3.Connection) -> None:
+    """Earlier versions: the trigger also fired on heartbeat updates. Replaced under the write lock."""
+    def old() -> bool:
+        r = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='ev_job_u'").fetchone()
+        return r is not None and "UPDATE OF" not in r[0]
+    if not old():
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if old():
+            conn.execute("DROP TRIGGER ev_job_u")
+            conn.execute(JOB_UPDATE_TRIGGER)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
     items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
@@ -224,6 +248,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "psts", "origin TEXT")             # display label (no secrets), e.g. host + file name
     _add_column(conn, "psts", "received_bytes INTEGER")  # progress while status is 'fetching'
     _add_column(conn, "psts", "fetch_spec TEXT")         # encrypted JSON: how to (re)fetch, credentials included
+    _migrate_job_trigger(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")
@@ -272,6 +297,9 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # fewer checkpoints (one fsync each, every writer waits) and index pages of a huge items table kept in memory
+    conn.execute("PRAGMA wal_autocheckpoint=8000")
+    conn.execute("PRAGMA cache_size=-32000")
     with _init_lock:
         if path not in _initialized:
             conn.execute("PRAGMA journal_mode=WAL")

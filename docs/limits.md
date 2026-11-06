@@ -31,6 +31,16 @@
   - After a UIDVALIDITY change, messages are recognized by Message-ID (date and size without one), in the same folder only. Two
     messages with no Message-ID and the same date and size can be confused.
   - Without SPECIAL-USE, special folders are recognized by their usual names only.
+- **Scale.**
+  - One message is built and sent whole, in memory: several times its size in its builder (source, encoding, verification, sending to the job process), then its size in the job process. Admission is by total, and the size of a message is not known before it is built, so several huge messages at once can still exceed the budget. The memory guard and the out-of-memory retry are what is left then.
+  - SQLite has one writer at a time, shared by all the mailboxes and the web process. The limit of 32 mailboxes in parallel has not been measured against it on a large machine.
+  - The index holds a few hundred bytes per item still to import in the job process, for the whole phase.
+  - Every run reads the key and the date of every item of the PST, already imported or not: a resume costs that first. On millions of items, count minutes.
+  - On a large mailbox the progress is recounted less often (a recount takes at most 2 % of the time, at least every 30 s), so the numbers shown move in steps.
+  - Calendar and contact items are built and sent one at a time, on one connection.
+  - After 2000 log lines about single items in a run, the next ones are only in the report (5000 at most) and the errors list.
+  - `SEARCH HEADER` on a large folder can be slow on servers without a header index, and each resume or final check runs one per folder.
+- **Auto-tuning signals.** A connection limit is learned by hitting it: the job then gets a few errors from the server, which it retries. Without `/proc/pressure/io` and without a block device behind the PST folder (network mount, for example), a saturated disk is not seen. The connection budget is counted per server entry: two entries pointing at one real server have one budget each.
 - **No Swagger UI**: `/docs`, `/redoc` and `/openapi.json` are disabled (the API reference
   is in [API](api.md)).
 - **In-memory login rate limiting**: 5 failures / 5 min per IP, reset when `web` restarts.
