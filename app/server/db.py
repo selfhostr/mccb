@@ -142,6 +142,12 @@ CREATE TABLE IF NOT EXISTS events (
     ts REAL NOT NULL DEFAULT ((julianday('now') - 2440587.5) * 86400.0)
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS notify_sent (
+    kind TEXT NOT NULL,
+    ref_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (kind, ref_id)
+);
 
 CREATE TRIGGER IF NOT EXISTS ev_job_i AFTER INSERT ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_job_u AFTER UPDATE ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
@@ -203,9 +209,9 @@ def _migrate_tuning(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Migrations: jobs.rate_bytes, jobs.tuning, servers.tuning/builders, items(pst_id) -> items(pst_key = PST
-    fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`, accounts.source_* / target_* (NULL: the PST
-    of the account, written to its server) and items.source_ref."""
+    """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
+    items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
+    accounts.source_* / target_* (NULL: the PST of the account, written to its server) and items.source_ref."""
     for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
                 "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
         _add_column(conn, "accounts", ddl)
@@ -213,6 +219,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
     _migrate_tuning(conn)
+    # server-side intake (drop folder, remote fetch): origin of a PST, fetch progress, encrypted fetch spec
+    _add_column(conn, "psts", "source TEXT")             # 'upload' (NULL) | 'inbox' | 'fetch'
+    _add_column(conn, "psts", "origin TEXT")             # display label (no secrets), e.g. host + file name
+    _add_column(conn, "psts", "received_bytes INTEGER")  # progress while status is 'fetching'
+    _add_column(conn, "psts", "fetch_spec TEXT")         # encrypted JSON: how to (re)fetch, credentials included
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")

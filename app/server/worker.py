@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from . import crash, db, repo, tuner
+from . import crash, db, intake, notify, repo, tuner
 from .config import settings
 
 log = logging.getLogger("worker")
@@ -39,6 +39,8 @@ class Worker:
         self.validating: dict[int, threading.Thread] = {}
         self.procs: dict[tuple[str, int], subprocess.Popen] = {}
         self.lock = threading.Lock()
+        self.intake = intake.Intake(self.stop_event)   # drop folder, remote fetch, auto chain
+        self.notifier = notify.Notifier()               # polls the DB; delivery on its own thread
 
     # -------------------------------------------------- crash recovery
     def recover(self, startup: bool = False) -> None:
@@ -173,6 +175,12 @@ class Worker:
                 t = threading.Thread(target=self._validate, args=(r["id"],), daemon=True, name=f"validate-{r['id']}")
                 self.validating[r["id"]] = t
                 t.start()
+        # server-side intake and notifications: isolated, they must never break the job loop
+        for part in (self.intake, self.notifier):
+            try:
+                part.tick()
+            except Exception:
+                log.exception("%s", type(part).__name__)
         # jobs
         if self.auto_concurrency:
             n = self.auto_limit()
@@ -215,6 +223,7 @@ class Worker:
             self.stop_event.wait(poll)
         # clean shutdown: subprocesses terminated, then running jobs re-queued (idempotent resume)
         self.terminate_children()
+        self.intake.join(5)
         for jid in list(self.threads):
             cur = db.ex("UPDATE jobs SET status='queued', worker_id=NULL WHERE id=? AND status='running' AND worker_id=?",
                         (jid, self.id))

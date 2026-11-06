@@ -40,3 +40,14 @@
   `./data` and the `SECRET_KEY`.
 - **Browser support.** JS libs are vendored (works offline), but the
   browser must support modern APIs (fetch, SSE, `File.slice`).
+- **Server-side intake.** A file in the drop folder is picked up once its size and modification time have not changed
+  for `settle_seconds` (60 by default). A writer that pauses longer than that without touching the file can be picked up
+  too early. A duplicate (same content as a PST already known) is left in the folder, never deleted.
+  Resuming an HTTP download assumes the remote file did not change. SMB is not supported directly: mount the share
+  on the server and point `INBOX_DIR` at it. `size` of a PST is 0 until the remote size is known.
+- **Fetch disk check.** The free-space check does not reserve space between several transfers running at once.
+- **Notifications.** A public ntfy.sh topic can be read by anyone who knows or guesses its name: use a long random
+  topic, a self-hosted server with an access token, or enable "mask addresses". Delivery is best effort: three attempts
+  with a short timeout, then the message is dropped and a line is logged. Events are detected by the worker every
+  second, so a notification can arrive a few seconds late, and are not replayed after a long worker outage. Nothing is
+  sent for events that happened before notifications were enabled.

@@ -4,3 +4,4 @@ python-multipart==0.0.20
 itsdangerous==2.2.0
 cryptography==44.0.0
 httpx==0.28.1
+paramiko==5.1.0
