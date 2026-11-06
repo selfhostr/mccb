@@ -1,4 +1,4 @@
-# Contributing to mccb
+# Contributing to MCCB
 
 Bug reports, fixes and improvements are welcome. If you are not sure something is wanted, open an issue first: a paragraph is enough.
 

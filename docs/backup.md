@@ -4,7 +4,7 @@ By the end of this page you will know what to copy to keep a migration safe, and
 
 ## What to back up
 
-Everything mccb stores is under `./data` (see [Install mccb](install.md#where-data-lives)). Back up the whole directory, and in particular:
+Everything MCCB stores is under `./data` (see [Install MCCB](install.md#where-data-lives)). Back up the whole directory, and in particular:
 
 - `app.db`: servers, accounts, uploads, jobs and the state of every item (`pending`, `inflight`, `ok`, `error`, `skipped`), which is what makes a resume possible;
 - `secret.key`, or your `SECRET_KEY` value if you set one: without it, stored mailbox passwords can no longer be decrypted and must be entered again.

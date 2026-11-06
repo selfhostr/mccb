@@ -1,6 +1,6 @@
 # Specification
 
-Design notes and contracts of mccb: purpose, checks, resume logic, architecture and the engine contract. The HTTP API is in [API](api.md).
+Design notes and contracts of MCCB: purpose, checks, resume logic, architecture and the engine contract. The HTTP API is in [API](api.md).
 
 ## Purpose
 Web tool (Docker, port **22362**) to mass-migrate POP/Outlook clients to our servers:

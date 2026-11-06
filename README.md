@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://github.com/yetysw/mccb"><img src=".github/assets/banner.svg" alt="mccb: migrate Outlook PST files to IMAP, CalDAV and CardDAV" width="100%"></a>
+<a href="https://github.com/yetysw/mccb"><img src=".github/assets/banner.svg" alt="MCCB: migrate Outlook PST files to IMAP, CalDAV and CardDAV" width="100%"></a>
 
 <h3>Bulk-migrate Outlook PST files to IMAP, CalDAV and CardDAV from a web dashboard.</h3>
 
@@ -14,7 +14,7 @@
 
 ## Overview
 
-mccb imports Outlook PST (and OST) files into the mailboxes you host: mail over IMAP, appointments over CalDAV, contacts over CardDAV.
+MCCB (Mail Contact Calendrier Bridge) imports Outlook PST (and OST) files into the mailboxes you host: mail over IMAP, appointments over CalDAV, contacts over CardDAV.
 
 - **Built for batches.** Add a server, add accounts one by one or by CSV, attach a PST to each, run them all and read one report per mailbox.
 - **Built for big files.** Resumable uploads of large files, with a preview of accents and attachments before anything is written.
@@ -70,10 +70,10 @@ Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md
 
 ## License
 
-MIT, see [LICENSE](LICENSE). mccb is provided "as is", without warranty of any kind. Validate a migration on a test mailbox before running it on production data.
+MIT, see [LICENSE](LICENSE). MCCB is provided "as is", without warranty of any kind. Validate a migration on a test mailbox before running it on production data.
 
-## Support mccb
+## Support MCCB
 
-mccb is free. If it saves you time, you can support its development:
+MCCB is free. If it saves you time, you can support its development:
 
 [Sponsor us on GitHub](https://github.com/sponsors/yetysw), recurring or one-off.

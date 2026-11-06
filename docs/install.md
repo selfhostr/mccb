@@ -1,6 +1,6 @@
-# Install mccb
+# Install MCCB
 
-By the end of this page mccb will be running in Docker and you will be signed in to the dashboard.
+By the end of this page MCCB will be running in Docker and you will be signed in to the dashboard.
 
 ## Requirements
 
@@ -28,7 +28,7 @@ Open `http://<host>:22362` and sign in with the printed password. It is shown on
 
 `GET /api/health` is public and also reports whether the worker is alive (heartbeat less than 60 s old).
 
-> **Warning.** Port 22362 speaks plain HTTP. Put mccb behind a [reverse proxy](reverse-proxy.md) and do not expose the port directly.
+> **Warning.** Port 22362 speaks plain HTTP. Put MCCB behind a [reverse proxy](reverse-proxy.md) and do not expose the port directly.
 
 ## Pin a version
 
