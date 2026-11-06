@@ -3,6 +3,7 @@
 	 * Add an account, or change one's password and login. The password is never sent back: empty keeps it.
 	 * The login is sent only when it changed: for the server a new login is a new target, and everything is imported again.
 	 */
+	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post, put } from '../../lib/api/client.ts';
 	import type { Account } from '../../lib/api/types.ts';
@@ -22,11 +23,12 @@
 
 	let { account = null, defaultServer = null, onclose }: Props = $props();
 
-	const initialServer = defaultServer ?? data.servers[0]?.id ?? 0;
+	// The form starts from the props once: later changes of the props do not rewrite what is typed.
+	const initialServer = untrack(() => defaultServer ?? data.servers[0]?.id ?? 0);
 	let serverId = $state(initialServer);
 	let email = $state('');
 	let password = $state('');
-	const initialLogin = account?.login && account.login !== account.email ? account.login : '';
+	const initialLogin = untrack(() => (account?.login && account.login !== account.email ? account.login : ''));
 	let login = $state(initialLogin);
 	let busy = $state(false);
 	let error = $state<string | null>(null);

@@ -3,6 +3,7 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
 	import AppearanceSection from './AppearanceSection.svelte';
+	import IntakeSection from './IntakeSection.svelte';
 	import NotificationsSection from './NotificationsSection.svelte';
 	import PasswordSection from './PasswordSection.svelte';
 	import ServersSection from './ServersSection.svelte';
@@ -13,6 +14,7 @@
 
 <div class="flex max-w-[860px] flex-col gap-8">
 	<ServersSection />
+	<IntakeSection />
 	<NotificationsSection />
 	<TuningSection />
 	<PasswordSection />

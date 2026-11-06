@@ -88,9 +88,12 @@ test.describe('reduced motion', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
 	test('nothing moves', async ({ page }) => {
+		// The reduce block shrinks every CSS transition to 0.01 ms (such a transition can still be
+		// listed as running for a frame) and removes CSS animations; the JS transitions in lib/ui/motion.ts
+		// and the flip in QueuePanel return a zero duration. Only an effect longer than 1 ms is motion.
 		await ready(page);
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		const animations = await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
+		const animations = await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running' && Number(a.effect?.getTiming().duration ?? 0) > 1).length);
 		expect(animations).toBe(0);
 		const duration = await page.locator('.input').first().evaluate((el) => parseFloat(getComputedStyle(el).transitionDuration));
 		expect(duration).toBeLessThan(0.001);
@@ -99,7 +102,7 @@ test.describe('reduced motion', () => {
 		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
 		await page.getByTestId('import-confirm').click();
 		await row(page, 'alice@example.com').locator('[data-job-link]').click();
-		expect(await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length)).toBe(0);
+		expect(await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running' && Number(a.effect?.getTiming().duration ?? 0) > 1).length)).toBe(0);
 	});
 });
 
@@ -154,14 +157,16 @@ test.describe('settings', () => {
 		await expect(page.getByTestId('section-servers')).toContainText('does not store');
 	});
 
-	test('tolerates absent routes and renders the connectors it gets', async ({ page }) => {
+	test('lists the connector catalogue, and tolerates a server without the route', async ({ page }) => {
 		await ready(page, '/settings');
-		await expect(page.getByTestId('connectors')).toHaveCount(0);
 		await expect(page.getByTestId('section-notifications')).toBeVisible();
+		await expect(page.getByTestId('connectors')).toContainText('Future mail service');
+		await expect(page.getByTestId('connectors')).toContainText('Any IMAP mailbox.');
 
-		await page.route('**/api/connectors', (route) => route.fulfill({ json: [{ id: 'imap', name: 'Generic IMAP', description: 'Any IMAP server' }] }));
+		await page.route('**/api/connectors', (route) => route.fulfill({ status: 404, json: { detail: 'not found' } }));
 		await page.reload();
-		await expect(page.getByTestId('connectors')).toContainText('Generic IMAP');
+		await expect(page.getByTestId('section-servers')).toBeVisible();
+		await expect(page.getByTestId('connectors')).toHaveCount(0);
 	});
 
 	test('a wrong login is refused, then signing in works', async ({ page, context }) => {

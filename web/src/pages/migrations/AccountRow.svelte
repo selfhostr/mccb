@@ -10,12 +10,15 @@
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Mail from '@lucide/svelte/icons/mail';
+	import Route from '@lucide/svelte/icons/route';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { m } from '#lib/paraglide/messages.js';
 	import type { Account, Pst } from '../../lib/api/types.ts';
 	import { fmtBytes } from '../../lib/format.ts';
 	import { currentResult } from '../../lib/logic/accounts.ts';
+	import { endpointSummary } from '../../lib/logic/connector.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
+	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
@@ -31,9 +34,10 @@
 		ondelete: (account: Account) => void;
 		ondetails: (account: Account) => void;
 		onupload: (id: number) => void;
+		onroute: (account: Account) => void;
 	}
 
-	let { id, psts, onedit, ondelete, ondetails, onupload }: Props = $props();
+	let { id, psts, onedit, ondelete, ondetails, onupload, onroute }: Props = $props();
 
 	// A deleted row may still be fading out: it keeps showing what it last knew.
 	let last: Account | undefined;
@@ -48,6 +52,12 @@
 	const calendar = $derived(account.options.calendar);
 	const contacts = $derived(account.options.contacts);
 	const columns = $derived(prefs.value.columns);
+	// Another source than the PST, or an own target: said in words, edited in the route dialog.
+	const customSource = $derived(endpointSummary(connectors.list, account.source, 'source'));
+	const sourceLabel = $derived(customSource ? customSource.label : '');
+	const sourceDetail = $derived(customSource ? prefs.text(customSource.detail) : '');
+	const targetLabel = $derived(endpointSummary(connectors.list, account.target, 'target')?.label ?? '');
+	const canRoute = $derived(connectors.list.some((c) => c.source && c.kind !== 'pst') || connectors.list.some((c) => c.target));
 	const options = $derived(psts.filter((p) => p.status === 'valid' || p.id === pstId));
 
 	function onPstChange(e: Event & { currentTarget: HTMLSelectElement }) {
@@ -73,6 +83,7 @@
 
 	const menu = $derived([
 		{ label: m.migrations_row_edit(), icon: KeyRound, onselect: () => onedit(account) },
+		...(canRoute || sourceLabel || targetLabel ? [{ label: m.migrations_row_route(), icon: Route, onselect: () => onroute(account) }] : []),
 		{ label: m.migrations_row_delete(), icon: Trash2, danger: true, onselect: () => ondelete(account) }
 	]);
 </script>
@@ -96,13 +107,21 @@
 {/if}
 {#if columns.pst}
 	<td class="cell-wide" data-label={m.migrations_col_pst()}>
-		<select class="input" value={pstId == null ? '' : String(pstId)} aria-label={m.migrations_row_pst({ email })} onchange={onPstChange}>
-			<option value="">{m.migrations_row_pst_none()}</option>
-			{#each options as pst (pst.id)}
-				<option value={String(pst.id)}>{prefs.file(pst.filename)} ({fmtBytes(pst.size)})</option>
-			{/each}
-			<option value={UPLOAD_VALUE}>{m.migrations_row_pst_upload()}</option>
-		</select>
+		{#if sourceLabel}
+			<button type="button" class="flex min-h-10 w-full min-w-0 flex-col justify-center rounded-btn text-left hover:bg-ghost" onclick={() => onroute(account)} aria-label={m.migrations_row_source_edit({ email })} data-testid="source-summary">
+				<span class="truncate font-medium">{m.migrations_row_source({ label: sourceLabel })}</span>
+				{#if sourceDetail}<span class="truncate font-mono text-xs text-ink-3">{sourceDetail}</span>{/if}
+			</button>
+		{:else}
+			<select class="input" value={pstId == null ? '' : String(pstId)} aria-label={m.migrations_row_pst({ email })} onchange={onPstChange}>
+				<option value="">{m.migrations_row_pst_none()}</option>
+				{#each options as pst (pst.id)}
+					<option value={String(pst.id)}>{prefs.file(pst.filename)} ({fmtBytes(pst.size)})</option>
+				{/each}
+				<option value={UPLOAD_VALUE}>{m.migrations_row_pst_upload()}</option>
+			</select>
+		{/if}
+		{#if targetLabel}<p class="m-0 mt-0.5 truncate text-xs text-ink-3" data-testid="target-summary">{m.migrations_row_target({ label: targetLabel })}</p>{/if}
 	</td>
 {/if}
 {#if columns.content}

@@ -1,4 +1,5 @@
 import type { Account, Job, Pst, TestResult } from '../api/types.ts';
+import { hasCustomSource, hasOwnTarget } from './connector.ts';
 
 export const ACTIVE_JOB = ['queued', 'running', 'paused', 'stopping'];
 export const isActive = (job: Job | undefined | null): boolean => !!job && ACTIVE_JOB.includes(job.status);
@@ -37,7 +38,7 @@ export function matchesFilter(
 		case 'test_failed':
 			return account.status === 'auth_failed' || account.status === 'error';
 		case 'no_pst':
-			return account.pst_id == null;
+			return account.pst_id == null && !hasCustomSource(account);
 		case 'active':
 			return isActive(job);
 		case 'done':
@@ -81,8 +82,9 @@ export function importPlan(accounts: Account[], jobOf: (id: number) => Job | und
 	for (const account of accounts) {
 		const pst = account.pst_id != null ? pstOf(account.pst_id) : undefined;
 		if (isActive(jobOf(account.id))) plan.active.push(account);
-		else if (!pst || pst.status !== 'valid') plan.noPst.push(account);
-		else if (!account.has_password) plan.noPassword.push(account);
+		// A connector source needs no PST; an own target brings its own credentials.
+		else if (!hasCustomSource(account) && (!pst || pst.status !== 'valid')) plan.noPst.push(account);
+		else if (!account.has_password && !(hasOwnTarget(account) && account.target?.has_secret)) plan.noPassword.push(account);
 		else plan.ready.push(account);
 	}
 	return plan;

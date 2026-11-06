@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post, put } from '../../lib/api/client.ts';
 	import type { Server, ServerInput } from '../../lib/api/types.ts';
@@ -12,9 +13,11 @@
 
 	let { server = null, onclose }: { server?: Server | null; onclose: () => void } = $props();
 
-	const initial: ServerInput = server
-		? { ...server }
-		: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null };
+	const initial: ServerInput = untrack(() =>
+		server
+			? { ...server }
+			: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null }
+	);
 	let form = $state<ServerInput>(initial);
 	let busy = $state(false);
 	let error = $state<string | null>(null);

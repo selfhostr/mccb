@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Download from '@lucide/svelte/icons/download';
 	import Upload from '@lucide/svelte/icons/upload';
+	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post } from '../../lib/api/client.ts';
 	import type { CsvResult } from '../../lib/api/types.ts';
@@ -13,7 +14,7 @@
 
 	let { defaultServer = null, onclose }: { defaultServer?: number | null; onclose: () => void } = $props();
 
-	const initialServer = defaultServer ?? data.servers[0]?.id ?? 0;
+	const initialServer = untrack(() => defaultServer ?? data.servers[0]?.id ?? 0);
 	let serverId = $state(initialServer);
 	let input = $state<HTMLInputElement>();
 	let busy = $state(false);

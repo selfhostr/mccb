@@ -1,5 +1,6 @@
 <script lang="ts">
 	import FileArchive from '@lucide/svelte/icons/file-archive';
+	import Server from '@lucide/svelte/icons/server';
 	import Upload from '@lucide/svelte/icons/upload';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, del } from '../../lib/api/client.ts';
@@ -16,6 +17,8 @@
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import type { FileLike } from '../../lib/upload/queue.ts';
 	import { uploads } from '../../lib/upload/store.svelte.ts';
+	import FetchDialog from './FetchDialog.svelte';
+	import InboxPanel from './InboxPanel.svelte';
 	import OrderDialog from './OrderDialog.svelte';
 	import PstDialog from './PstDialog.svelte';
 	import PstRow from './PstRow.svelte';
@@ -26,6 +29,7 @@
 	let pending = $state.raw<File[] | null>(null);
 	let details = $state.raw<Pst | null>(null);
 	let removing = $state.raw<Pst | null>(null);
+	let fetching = $state(false);
 
 	const psts = $derived([...data.psts.values()].sort((a, b) => b.id - a.id));
 	const valid = $derived(psts.filter((p) => p.status === 'valid').length);
@@ -75,7 +79,10 @@
 >
 	<span class="text-ink-3"><Upload size={20} /></span>
 	<p class="m-0 text-ink-2">{m.files_drop_sentence()}</p>
-	<Button variant="primary" icon={Upload} onclick={() => picker?.click()}>{m.files_drop_choose()}</Button>
+	<div class="flex flex-wrap justify-center gap-2">
+		<Button variant="primary" icon={Upload} onclick={() => picker?.click()}>{m.files_drop_choose()}</Button>
+		<Button icon={Server} onclick={() => (fetching = true)} data-testid="fetch-open">{m.files_fetch_open()}</Button>
+	</div>
 	<input
 		bind:this={picker}
 		class="sr-only"
@@ -90,6 +97,8 @@
 		data-testid="file-input"
 	/>
 </div>
+
+<InboxPanel />
 
 <QueuePanel />
 
@@ -110,6 +119,9 @@
 	</ul>
 {/if}
 
+{#if fetching}
+	<FetchDialog onclose={() => (fetching = false)} />
+{/if}
 {#if pending}
 	<OrderDialog files={pending} onclose={() => (pending = null)} />
 {/if}

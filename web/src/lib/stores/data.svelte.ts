@@ -7,6 +7,7 @@ import { testPassed } from '../logic/accounts.ts';
 import { createTestRunner, type TestPhase } from '../logic/testrun.ts';
 import { toast } from '../ui/toast.svelte.ts';
 import { uploads } from '../upload/store.svelte.ts';
+import { connectors } from './connectors.svelte.ts';
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -59,6 +60,7 @@ class Data {
 			onReconnect: () => void this.load()
 		});
 		void this.checkHealth();
+		void connectors.load();
 		clearInterval(this.healthTimer);
 		this.healthTimer = setInterval(() => void this.checkHealth(), 30000);
 	}
@@ -165,6 +167,26 @@ class Data {
 	async setPst(accountId: number, pstId: number | null): Promise<void> {
 		try {
 			this.upsertAccount(await put<Account>(`/accounts/${accountId}/pst`, { pst_id: pstId }));
+		} catch (error) {
+			toast(errorText(error), 'warning');
+		}
+	}
+
+	/** Stops a download. The row goes away at once when the server removed it, else it shows "cancelling". */
+	async cancelFetch(id: number): Promise<void> {
+		try {
+			const { state } = await post<{ ok: boolean; state: string }>(`/psts/${id}/cancel`);
+			const current = this.psts.get(id);
+			if (state === 'removed') this.psts.delete(id);
+			else if (current) this.psts.set(id, { ...current, status: 'cancelling' });
+		} catch (error) {
+			toast(errorText(error), 'warning');
+		}
+	}
+
+	async retryFetch(id: number): Promise<void> {
+		try {
+			this.upsertPst(await post<Pst>(`/psts/${id}/retry-fetch`));
 		} catch (error) {
 			toast(errorText(error), 'warning');
 		}

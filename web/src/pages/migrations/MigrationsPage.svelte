@@ -30,6 +30,7 @@
 	import CsvDialog from './CsvDialog.svelte';
 	import ImportDialog from './ImportDialog.svelte';
 	import JobPanel from './JobPanel.svelte';
+	import RouteDialog from './RouteDialog.svelte';
 	import SelectionBar from './SelectionBar.svelte';
 	import TestDialog from './TestDialog.svelte';
 
@@ -96,6 +97,7 @@
 		| { kind: 'edit'; account: Account }
 		| { kind: 'delete'; account: Account }
 		| { kind: 'details'; id: number }
+		| { kind: 'route'; account: Account }
 		| { kind: 'import'; plan: ImportPlan }
 		| null
 	>(null);
@@ -238,7 +240,7 @@
 		<table class="acct-table" data-testid="accounts">
 			<thead>
 				<tr>
-					<th class="sel w-11" scope="col">
+					<th class="sel min-[1100px]:w-11" scope="col">
 						<label class="check">
 							<input
 								type="checkbox"
@@ -248,7 +250,7 @@
 								onchange={() => toggleAllVisible(header, visibleIds, data.selected)}
 								data-testid="select-all"
 							/>
-							<span class="min-[1100px]:sr-only">{m.migrations_table_select_all()}</span>
+							<span class="whitespace-nowrap min-[1100px]:sr-only">{m.migrations_table_select_all()}</span>
 						</label>
 					</th>
 					<th scope="col">{m.migrations_col_account()}</th>
@@ -273,6 +275,7 @@
 							ondelete={(a) => (dialog = { kind: 'delete', account: a })}
 							ondetails={(a) => (dialog = { kind: 'details', id: a.id })}
 							onupload={uploadFor}
+							onroute={(a) => (dialog = { kind: 'route', account: a })}
 						/>
 					</tr>
 				{/each}
@@ -320,6 +323,8 @@
 	<AccountDialog account={dialog.account} onclose={closeDialog} />
 {:else if dialog?.kind === 'csv'}
 	<CsvDialog defaultServer={server} onclose={closeDialog} />
+{:else if dialog?.kind === 'route'}
+	<RouteDialog account={dialog.account} onclose={closeDialog} />
 {:else if dialog?.kind === 'details'}
 	<TestDialog accountId={dialog.id} onclose={closeDialog} />
 {:else if dialog?.kind === 'import'}

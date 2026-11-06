@@ -7,12 +7,12 @@
 	import ServerIcon from '@lucide/svelte/icons/server';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import X from '@lucide/svelte/icons/x';
-	import { onMount } from 'svelte';
-	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+		import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { m } from '#lib/paraglide/messages.js';
-	import { del, errorText, get, post } from '../../lib/api/client.ts';
-	import type { Connector, Server, TestResult } from '../../lib/api/types.ts';
+	import { del, errorText, post } from '../../lib/api/client.ts';
+	import type { Server, TestResult } from '../../lib/api/types.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
+	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
@@ -34,7 +34,6 @@
 	/** Server tests are not stored by the server: these last until the page closes, and the page says so. */
 	const results = new SvelteMap<number, TestResult>();
 	const testing = new SvelteSet<number>();
-	let connectors = $state.raw<Connector[]>([]);
 
 	function securityLabel(value: Server['imap_security']) {
 		return value === 'ssl' ? m.settings_server_security_ssl() : value === 'starttls' ? m.settings_server_security_starttls() : m.settings_server_security_none();
@@ -61,16 +60,6 @@
 			toast(errorText(error), 'warning');
 		}
 	}
-
-	onMount(async () => {
-		// Catalogue of another branch: shown as served, and simply absent if the route is not there yet.
-		try {
-			const list = await get<Connector[] | { connectors?: Connector[] }>('/connectors');
-			connectors = Array.isArray(list) ? list : (list.connectors ?? []);
-		} catch {
-			connectors = [];
-		}
-	});
 </script>
 
 <section id="servers" class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid="section-servers">
@@ -131,13 +120,13 @@
 		</ul>
 	{/if}
 
-	{#if connectors.length}
+	{#if connectors.list.length}
 		<div class="mt-3" data-testid="connectors">
 			<h3 class="text-sm">{m.settings_connectors_title()}</h3>
 			<ul class="m-0 mt-1 flex list-none flex-col gap-1 p-0">
-				{#each connectors as connector, i (connector.id ?? connector.kind ?? i)}
+				{#each connectors.list as connector (connector.kind)}
 					<li>
-						<span class="font-medium">{connector.name ?? connector.label ?? connector.id ?? connector.kind}</span>
+						<span class="font-medium">{connector.label || connector.kind}</span>
 						{#if connector.description}<span class="block text-xs text-ink-3">{connector.description}</span>{/if}
 					</li>
 				{/each}
