@@ -3,6 +3,7 @@
 	 * A write-only field. The server never returns a secret, only that one is set: an untouched field keeps it,
 	 * typing replaces it, "Clear" removes it. The parent reads `value` and `clear` and decides what to send.
 	 */
+	import type { HTMLInputAttributes } from 'svelte/elements';
 	import { m } from '#lib/paraglide/messages.js';
 	import Button from './Button.svelte';
 
@@ -14,7 +15,7 @@
 		area?: boolean;
 		hint?: string;
 		required?: boolean;
-		autocomplete?: string;
+		autocomplete?: HTMLInputAttributes['autocomplete'];
 		[key: string]: unknown;
 	}
 

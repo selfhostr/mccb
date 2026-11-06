@@ -82,7 +82,7 @@
 
 {#snippet input(f: FetchField)}
 	{#if f.secret}
-		<SecretInput label={LABELS[f.name]} hasSecret={false} area={f.area} hint={HINTS[f.name]?.()} bind:value={values[f.name]} data-field={f.name} />
+		<SecretInput label={LABELS[f.name]} hasSecret={false} area={f.area} hint={HINTS[f.name]?.()} bind:value={() => values[f.name] ?? '', (v) => (values[f.name] = v)} data-field={f.name} />
 	{:else}
 		<Field label={LABELS[f.name]} hint={HINTS[f.name]?.()}>
 			<input class="input font-mono" type={f.number ? 'number' : 'text'} autocomplete="off" placeholder={f.placeholder} bind:value={values[f.name]} data-field={f.name} />
