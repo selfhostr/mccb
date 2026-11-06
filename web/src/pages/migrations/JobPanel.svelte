@@ -2,6 +2,7 @@
 	import Ban from '@lucide/svelte/icons/ban';
 	import Pause from '@lucide/svelte/icons/pause';
 	import Play from '@lucide/svelte/icons/play';
+	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 	import RotateCw from '@lucide/svelte/icons/rotate-cw';
 	import X from '@lucide/svelte/icons/x';
 	import { onMount } from 'svelte';
@@ -12,7 +13,7 @@
 	import { isActive } from '../../lib/logic/accounts.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { router } from '../../lib/router.svelte.ts';
-	import { jobLook } from '../../lib/status.ts';
+	import { jobLookOf } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
@@ -43,7 +44,7 @@
 		return live && live.id === id ? live : fetched;
 	});
 	const account = $derived(job ? data.accounts.get(job.account_id) : undefined);
-	const look = $derived(job ? jobLook(job.status) : null);
+	const look = $derived(job ? jobLookOf(job) : null);
 	const tab = $derived.by(() => {
 		const value = router.params.get('tab');
 		return value === 'errors' || value === 'report' ? value : 'log';
@@ -59,7 +60,11 @@
 	});
 	const streams = $derived(
 		job
-			? (['mail', 'calendar', 'contacts'] as const).map((key) => ({ key, label: PHASE_LABEL[key], ...job.progress[key] })).filter((s) => s.total || s.done)
+			? [
+					...(['mail', 'calendar', 'contacts'] as const).map((key) => ({ key, label: PHASE_LABEL[key], ...job.progress[key] })),
+					// Only on routes that carry tasks.
+					...(job.progress.tasks ? [{ key: 'tasks', label: m.jobs_stream_tasks(), ...job.progress.tasks }] : [])
+				].filter((s) => s.total || s.done)
 			: []
 	);
 	const errorCount = $derived(streams.reduce((sum, s) => sum + (s.errors ?? 0), 0));
@@ -132,6 +137,9 @@
 				{/if}
 				{#if !isActive(job)}
 					<Button variant="primary" icon={RotateCw} loading={busy === 'retry'} onclick={() => act('retry', m.jobs_action_retry_done())}>{m.jobs_action_retry()}</Button>
+				{/if}
+				{#if job.status === 'done' || job.status === 'done_with_errors'}
+					<Button icon={RefreshCw} loading={busy === 'delta'} onclick={() => act('delta', m.jobs_action_delta_done())} data-testid="job-delta">{m.jobs_action_delta()}</Button>
 				{/if}
 				{#if job.status === 'done_with_errors' || job.status === 'stopped' || job.status === 'failed'}
 					<Button icon={RotateCw} loading={busy === 'retry-errors'} onclick={() => act('retry-errors', m.jobs_action_retry_errors_done())}>{m.jobs_action_retry_errors()}</Button>

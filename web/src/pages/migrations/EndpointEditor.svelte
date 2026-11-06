@@ -18,6 +18,7 @@
 		kindLabel,
 		kindsFor,
 		missingRequired,
+		isFileKind,
 		PST_KIND,
 		buildConfig,
 		buildSecrets,
@@ -42,7 +43,7 @@
 
 	// What is stored when the dialog opens. The editor is mounted per role and per opening, so props do not change under it.
 	const stored = untrack(() => account[role]);
-	const storedKind = untrack(() => (stored?.kind && !(role === 'source' && stored.kind === PST_KIND) ? stored.kind : ''));
+	const storedKind = untrack(() => (stored?.kind && !(role === 'source' && isFileKind(stored.kind)) ? stored.kind : ''));
 
 	let kind = $state(storedKind);
 	let values = $state<Values>({});

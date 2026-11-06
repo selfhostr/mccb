@@ -127,7 +127,19 @@ function reset(options = {}) {
 		probeCalls: [],
 		fetchCalls: [],
 		cancelCalls: [],
-		retryCalls: []
+		retryCalls: [],
+		runBodies: [],
+		hold: options.hold ?? false,
+		planDelay: options.planDelay ?? 600,
+		plans: new Map(),
+		compares: new Map(),
+		batches: new Map(),
+		policies: { server: new Map(), account: new Map() },
+		tokens: [],
+		reorderCalls: [],
+		deltaCalls: [],
+		compareCalls: [],
+		next2: { plan: 1, compare: 1, batch: 1, token: 1 }
 	};
 }
 reset();
@@ -191,7 +203,7 @@ function startJob(account) {
 	progress.mail.total = 900;
 	progress.calendar.total = 120;
 	progress.contacts.total = 80;
-	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null };
+	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null, priority: 0, batch_id: null, pause_reason: null };
 	state.jobs.set(id, job);
 	state.logs.set(id, []);
 	log(job, 'info', 'Job queued');
@@ -202,6 +214,7 @@ function startJob(account) {
 function run(job) {
 	const timer = setInterval(() => {
 		if (job.status === 'paused') return;
+		if (state.hold && job.status === 'queued') return;
 		if (job.status === 'stopping') {
 			job.status = 'stopped';
 			job.finished_at = Date.now() / 1000;
@@ -237,6 +250,123 @@ function run(job) {
 	timers.add(timer);
 }
 
+function planFor(account) {
+	const base = { account_id: account.id, email: account.email, targets: {}, kinds: {}, folders: [], quota: null, target_limit: null, warnings: [], notes: [] };
+	const pst = state.psts.get(account.pst_id);
+	if (!pst || pst.status !== 'valid') return { ...base, status: 'error', source: { kind: 'pst', ok: false, msg: 'no PST linked to this account' } };
+	const t = pst.scan.totals;
+	const kind = (items, bytes, over = {}) => ({ folders: 1, items, bytes, done: 0, to_migrate: items, to_migrate_bytes: bytes, bytes_estimated: true, filtered: { date: 3 }, oversized: 0, oversized_bytes: 0, folders_to_create: 1, excluded_folders: 0, excluded_items: 0, ...over });
+	const out = { ...base, status: 'ok', source: { kind: 'pst', ok: true, msg: `${pst.filename}: 3 folder(s) analysed` }, kinds: { mail: kind(t.mail, 9_000_000), calendar: kind(t.calendar, null), contacts: kind(t.contacts, null) } };
+	out.folders = [
+		{ path: ['Inbox'], items: t.mail, bytes: 9_000_000, to_migrate: t.mail, target: 'INBOX', create: false, excluded: false, filtered: {}, oversized: 0 },
+		{ path: ['Old mail'], items: 10, bytes: 1000, to_migrate: 10, target: 'Archive/Old', create: true, excluded: false, filtered: {}, oversized: 0 }
+	];
+	out.notes.push('sizes of a PST are estimated from the file size');
+	if (account.email.startsWith('bob')) {
+		out.status = 'warning';
+		out.quota = { used: 1_000_000, limit: 5_000_000, free: 4_000_000, need: 9_000_000, enough: false };
+		out.kinds.mail.oversized = 2;
+		out.warnings.push('quota: 3 MB free on the target for about 8 MB to migrate');
+	} else {
+		out.quota = { used: 1_000_000, limit: 100_000_000, free: 99_000_000, need: 9_000_000, enough: true };
+	}
+	return out;
+}
+
+function planView(p, full = true) {
+	const running = Date.now() - p.at < state.planDelay;
+	const ids = p.account_ids;
+	const accounts = running ? [] : ids.map((id) => planFor(state.accounts.get(id)));
+	const t = { accounts: accounts.length, ok: 0, warning: 0, error: 0, to_migrate: 0, to_migrate_bytes: 0, oversized: 0, filtered: 0 };
+	for (const a of accounts) {
+		t[a.status]++;
+		for (const k of Object.values(a.kinds)) {
+			t.to_migrate += k.to_migrate;
+			t.to_migrate_bytes += k.to_migrate_bytes ?? 0;
+		}
+	}
+	return { id: p.id, status: running ? 'running' : 'done', created_at: p.at / 1000, updated_at: Date.now() / 1000, account_ids: ids, error: null, result: { accounts, totals: t, done: accounts.length, total: ids.length } };
+}
+
+function compareView(c) {
+	const running = Date.now() - c.at < 600;
+	const row = (kind, target, folders, expected, onTarget) => ({ kind, target, folders, expected, on_target: onTarget, missing: Math.max(0, expected - onTarget), extra: 0, sent: expected, errors: 0, pending: 0, filtered: 0, skipped: 0 });
+	const folders = [row('mail', 'INBOX', ['Inbox'], 900, 898), row('calendar', 'Calendar', ['Calendar'], 120, 120), row('contacts', 'Contacts', ['Contacts'], 80, 80)];
+	return { id: c.id, job_id: c.job_id, status: running ? 'running' : 'done', detail: false, error: null, result: running ? null : { ok: false, job_id: c.job_id, totals: { expected: 1100, on_target: 1098, missing: 2, sent: 1100, errors: 0, pending: 0, filtered: 0, skipped: 0 }, folders } };
+}
+
+function batchView(b) {
+	const jobs = [...state.jobs.values()].filter((j) => j.batch_id === b.id);
+	const by = {};
+	const items = { mail: { done: 0, total: 0, errors: 0 }, calendar: { done: 0, total: 0, errors: 0 }, contacts: { done: 0, total: 0, errors: 0 } };
+	for (const j of jobs) {
+		by[j.status] = (by[j.status] ?? 0) + 1;
+		for (const k of Object.keys(items)) for (const f of ['done', 'total', 'errors']) items[k][f] += j.progress[k][f];
+	}
+	const active = ['queued', 'running', 'paused', 'stopping'].reduce((n, s) => n + (by[s] ?? 0), 0);
+	const st = !jobs.length ? 'empty' : !active ? 'finished' : by.running || by.stopping ? 'running' : by.queued ? 'queued' : 'paused';
+	return { id: b.id, name: b.name, created_at: b.created_at, state: st, jobs: jobs.length, by_status: by, items, finished_at: null, failed: by.failed ?? 0, with_errors: by.done_with_errors ?? 0 };
+}
+
+function batchAct(b, action) {
+	let changed = 0;
+	let skipped = 0;
+	for (const j of [...state.jobs.values()].filter((x) => x.batch_id === b.id)) {
+		let ok = false;
+		if (action === 'pause' && ['queued', 'running'].includes(j.status)) (j.status = 'paused'), (ok = true);
+		else if (action === 'resume' && j.status === 'paused') (j.status = 'running'), (ok = true);
+		else if (action === 'stop' && ['queued', 'running', 'paused'].includes(j.status)) (j.status = 'stopping'), (ok = true);
+		else if (action === 'retry-failed' && ['failed', 'done_with_errors'].includes(j.status)) {
+			j.status = 'queued';
+			j.progress = { ...emptyProgress(), mail: { done: 0, total: 900, errors: 0 }, calendar: { done: 0, total: 120, errors: 0 }, contacts: { done: 0, total: 80, errors: 0 } };
+			run(j);
+			ok = true;
+		}
+		if (ok) {
+			changed++;
+			publish('job', j);
+		} else skipped++;
+	}
+	return { ...batchView(b), changed, skipped };
+}
+
+/** Same checks as policy.normalize, with the same reasons. Returns [policy|null] or throws a message. */
+function checkPolicy(doc, server) {
+	if (doc == null || !Object.keys(doc).length) return null;
+	const allowed = ['folder_map', 'exclude_folders', 'date_from', 'date_to', 'max_size_mb', ...(server ? ['window', 'rate_mb_s'] : [])];
+	const unknown = Object.keys(doc).filter((k) => !allowed.includes(k)).sort();
+	if (unknown.length) throw new Error(`unknown or not allowed here: ${unknown.join(', ')}`);
+	const out = {};
+	if (doc.folder_map?.length) out.folder_map = doc.folder_map;
+	if (doc.exclude_folders?.length) out.exclude_folders = doc.exclude_folders;
+	for (const k of ['date_from', 'date_to']) if (doc[k]) out[k] = doc[k];
+	if (out.date_from && out.date_to && out.date_from > out.date_to) throw new Error('date_from is after date_to');
+	if (doc.max_size_mb != null && doc.max_size_mb !== '') {
+		if (typeof doc.max_size_mb !== 'number') throw new Error('max_size_mb must be a number');
+		if (doc.max_size_mb <= 0) throw new Error('max_size_mb must be positive');
+		out.max_size_mb = doc.max_size_mb;
+	}
+	if (server && doc.window) out.window = { tz: 'UTC', ...doc.window };
+	if (server && doc.rate_mb_s != null && doc.rate_mb_s !== '') {
+		if (typeof doc.rate_mb_s !== 'number') throw new Error('rate_mb_s must be a number');
+		if (doc.rate_mb_s <= 0) throw new Error('rate_mb_s must be positive');
+		out.rate_mb_s = doc.rate_mb_s;
+	}
+	return Object.keys(out).length ? out : null;
+}
+
+function effectivePolicy(account) {
+	const srv = state.policies.server.get(account.server_id) ?? {};
+	const acc = state.policies.account.get(account.id) ?? {};
+	const out = { ...srv, ...acc };
+	const maps = [...(acc.folder_map ?? []), ...(srv.folder_map ?? [])];
+	const ex = [...(acc.exclude_folders ?? []), ...(srv.exclude_folders ?? [])];
+	if (maps.length) out.folder_map = maps;
+	if (ex.length) out.exclude_folders = ex;
+	if (srv.window) out.window = srv.window;
+	return out;
+}
+
 const send = (res, code, body, headers = {}) => {
 	const text = typeof body === 'string' ? body : JSON.stringify(body);
 	res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json', ...headers });
@@ -269,7 +399,7 @@ async function control(req, res, path) {
 		reset(body);
 		return send(res, 200, { ok: true });
 	}
-	if (path === '/__mock/state') return send(res, 200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView) });
+	if (path === '/__mock/state') return send(res, 200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
 	if (path === '/__mock/inbox') {
 		state.inbox = body.files ?? [];
 		return send(res, 200, { ok: true });
@@ -281,6 +411,13 @@ async function control(req, res, path) {
 		state.psts.set(pst.id, pst);
 		publish('pst', pst);
 		return send(res, 200, pst);
+	}
+	if (path === '/__mock/job') {
+		// Change a job and tell the stream: a pause by the allowed hours, tasks in the progress, ...
+		const job = state.jobs.get(body.id);
+		Object.assign(job, body.patch);
+		publish('job', job);
+		return send(res, 200, job);
 	}
 	if (path === '/__mock/event') {
 		publish(body.kind, body.data);
@@ -345,6 +482,16 @@ async function api(req, res, url) {
 		}
 		const server = state.servers.get(Number(parts[1]));
 		if (!server) return fail(res, 404, 'unknown server');
+		if (parts[2] === 'policy') {
+			if (m === 'PUT') {
+				try {
+					state.policies.server.set(server.id, checkPolicy(json(), true));
+				} catch (error) {
+					return fail(res, 422, error.message);
+				}
+			}
+			return send(res, 200, { policy: state.policies.server.get(server.id) ?? null });
+		}
 		if (parts[2] === 'test') return send(res, 200, { imap: { ok: true, msg: `IMAP server reachable (${server.imap_host}:${server.imap_port})`, capabilities: [] }, caldav: { ok: server.dav_enabled, msg: server.dav_enabled ? 'reachable (HTTP 207)' : 'DAV disabled for this server' }, carddav: { ok: false, msg: 'https://dav.example.com/ unreachable: timeout' } });
 		if (m === 'GET') return send(res, 200, server);
 		if (m === 'PUT') {
@@ -433,7 +580,8 @@ async function api(req, res, url) {
 
 	if (parts[0] === 'accounts') {
 		if (parts[1] === 'csv-template') return send(res, 200, 'email;password;login\nalice@example.com;password;\n', { 'Content-Type': 'text/csv' });
-		if (parts[1] === 'import-csv') return send(res, 200, { created: 1, updated: 0, errors: [{ line: 3, msg: 'invalid email address' }] });
+		if (parts[1] === 'import-csv') return send(res, 200, { created: 1, updated: 0, errors: [{ line: 3, msg: 'invalid email address' }], warnings: [{ line: 4, msg: "PST 'missing.pst' is not on the server: not linked" }] });
+		if (parts[1] === 'export-csv') return send(res, 200, 'email;login;server;pst;mail;calendar;contacts;source_kind\r\nalice@example.com;;Production;alice.pst;1;1;1;\r\n', { 'Content-Type': 'text/csv; charset=utf-8' });
 		if (parts.length === 1) {
 			if (m === 'GET') {
 				const server = url.searchParams.get('server_id');
@@ -459,6 +607,16 @@ async function api(req, res, url) {
 			account.last_test_result = result;
 			publish('account', accountView(account));
 			return send(res, 200, result);
+		}
+		if (parts[2] === 'policy') {
+			if (m === 'PUT') {
+				try {
+					state.policies.account.set(account.id, checkPolicy(json(), false));
+				} catch (error) {
+					return fail(res, 422, error.message);
+				}
+			}
+			return send(res, 200, { policy: state.policies.account.get(account.id) ?? null, effective: effectivePolicy(account) });
 		}
 		if (parts[2] === 'source' || parts[2] === 'target') {
 			const role = parts[2];
@@ -574,21 +732,101 @@ async function api(req, res, url) {
 		return send(res, 200, pst);
 	}
 
-	if (path === '/runs' && m === 'POST') {
+	if (path === '/runs/plan' && m === 'POST') {
 		const ids = json().account_ids ?? [];
+		const unknown = ids.filter((id) => !state.accounts.has(id));
+		if (unknown.length) return fail(res, 422, { msg: 'unknown account(s)', account_ids: unknown });
+		const plan = { id: state.next2.plan++, account_ids: ids, at: Date.now() };
+		state.plans.set(plan.id, plan);
+		return send(res, 202, { id: plan.id, status: 'queued', account_ids: ids, error: null, result: null });
+	}
+	if (parts[0] === 'plans') {
+		const plan = state.plans.get(Number(parts[1]));
+		if (!plan) return fail(res, 404, 'unknown plan');
+		return send(res, 200, planView(plan));
+	}
+	if (path === '/runs' && m === 'POST') {
+		const body = json();
+		const ids = body.account_ids ?? [];
 		state.runCalls.push(ids);
+		state.runBodies.push(body);
+		let batch = null;
+		if (body.name) {
+			batch = { id: state.next2.batch++, name: body.name, created_at: Date.now() / 1000 };
+			state.batches.set(batch.id, batch);
+		}
 		const jobs = ids.map((id) => state.accounts.get(id)).filter(Boolean).map(startJob);
-		for (const job of jobs) publish('job', job);
+		for (const job of jobs) {
+			if (batch) job.batch_id = batch.id;
+			if (body.mode) job.mode = body.mode;
+			publish('job', job);
+		}
 		return send(res, 200, jobs);
+	}
+	if (path === '/batches' && m === 'GET') return send(res, 200, [...state.batches.values()].reverse().map(batchView));
+	if (parts[0] === 'batches') {
+		const batch = state.batches.get(Number(parts[1]));
+		if (!batch) return fail(res, 404, 'unknown batch');
+		if (parts[2]) return send(res, 200, batchAct(batch, parts[2]));
+		return send(res, 200, batchView(batch));
+	}
+	if (path === '/tokens' && m === 'GET') return send(res, 200, [...state.tokens].reverse().map(({ secret, ...view }) => view));
+	if (path === '/tokens' && m === 'POST') {
+		const token = { id: state.next2.token++, name: json().name || 'token', prefix: `mccb_${String(state.next2.token).padStart(8, '0')}`, created_at: Date.now() / 1000, last_used_at: null, revoked_at: null };
+		state.tokens.push(token);
+		return send(res, 201, { ...token, token: `${token.prefix}_${'x'.repeat(43)}` });
+	}
+	if (parts[0] === 'tokens' && m === 'DELETE') {
+		const token = state.tokens.find((t) => t.id === Number(parts[1]));
+		if (!token) return fail(res, 404, 'unknown token');
+		token.revoked_at ??= Date.now() / 1000;
+		return send(res, 200, token);
 	}
 
 	if (parts[0] === 'jobs') {
 		if (parts.length === 1) return send(res, 200, [...state.jobs.values()]);
+		if (parts[1] === 'reorder' && m === 'POST') {
+			const ids = json().job_ids ?? [];
+			state.reorderCalls.push(ids);
+			const queued = [...state.jobs.values()].filter((j) => j.status === 'queued').sort((a, b) => b.priority - a.priority || a.id - b.id).map((j) => j.id);
+			const order = [...ids.filter((id) => queued.includes(id)), ...queued.filter((id) => !ids.includes(id))];
+			order.forEach((id, i) => {
+				const j = state.jobs.get(id);
+				j.priority = order.length - i;
+				publish('job', j);
+			});
+			return send(res, 200, { queue: order });
+		}
 		const job = state.jobs.get(Number(parts[1]));
 		if (!job) return fail(res, 404, 'unknown job');
 		if (parts.length === 2) return send(res, 200, job);
 		const action = parts[2];
-		if (action === 'pause') job.status = 'paused';
+		if (action === 'compare') {
+			if (parts[3] === 'csv') {
+				const c = [...state.compares.values()].filter((x) => x.job_id === job.id).pop();
+				if (!c) return fail(res, 404, 'no finished comparison for this job');
+				return send(res, 200, 'kind;source_folders;target_folder;expected;on_target;missing\r\nmail;Inbox;INBOX;900;898;2\r\n', { 'Content-Type': 'text/csv; charset=utf-8' });
+			}
+			if (m === 'POST' || url.searchParams.get('run')) {
+				state.compareCalls.push(job.id);
+				const c = { id: state.next2.compare++, job_id: job.id, at: Date.now() };
+				state.compares.set(c.id, c);
+				return send(res, 202, { id: c.id, job_id: job.id, status: 'queued', result: null });
+			}
+			const c = [...state.compares.values()].filter((x) => x.job_id === job.id).pop();
+			return send(res, 200, c ? compareView(c) : { status: 'none', job_id: job.id, result: null });
+		}
+		if (action === 'filtered') return send(res, 200, [{ id: 11, kind: 'mail', folder: 'Inbox', item_key: 'k11', subject: 'Old newsletter', size: 4096, error: 'filtered: date', updated_at: Date.now() / 1000, reason: 'date' }]);
+		if (action === 'oversized') return send(res, 200, [{ id: 12, kind: 'mail', folder: 'Sent', item_key: 'k12', subject: 'Holiday video', size: 52_428_800, error: '[oversize] 50 MB', updated_at: Date.now() / 1000 }]);
+		if (action === 'priority' && m === 'PUT') job.priority = json().priority;
+		else if (action === 'delta') {
+			state.deltaCalls.push(job.id);
+			job.status = 'queued';
+			job.mode = 'delta';
+			job.finished_at = null;
+			job.progress = { ...emptyProgress(), mail: { done: 0, total: 900, errors: 0 }, calendar: { done: 0, total: 120, errors: 0 }, contacts: { done: 0, total: 80, errors: 0 } };
+			run(job);
+		} else if (action === 'pause') job.status = 'paused';
 		else if (action === 'resume') job.status = 'running';
 		else if (action === 'stop') job.status = 'stopping';
 		else if (action === 'retry' || action === 'retry-errors') {
@@ -604,7 +842,7 @@ async function api(req, res, url) {
 			return send(res, 200, [{ id: 1, kind: 'mail', folder: 'Inbox', item_key: 'k1', subject: 'Quarterly report', error: 'APPEND refused: message too large', updated_at: Date.now() / 1000 }]);
 		} else if (action === 'report') {
 			if (!['done', 'done_with_errors', 'stopped', 'failed'].includes(job.status)) return fail(res, 404, 'report not available yet');
-			return send(res, 200, { job_id: job.id, mail: { sent: 900, present: 900, errors: 0 }, calendar: { sent: 120, present: 120, errors: 0 }, contacts: { sent: 80, present: 80, errors: 0 }, sample_check: '20/20 mails read back' });
+			return send(res, 200, { job_id: job.id, mail: { sent: 900, present: 900, errors: 0 }, calendar: { sent: 120, present: 120, errors: 0 }, contacts: { sent: 80, present: 80, errors: 0 }, sample_check: '20/20 mails read back', filtered: { total: 1, reasons: { date: 1 } }, oversized: { count: 1, bytes: 52_428_800 } });
 		}
 		publish('job', job);
 		return send(res, 200, job);

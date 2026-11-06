@@ -2,8 +2,9 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { m } from '#lib/paraglide/messages.js';
 import { errorText, get, post, put } from '../api/client.ts';
 import { type LiveEvent, startEvents, stopEvents } from '../api/events.ts';
-import type { Account, AccountOptions, Health, Job, Pst, Server, TestResult } from '../api/types.ts';
+import type { Account, AccountOptions, Batch, Health, Job, Pst, Server, TestResult } from '../api/types.ts';
 import { testPassed } from '../logic/accounts.ts';
+import { moveInQueue, prioritiesOf, queueOrder } from '../logic/queue.ts';
 import { createTestRunner, type TestPhase } from '../logic/testrun.ts';
 import { toast } from '../ui/toast.svelte.ts';
 import { uploads } from '../upload/store.svelte.ts';
@@ -20,6 +21,8 @@ class Data {
 	accounts = new SvelteMap<number, Account>();
 	jobs = new SvelteMap<number, Job>();
 	psts = new SvelteMap<number, Pst>();
+	/** Named groups of jobs. Empty until a run was started with a name. */
+	batches = $state.raw<Batch[]>([]);
 	testing = new SvelteMap<number, TestPhase>();
 	/** Survives a change of page; hidden rows stay counted, see logic/selection.ts. */
 	selected = new SvelteSet<number>();
@@ -79,6 +82,7 @@ class Data {
 			const ids = new Set(accounts.map((a) => a.id));
 			for (const id of [...this.accounts.keys()]) if (!ids.has(id)) this.removeAccount(id);
 			for (const account of accounts) this.upsertAccount(account);
+			void this.loadBatches();
 			const pstIds = new Set(psts.map((p) => p.id));
 			for (const id of [...this.psts.keys()]) if (!pstIds.has(id)) this.psts.delete(id);
 			for (const pst of psts) this.upsertPst(pst);
@@ -86,6 +90,40 @@ class Data {
 			this.error = errorText(error);
 		} finally {
 			this.loading = false;
+		}
+	}
+
+	async loadBatches(): Promise<void> {
+		try {
+			this.batches = await get<Batch[]>('/batches');
+		} catch {
+			// The batch selector simply stays hidden.
+		}
+	}
+
+	upsertBatch(batch: Batch): void {
+		const { changed: _c, skipped: _s, ...rest } = batch;
+		const known = this.batches.some((b) => b.id === batch.id);
+		this.batches = known ? this.batches.map((b) => (b.id === batch.id ? rest : b)) : [rest, ...this.batches];
+	}
+
+	/** Moves a queued job one place in the queue; the server numbers the whole queue. */
+	async moveQueued(accountId: number, step: -1 | 1): Promise<boolean> {
+		const job = this.jobs.get(accountId);
+		if (!job || job.status !== 'queued') return false;
+		const next = moveInQueue(queueOrder(this.jobs.values()), job.id, step);
+		if (!next) return false;
+		try {
+			const { queue } = await post<{ queue: number[] }>('/jobs/reorder', { job_ids: next });
+			const priorities = prioritiesOf(queue);
+			for (const [account, j] of this.jobs) {
+				const priority = priorities.get(j.id);
+				if (priority != null && j.priority !== priority) this.jobs.set(account, { ...j, priority });
+			}
+			return true;
+		} catch (error) {
+			toast(errorText(error), 'warning');
+			return false;
 		}
 	}
 

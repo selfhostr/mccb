@@ -9,6 +9,7 @@
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import PolicyFields from './PolicyFields.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
 
 	let { server = null, onclose }: { server?: Server | null; onclose: () => void } = $props();
@@ -21,6 +22,8 @@
 	let form = $state<ServerInput>(initial);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	let policyError = $state<string | null>(null);
+	let policy = $state<PolicyFields>();
 
 	function onSecurity() {
 		if (form.imap_port === 993 || form.imap_port === 143) form.imap_port = form.imap_security === 'ssl' ? 993 : 143;
@@ -32,7 +35,17 @@
 		error = null;
 		const { id: _id, ...rest } = { id: 0, ...$state.snapshot(form) };
 		const body = { ...rest, root_folder: rest.root_folder || null, caldav_url: rest.caldav_url || null, carddav_url: rest.carddav_url || null };
+		policyError = null;
 		try {
+			// The rules first for an existing server: a refusal leaves everything as it was.
+			if (server && policy?.dirty()) {
+				try {
+					await put(`/servers/${server.id}/policy`, policy.body());
+				} catch (err) {
+					policyError = errorText(err);
+					return;
+				}
+			}
 			if (server) await put(`/servers/${server.id}`, body);
 			else await post('/servers', body);
 			await data.reloadServers();
@@ -103,6 +116,8 @@
 				</Field>
 			</div>
 		</details>
+		{#if server}<PolicyFields bind:this={policy} url={`/servers/${server.id}/policy`} server />{/if}
+		{#if policyError}<ErrorNotice title={m.policy_save_failed()} message={policyError} />{/if}
 		{#if error}<ErrorNotice title={m.settings_server_save_failed()} message={error} />{/if}
 	</form>
 	{#snippet actions()}

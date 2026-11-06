@@ -6,6 +6,8 @@
 	 */
 	import Calendar from '@lucide/svelte/icons/calendar';
 	import Contact from '@lucide/svelte/icons/contact';
+	import ArrowDown from '@lucide/svelte/icons/arrow-down';
+	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import KeyRound from '@lucide/svelte/icons/key-round';
@@ -22,6 +24,7 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
+	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import ConnectionCell from './ConnectionCell.svelte';
 	import ProgressCell from './ProgressCell.svelte';
 
@@ -81,7 +84,19 @@
 		{ key: 'contacts' as const, on: contacts, icon: Contact, label: m.migrations_row_content_contacts() }
 	]);
 
+	// A primitive: a progress event for this row does not rebuild the menu, a change of status does.
+	const queued = $derived(data.jobs.get(id)?.status === 'queued');
+	async function move(step: -1 | 1) {
+		if (await data.moveQueued(id, step)) toast(step < 0 ? m.migrations_row_moved_up() : m.migrations_row_moved_down(), 'signal');
+	}
+
 	const menu = $derived([
+		...(queued
+			? [
+					{ label: m.migrations_row_queue_up(), icon: ArrowUp, onselect: () => move(-1) },
+					{ label: m.migrations_row_queue_down(), icon: ArrowDown, onselect: () => move(1) }
+				]
+			: []),
 		{ label: m.migrations_row_edit(), icon: KeyRound, onselect: () => onedit(account) },
 		...(canRoute || sourceLabel || targetLabel ? [{ label: m.migrations_row_route(), icon: Route, onselect: () => onroute(account) }] : []),
 		{ label: m.migrations_row_delete(), icon: Trash2, danger: true, onselect: () => ondelete(account) }

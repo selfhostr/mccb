@@ -30,3 +30,15 @@ export function chainView(chain: PstChain | null | undefined, accountOf: (id: nu
 	const accountEmail = chain.account_id != null ? (accountOf(chain.account_id)?.email ?? null) : null;
 	return { code, detail, accountEmail, accountId: chain.account_id ?? null, started: chain.job_id != null };
 }
+
+/** Every kind of file the server analyses: PST and OST, mbox, single messages, calendars, contacts, archives. */
+export const FILE_ACCEPT = '.pst,.ost,.mbox,.mbx,.eml,.msg,.ics,.vcf,.zip';
+
+/** Where the Files list says what a file is: "files" uploads name the formats found inside. */
+export function formatOf(scan: Pst['scan']): string {
+	if (!scan?.format) return '';
+	return scan.format === 'files' ? (scan.contents?.length ? scan.contents.join(', ') : scan.format) : scan.format.toUpperCase();
+}
+
+/** The preview only exists for a PST: the server answers 409 for the other files. */
+export const canPreview = (p: Pick<Pst, 'status' | 'scan'>): boolean => p.status === 'valid' && p.scan?.format !== 'files';

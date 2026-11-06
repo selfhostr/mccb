@@ -14,6 +14,7 @@
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import PolicyFields from '../settings/PolicyFields.svelte';
 
 	interface Props {
 		account?: Account | null;
@@ -32,12 +33,24 @@
 	let login = $state(initialLogin);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
+	let policyError = $state<string | null>(null);
+	let policy = $state<PolicyFields>();
 
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		busy = true;
 		error = null;
+		policyError = null;
 		try {
+			// The rules first for an existing account: a refusal leaves everything as it was.
+			if (account && policy?.dirty()) {
+				try {
+					await put(`/accounts/${account.id}/policy`, policy.body());
+				} catch (err) {
+					policyError = errorText(err);
+					return;
+				}
+			}
 			const saved = account
 				? await put<Account>(`/accounts/${account.id}`, { ...(password ? { password } : {}), ...(login !== initialLogin ? { login } : {}) })
 				: await post<Account>('/accounts', { server_id: Number(serverId), email: email.trim(), password, ...(login ? { login } : {}) });
@@ -73,6 +86,8 @@
 		<Field label={m.migrations_account_login()} hint={m.migrations_account_login_hint()}>
 			<input class="input font-mono" autocomplete="off" bind:value={login} />
 		</Field>
+		{#if account}<PolicyFields bind:this={policy} url={`/accounts/${account.id}/policy`} server={false} />{/if}
+		{#if policyError}<ErrorNotice title={m.policy_save_failed()} message={policyError} />{/if}
 		{#if error}<ErrorNotice title={m.migrations_account_save_failed()} message={error} />{/if}
 	</form>
 	{#snippet actions()}

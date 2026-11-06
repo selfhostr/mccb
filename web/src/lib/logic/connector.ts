@@ -15,9 +15,12 @@ export type SecretDrafts = Record<string, SecretDraft>;
 
 /** The PST is the historical source and keeps its own control in the table. */
 export const PST_KIND = 'pst';
+/** An uploaded file that is not a PST (mbox, .eml, .zip...): set by the server, read like the PST, from the Files page. */
+export const FILES_KIND = 'files';
+export const isFileKind = (kind: string | null | undefined): boolean => kind === PST_KIND || kind === FILES_KIND;
 
 export function kindsFor(catalogue: readonly Connector[], role: Role): Connector[] {
-	return catalogue.filter((c) => c[role] != null && !(role === 'source' && c.kind === PST_KIND));
+	return catalogue.filter((c) => c[role] != null && !(role === 'source' && isFileKind(c.kind)));
 }
 
 export function findKind(catalogue: readonly Connector[], kind: string | null | undefined): Connector | undefined {
@@ -111,7 +114,7 @@ export function endpointBody(kind: string, role: ConnectorRole | null | undefine
 /** One short line for a stored endpoint: its label and the first plain value of its config. */
 export function endpointSummary(catalogue: readonly Connector[], endpoint: Endpoint | null | undefined, role: Role): { kind: string; label: string; detail: string } | null {
 	const kind = endpoint?.kind;
-	if (!kind || (role === 'source' && kind === PST_KIND)) return null;
+	if (!kind || (role === 'source' && isFileKind(kind))) return null;
 	const fields = fieldsOf(findKind(catalogue, kind)?.[role]);
 	const config = endpoint.config ?? {};
 	const names = fields.length ? fields.filter((f) => !f.secret && f.type !== 'boolean').map((f) => f.name) : Object.keys(config);
@@ -127,5 +130,5 @@ export function endpointSummary(catalogue: readonly Connector[], endpoint: Endpo
 }
 
 /** True when the account reads from something other than its PST. */
-export const hasCustomSource = (a: { source?: Endpoint }) => !!a.source?.kind && a.source.kind !== PST_KIND;
+export const hasCustomSource = (a: { source?: Endpoint }) => !!a.source?.kind && !isFileKind(a.source.kind);
 export const hasOwnTarget = (a: { target?: Endpoint }) => !!a.target?.kind;

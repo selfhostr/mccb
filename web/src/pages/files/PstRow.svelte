@@ -8,7 +8,7 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import type { Pst } from '../../lib/api/types.ts';
 	import { fmtBytes, fmtNum } from '../../lib/format.ts';
-	import { chainView, fetchPercent, isFetching } from '../../lib/logic/pst.ts';
+	import { canPreview, chainView, fetchPercent, formatOf, isFetching } from '../../lib/logic/pst.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { pstLook } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
@@ -31,6 +31,7 @@
 	const look = $derived(pstLook(pst.status));
 	const name = $derived(prefs.file(pst.filename));
 	const totals = $derived(pst.scan?.totals);
+	const format = $derived(formatOf(pst.scan));
 	const linked = $derived(pst.status === 'valid' ? [...data.accounts.values()].filter((a) => a.pst_id === id).length : 0);
 
 	const fetching = $derived(isFetching(pst));
@@ -42,7 +43,7 @@
 	const chainEmail = $derived(chain?.accountEmail ? prefs.email(chain.accountEmail) : chain?.accountId != null ? `#${chain.accountId}` : '');
 
 	const menu = $derived([
-		...(pst.status === 'valid'
+		...(canPreview(pst)
 			? [
 					{
 						label: m.files_list_preview(),
@@ -83,6 +84,7 @@
 				{m.files_list_totals({ mail: fmtNum(totals.mail ?? 0), calendar: fmtNum(totals.calendar ?? 0), contacts: fmtNum(totals.contacts ?? 0) })}
 			</p>
 		{/if}
+		{#if format}<p class="m-0 text-xs text-ink-3" data-testid="pst-format">{m.files_row_format({ format })}</p>{/if}
 		{#if pst.status === 'uploading'}<p class="m-0 text-xs text-advisory-ink">{m.files_list_incomplete()}</p>{/if}
 		{#if chain}
 			<p class={`m-0 text-xs ${chain.code === 'error' || chain.code === 'ambiguous' ? 'text-advisory-ink' : 'text-ink-2'}`} data-testid="pst-chain">

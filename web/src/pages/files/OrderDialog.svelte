@@ -6,7 +6,6 @@
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Dialog from '../../lib/ui/Dialog.svelte';
-	import Notice from '../../lib/ui/Notice.svelte';
 	import { type FileLike, sortFiles, type UploadOrder, UPLOAD_ORDERS } from '../../lib/upload/queue.ts';
 	import { uploads } from '../../lib/upload/store.svelte.ts';
 
@@ -14,7 +13,6 @@
 
 	let order = $state<UploadOrder>('size-asc');
 	const sorted = $derived(sortFiles(files, order));
-	const odd = $derived(files.filter((f) => !/\.(pst|ost)$/i.test(f.name)));
 	const LABELS = $derived<Record<UploadOrder, string>>({
 		'size-asc': m.files_order_size_asc(),
 		'size-desc': m.files_order_size_desc(),
@@ -40,9 +38,6 @@
 			{/each}
 		</fieldset>
 		<p class="m-0 text-xs text-ink-3">{m.files_order_date_note()}</p>
-		{#if odd.length}
-			<Notice>{m.files_order_odd({ names: odd.map((f) => prefs.file(f.name)).join(', ') })}</Notice>
-		{/if}
 		<ol class="m-0 max-h-56 list-inside list-decimal overflow-y-auto rounded-btn border border-line p-2" data-testid="order-preview">
 			{#each sorted as file (`${file.name}|${file.size}|${file.lastModified}`)}
 				<li class="py-0.5">
