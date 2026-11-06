@@ -84,6 +84,12 @@ def pst_view(r) -> dict:
         "id": r["id"], "filename": r["filename"], "size": r["size"], "status": r["status"],
         "scan": db.jload(r["scan"], None), "error": r["error"], "pst_sha": r["pst_sha"],
         "created_at": r["created_at"], "updated_at": r["updated_at"],
+        # intake: 'upload' | 'inbox' | 'fetch'; origin = label without secrets; received_bytes = progress while
+        # status is 'fetching' (size is 0 until the remote size is known); chain = auto-assignment outcome
+        "source": (r["source"] if "source" in r.keys() else None) or "upload",
+        "origin": r["origin"] if "origin" in r.keys() else None,
+        "received_bytes": r["received_bytes"] if "received_bytes" in r.keys() else None,
+        "chain": db.jload(db.kv_get(f"chain:{r['id']}"), None),
     }
 
 

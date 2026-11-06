@@ -536,6 +536,10 @@ def delete_pst(pid: int):
     return {"ok": True}
 
 
+from .api_intake import router as intake_router  # noqa: E402
+app.include_router(intake_router)
+
+
 # ======================================================================= jobs
 class RunIn(BaseModel):
     account_ids: list[int]

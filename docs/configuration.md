@@ -22,7 +22,15 @@ All variables are optional. Set them in `.env` (see [`.env.example`](https://git
 | `WORKER_STALE_SECONDS` | `60` | A `running` job whose heartbeat is older is considered orphaned and requeued. |
 | `PORT` | `22362` | Listening port of the `web` service inside the container (the compose file publishes `22362`). |
 | `DATA_DIR` | `/data` | Data directory (set by the compose file). |
+| `INBOX_DIR` | `DATA_DIR/inbox` | Drop folder watched by the worker (can be a mount). See [Server-side intake](server-intake.md). |
+| `FETCH_PARALLEL` | `2` | Simultaneous server-side transfers (drop folder registrations and downloads). |
+| `FETCH_BLOCK_PRIVATE` | `0` | `1` = also refuse private ranges and loopback as fetch sources. Link-local and metadata addresses are always refused. |
+| `FETCH_ALLOW_LINK_LOCAL` | `0` | `1` = allow link-local addresses as fetch sources. Not recommended. |
 | `PSTMIG_ENGINE` | `app.engine` | Engine module; used only by tests. |
 
 `.env.example` only lists the common variables; `SESSION_MAX_AGE`, `WORKER_STALE_SECONDS`,
 `CHILD_TERM_GRACE` and `PORT` are read by `app/server/config.py` and are optional.
+
+Notification channels, the drop-folder delay and the automatic assignment are not environment variables: they are
+set in the application (`GET/PUT /api/intake/settings`) and stored in `app.db`. See [Notifications](notifications.md)
+and [Server-side intake](server-intake.md).
