@@ -1,4 +1,4 @@
-// Run: docker run --rm -v /home/x0/psttoimap:/w -w /w node:22-slim node --test tests/web/
+// Run: docker run --rm -v "$PWD":/w -w /w node:22-slim node --test tests/web/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 

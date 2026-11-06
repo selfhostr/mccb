@@ -62,7 +62,7 @@ def decrypt(token: str | None) -> str:
 
 
 def _signer() -> TimestampSigner:
-    return TimestampSigner(hashlib.sha256(b"session:" + secret_key()).hexdigest(), salt="psttoimap-session")
+    return TimestampSigner(hashlib.sha256(b"session:" + secret_key()).hexdigest(), salt="mccb-session")
 
 
 def _admin_file() -> Path:
