@@ -28,6 +28,8 @@ RUN if [ "$DEV" = "1" ]; then pip install -r tests/server/requirements-dev.txt; 
 # Only the application: the UI sources stay out of the image, their build comes from the stage above.
 COPY app /app/app
 COPY --from=web /build/app/web /app/app/web
+# Command line (standard library only): `docker compose exec web mccb status`, or copy it to a NAS or server
+RUN chmod 755 /app/app/cli/mccb.py && ln -s /app/app/cli/mccb.py /usr/local/bin/mccb
 # Version: APP_VERSION = VERSION if given; otherwise app/VERSION (+GIT_SHA if given), resolved by
 # app/server/version.py from the (possibly empty) variables below.
 ARG VERSION=

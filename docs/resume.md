@@ -3,7 +3,7 @@
 By the end of this page you will know what happens when a job is paused, stopped or interrupted, and why a resume never duplicates mail.
 
 **Item states.** Each mail, contact or appointment has a row in the `items` table:
-`pending` → `inflight` (marked just before the APPEND) → `ok` or `error` (or `skipped`).
+`pending` → `inflight` (marked just before the APPEND) → `ok` or `error` (or `skipped`). An item left out by a filter is `filtered`: it counts as done, is not an error and is judged again at every run. A message the target refused for its size is an `error` starting with `[oversize]`; a rerun of the whole job leaves it alone, "retry errors" tries it again (see [Plan, filter and control a migration](planning.md)).
 
 **`X-PST-Import-Id` marker.** Each imported mail carries the header `X-PST-Import-Id: <pst_sha-item_key>`.
 The value is delimited by `<` and `>`: no identifier is a prefix of another. On resume:

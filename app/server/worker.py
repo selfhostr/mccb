@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from . import crash, db, intake, notify, repo, tuner
+from . import crash, db, intake, notify, planning, repo, tuner
 from .config import settings
 
 log = logging.getLogger("worker")
@@ -46,6 +46,7 @@ class Worker:
         self.lock = threading.Lock()
         self.intake = intake.Intake(self.stop_event)   # drop folder, remote fetch, auto chain
         self.notifier = notify.Notifier()               # polls the DB; delivery on its own thread
+        self.planner = planning.Jobs()                  # dry runs and comparisons asked through the API
 
     # -------------------------------------------------- crash recovery
     def recover(self, startup: bool = False) -> None:
@@ -76,7 +77,7 @@ class Worker:
             r = c.execute(
                 "SELECT j.id FROM jobs j WHERE j.status='queued' AND NOT EXISTS ("
                 " SELECT 1 FROM jobs k WHERE k.account_id=j.account_id AND k.id<>j.id AND k.status IN ('running','stopping'))"
-                " ORDER BY j.id LIMIT 1").fetchone()
+                " ORDER BY j.priority DESC, j.id LIMIT 1").fetchone()
             if not r:
                 return None
             c.execute("UPDATE jobs SET status='running', worker_id=?, heartbeat=?, started_at=COALESCE(started_at, ?), "
@@ -247,6 +248,12 @@ class Worker:
                 part.tick()
             except Exception:
                 log.exception("%s", type(part).__name__)
+        # dry runs, comparisons and the allowed hours of the servers: isolated like the parts above
+        for part in (self.planner.tick, planning.window_tick):
+            try:
+                part()
+            except Exception:
+                log.exception("planning")
         # jobs
         if self.auto_concurrency:
             n = self.auto_limit()
@@ -275,6 +282,7 @@ class Worker:
         settings.ensure_dirs()
         db.conn()
         self.recover(startup=True)
+        self.planner.recover()
         last_recover = time.time()
         log.info("worker %s started (concurrency %s)", self.id,
                  f"auto, {self.auto_limit()} now" if self.auto_concurrency else self.concurrency)

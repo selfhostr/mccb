@@ -1,6 +1,6 @@
 # API
 
-JSON over HTTP, `/api` prefix, session cookie. `/docs`, `/redoc` and `/openapi.json` are disabled.
+JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API token>`. `/docs`, `/redoc` and `/openapi.json` are disabled.
 
 - `POST /api/login {password}` ; `POST /api/logout` ; `GET /api/me`
 - `POST /api/password {current, new}`, change the admin password (`new` ≥ 8 characters). Requires a valid session and a correct
@@ -67,5 +67,23 @@ JSON over HTTP, `/api` prefix, session cookie. `/docs`, `/redoc` and `/openapi.j
   `current_folder,rate,eta,started_at,finished_at,error,tuning:{mode,builders,connections,fallback}|null}`
   `GET /api/jobs/{id}/log?after=` (lines), `GET /api/jobs/{id}/report` (JSON), `GET /api/jobs/{id}/errors`,
   `POST /api/jobs/{id}/retry-errors`
-- Real time: `GET /api/events` (SSE) emits `job` / `pst` / `account` with the full object, and `upload` with `{id,status,received_count}`.
+- Planning (see [Plan, filter and control a migration](planning.md)):
+  `POST /api/runs/plan {account_ids}` → **202** `{id,status:'queued'|'running'|'done'|'failed',account_ids,error,result}`; `GET /api/plans/{id}` (full result:
+  `{accounts:[{account_id,email,status:'ok'|'warning'|'error',source,targets,kinds,folders,quota,target_limit,warnings,notes}],totals,done,total}`), `GET /api/plans`.
+  Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'` and `priority`.
+  `GET/PUT /api/servers/{id}/policy` and `GET/PUT /api/accounts/{id}/policy`: `{policy}` (account: also `effective`); body
+  `{folder_map:[{source,target}],exclude_folders:[...],date_from,date_to,max_size_mb}` plus, for a server, `window:{days?,start,end,tz}` and `rate_mb_s`;
+  `null` or `{}` clears; **422** with the reason when invalid.
+  `GET /api/batches`, `GET /api/batches/{id}` → `{id,name,created_at,state:'queued'|'running'|'paused'|'finished',jobs,by_status,items,failed,with_errors,finished_at,job_list?}`;
+  `POST /api/batches/{id}/pause|resume|stop|retry-failed` → batch plus `{changed,skipped}`.
+  `POST /api/jobs/reorder {job_ids}` → `{queue:[...]}`; `PUT /api/jobs/{id}/priority {priority}`; `POST /api/jobs/{id}/delta` (final resync of a finished job).
+  `POST /api/jobs/{id}/compare {detail?}` → **202**; `GET /api/jobs/{id}/compare[?run=1&detail=1]` → `{id,status,result:{ok,totals,folders:[{kind,target,folders,expected,on_target,missing,extra,sent,errors,pending,filtered,skipped,missing_items?}]}}` or `{status:'none'}`;
+  `GET /api/jobs/{id}/compare/csv`. `GET /api/jobs/{id}/filtered`, `GET /api/jobs/{id}/oversized`.
+  Jobs gain `priority`, `batch_id` and `pause_reason` (`'window'`: waiting for the allowed hours, resumes by itself; `null`: paused by the administrator).
+  The report gains `filtered`, `oversized`, `policy`, `totals.<kind>.filtered` and, after a comparison, `compare`.
+- Accounts as CSV: `POST /api/accounts/import-csv` accepts the optional columns of [Import accounts](import-accounts.md) and may answer `warnings:[{line,msg}]`;
+  `GET /api/accounts/export-csv[?server_id=]` writes them back (never a password or a secret).
+- API tokens (see [Command line and API tokens](cli.md)): `GET /api/tokens`, `POST /api/tokens {name}` → **201** with `token` (shown once), `DELETE /api/tokens/{id}`.
+  Any route accepts `Authorization: Bearer <token>`; the token routes themselves need a session (**403** with a token).
+- Real time: `GET /api/events` (SSE) emits `job` / `pst` / `account` with the full object, `plan` and `compare` (plans without their folder lists), and `upload` with `{id,status,received_count}`.
 - `GET /api/health`.

@@ -22,7 +22,7 @@ By the end of this page a mailbox, its calendar and its contacts will be importe
    organized by folder. Open it **before launching** to check accents (subjects, bodies, folder
    names), attachment names and types, and embedded images. Generated in a
    subprocess, 120 s maximum; 409 error if the PST is not valid, 500 if libpff crashes.
-6. **Association.** Attach a valid PST to each account.
+6. **Association.** Attach a valid PST to each account. Before the run, a [dry run](planning.md) shows counts, sizes, quota and the folders that will be created, and a [policy](planning.md) can map folders, leave some out and set allowed hours.
 7. **Runs.** Select accounts then "Run" (`POST /api/runs`): one job per mailbox, queued.
    The worker runs `WORKER_CONCURRENCY` at a time. Phases: `precheck` (IMAP, DAV, quota), `mail`,
    `calendar`, `contacts`, `verify`.

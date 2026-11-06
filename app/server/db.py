@@ -142,6 +142,39 @@ CREATE TABLE IF NOT EXISTS events (
     ts REAL NOT NULL DEFAULT ((julianday('now') - 2440587.5) * 86400.0)
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    request TEXT NOT NULL DEFAULT '{}',
+    result TEXT,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS compares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    detail INTEGER NOT NULL DEFAULT 0,
+    result TEXT,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL UNIQUE,
+    token_hash TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    revoked_at REAL
+);
 CREATE TABLE IF NOT EXISTS notify_sent (
     kind TEXT NOT NULL,
     ref_id INTEGER NOT NULL,
@@ -155,6 +188,10 @@ CREATE TRIGGER IF NOT EXISTS ev_acc_i AFTER INSERT ON accounts BEGIN INSERT INTO
 CREATE TRIGGER IF NOT EXISTS ev_acc_u AFTER UPDATE ON accounts BEGIN INSERT INTO events(kind, ref_id) VALUES ('account', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_pst_i AFTER INSERT ON psts BEGIN INSERT INTO events(kind, ref_id) VALUES ('pst', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_pst_u AFTER UPDATE ON psts BEGIN INSERT INTO events(kind, ref_id) VALUES ('pst', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_plan_i AFTER INSERT ON plans BEGIN INSERT INTO events(kind, ref_id) VALUES ('plan', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_plan_u AFTER UPDATE ON plans BEGIN INSERT INTO events(kind, ref_id) VALUES ('plan', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_cmp_i AFTER INSERT ON compares BEGIN INSERT INTO events(kind, ref_id) VALUES ('compare', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_cmp_u AFTER UPDATE ON compares BEGIN INSERT INTO events(kind, ref_id) VALUES ('compare', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_chunk_i AFTER INSERT ON upload_chunks BEGIN INSERT INTO events(kind, ref_id) VALUES ('upload', NEW.pst_id); END;
 """
 
@@ -235,7 +272,15 @@ def _migrate_job_trigger(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
     items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
-    accounts.source_* / target_* (NULL: the PST of the account, written to its server) and items.source_ref."""
+    accounts.source_* / target_* (NULL: the PST of the account, written to its server), items.source_ref and the
+    planning columns: servers.policy / accounts.policy (JSON: folder mapping, filters, allowed hours, bandwidth),
+    jobs.batch_id / jobs.priority / jobs.pause_reason (see docs/planning.md)."""
+    _add_column(conn, "servers", "policy TEXT")
+    _add_column(conn, "accounts", "policy TEXT")
+    _add_column(conn, "jobs", "batch_id INTEGER")
+    _add_column(conn, "jobs", "priority INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "jobs", "pause_reason TEXT")  # NULL: paused by the administrator; 'window': outside allowed hours
+    conn.execute("CREATE INDEX IF NOT EXISTS jobs_batch ON jobs(batch_id)")
     for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
                 "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
         _add_column(conn, "accounts", ddl)
