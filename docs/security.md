@@ -1,6 +1,6 @@
 # Security
 
-This page lists what mccb protects, and what it does not.
+This page lists what MCCB protects, and what it does not.
 
 ## What it does
 

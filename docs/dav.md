@@ -1,6 +1,6 @@
 # Calendars and contacts (DAV)
 
-This page explains how mccb finds the CalDAV and CardDAV collections to write to.
+This page explains how MCCB finds the CalDAV and CardDAV collections to write to.
 
 `caldav_url` / `carddav_url` fields of the server:
 

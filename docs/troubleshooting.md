@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Each entry gives a symptom and what to check. All of it comes from how mccb behaves; see the linked pages for the details.
+Each entry gives a symptom and what to check. All of it comes from how MCCB behaves; see the linked pages for the details.
 
 ## I lost the admin password
 
@@ -16,7 +16,7 @@ The error "password cannot be decrypted (SECRET_KEY changed?)" means the key dif
 
 ## Progress does not update in the browser
 
-Live updates use server-sent events on `/api/events`. Your proxy must not buffer them. See [Put mccb behind a reverse proxy](reverse-proxy.md).
+Live updates use server-sent events on `/api/events`. Your proxy must not buffer them. See [Put MCCB behind a reverse proxy](reverse-proxy.md).
 
 ## Uploads are slow or fail
 

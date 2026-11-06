@@ -1,6 +1,6 @@
 # Security policy
 
-mccb holds the IMAP and DAV passwords of the mailboxes it migrates and reads the PST files of your users. We take reports about it seriously.
+MCCB holds the IMAP and DAV passwords of the mailboxes it migrates and reads the PST files of your users. We take reports about it seriously.
 
 ## Supported versions
 
@@ -40,7 +40,7 @@ Out of scope: vulnerabilities in the servers you migrate to, in the native PST l
 
 ## Hardening notes for operators
 
-- Port 22362 speaks plain HTTP. Put mccb behind a reverse proxy with TLS and publish only the proxy, for example `127.0.0.1:22362:22362` in the compose file. Set `COOKIE_SECURE=1`.
+- Port 22362 speaks plain HTTP. Put MCCB behind a reverse proxy with TLS and publish only the proxy, for example `127.0.0.1:22362:22362` in the compose file. Set `COOKIE_SECURE=1`.
 - Back up `./data` including `secret.key`, and keep it out of screenshots.
 - Disable TLS verification of an IMAP server only for a server you control.
 - Delete uploaded PST files and the data directory when a migration is finished.
