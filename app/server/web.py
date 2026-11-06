@@ -24,7 +24,7 @@ from .security import (admin_created, check_password, check_session, decrypt, en
                        make_session, password_from_env, set_admin_password)
 
 log = logging.getLogger("web")
-COOKIE = "psttoimap_session"
+COOKIE = "mccb_session"
 PUBLIC_API = {"/api/login", "/api/health", "/api/logout", "/api/version"}
 
 
@@ -47,7 +47,7 @@ def _admin_startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_app):
-    log.info("mccb v%s starting (web)", get_version())
+    log.info("MCCB v%s starting (web)", get_version())
     settings.ensure_dirs()
     db.conn()
     _admin_startup()

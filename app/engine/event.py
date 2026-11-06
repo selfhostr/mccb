@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 
 A = mapi.PSETID_APPOINTMENT
 C = mapi.PSETID_COMMON
-PRODID = "-//psttoimap//PST engine//FR"
+PRODID = "-//yety//MCCB//EN"
 _PARTSTAT = {0: "NEEDS-ACTION", 1: "ACCEPTED", 2: "TENTATIVE", 3: "ACCEPTED", 4: "DECLINED",
              5: "NEEDS-ACTION"}
 _BUSY = {0: "FREE", 1: "TENTATIVE", 2: "BUSY", 3: "OOF", 4: "WORKINGELSEWHERE"}

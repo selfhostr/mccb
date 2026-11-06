@@ -25,12 +25,12 @@ function shell() {
   const content = h('main', { id: 'content' });
   const dot = h('span', { class: 'live', id: 'live', title: 'Live updates' });
   const side = h('aside', { class: 'side' },
-    h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('logo', 18)), h('div', null, h('b', null, 'PST Migrator'), h('small', null, 'PST → IMAP / DAV'))),
+    h('div', { class: 'brand' }, h('div', { class: 'logo' }, icon('logo', 18)), h('div', null, h('b', null, 'MCCB'), h('small', null, 'Mail Contact Calendrier Bridge'))),
     h('nav', null, nav.map(([k, t, i, href]) => h('a', { href, 'data-nav': k }, icon(i), h('span', null, t)))),
     h('div', { class: 'side-foot' }, dot, h('span', { id: 'livetxt' }, 'Connecting…'),
       h('span', { class: 'sp' }), h('span', { class: 'ver' }, appVersion),
       h('button', { class: 'icon-btn', title: 'Sign out', onClick: async () => { try { await post('/logout'); } catch {} stopEvents(); showLogin(); } }, icon('out', 16))));
-  const top = h('header', { class: 'topbar' }, h('button', { class: 'icon-btn', onClick: () => document.body.classList.toggle('navopen') }, icon('menu')), h('b', null, 'PST Migrator'));
+  const top = h('header', { class: 'topbar' }, h('button', { class: 'icon-btn', onClick: () => document.body.classList.toggle('navopen') }, icon('menu')), h('b', null, 'MCCB'));
   app.append(h('div', { class: 'layout' }, top, side, content));
   side.addEventListener('click', e => { if (e.target.closest('a')) document.body.classList.remove('navopen'); });
   setLive(sseOk);
@@ -73,8 +73,8 @@ function showLogin(msg) {
     try { await post('/login', { password: pw.value }, { noAuthRedirect: true }); await boot(); }
     catch (x) { err.textContent = x.status === 401 || x.status === 403 ? 'Incorrect password.' : x.message; pw.select(); }
   } },
-    h('div', { class: 'logo big' }, icon('logo', 28)), h('h1', null, 'PST Migrator'),
-    h('p', { class: 'muted' }, 'Migrate PST mailboxes to IMAP, CalDAV and CardDAV'), pw, err,
+    h('div', { class: 'logo big' }, icon('logo', 28)), h('h1', null, 'MCCB'),
+    h('p', { class: 'muted' }, 'Mail Contact Calendrier Bridge'), pw, err,
     btn('Sign in', { kind: 'primary', type: 'submit' }), h('small', { class: 'ver' }, appVersion));
   app.append(h('div', { class: 'login' }, form));
 }

@@ -41,7 +41,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
-            org.opencontainers.image.title=mccb
+            org.opencontainers.image.title=MCCB
             org.opencontainers.image.description=Web tool to migrate Outlook PST/OST mailboxes to IMAP, CalDAV and CardDAV
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}

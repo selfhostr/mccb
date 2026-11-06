@@ -13,7 +13,7 @@ def test_auth_required(env):
         assert c.get("/api/me").json()["authenticated"] is True
         c.post("/api/logout")
         assert c.get("/api/me").status_code == 401
-        c.cookies.set("psttoimap_session", "forge.xxx")
+        c.cookies.set("mccb_session", "forge.xxx")
         assert c.get("/api/me").status_code == 401
 
 
