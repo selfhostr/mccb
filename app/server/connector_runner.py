@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from ..connectors import wiring
-from ..connectors.base import (CAP_PARALLEL, CAP_READBACK, MAIL, ConnectorError, OutgoingItem, Target, stamp_import_id)
+from ..connectors.base import (CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, OutgoingItem, Target,
+                               stamp_import_id)
 from . import crash, db, ordering
 from .config import settings
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
@@ -22,8 +23,10 @@ from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFai
 from .tuner import ErrorNote, classify_error
 
 MAX_SOURCE_ERRORS = 5  # items in a row whose fetch fails after its retries: the source is down, not the items
-DAV_EXT = {"calendar": "ics", "contacts": "vcf"}
-PHASE_OF_KIND = {kind: phase for phase, kind in KIND_OF_PHASE.items()}
+DAV_EXT = {"calendar": "ics", "contacts": "vcf", TASKS: "ics"}
+# tasks only exist on this route: the historical path, its progress and its reports know three kinds
+CARRIED = {**KIND_OF_PHASE, TASKS: "task"}
+PHASE_OF_KIND = {kind: phase for phase, kind in CARRIED.items()}
 
 
 def as_connector_error(e: BaseException) -> ConnectorError:
@@ -124,6 +127,7 @@ class ConnectorJobRunner(JobRunner):
         self.plans: dict[str, dict] = {}
         self.setup_error: str | None = None
         self.source_errors = 0
+        self.totals["task"] = 0
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -173,9 +177,22 @@ class ConnectorJobRunner(JobRunner):
         self._save_tuning()
         self.log("This route reads items in the job process: no builder process, only the connections are tuned")
 
+    def _wanted(self, phase: str) -> bool:
+        """Tasks have no option of their own: they follow the calendars."""
+        return bool(self.acc["opt_calendar" if phase == TASKS else f"opt_{phase}"])
+
     def _phase_enabled(self, kind: str) -> bool:
         phase = PHASE_OF_KIND[kind]
-        return bool(self.acc[f"opt_{phase}"]) and phase in self.targets
+        return self._wanted(phase) and phase in self.targets
+
+    def recompute_progress(self) -> None:
+        super().recompute_progress()
+        rows = db.q("SELECT status, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind='task' GROUP BY status",
+                    (self.account_id, self.pst_key))
+        c = {r["status"]: r["n"] for r in rows}
+        if c or self.totals["task"]:
+            self.progress[TASKS] = {"done": c.get("ok", 0) + c.get("skipped", 0), "total": self.totals["task"],
+                                    "errors": c.get("error", 0)}
 
     def _execute(self) -> None:
         if self.setup_error:
@@ -200,9 +217,9 @@ class ConnectorJobRunner(JobRunner):
                 raise JobFailed(f"Source ({self.source_kind}): {e}") from e
             self._mark()
             phases = []
-            for phase, kind in KIND_OF_PHASE.items():
+            for phase, kind in CARRIED.items():
                 mine = [f for f in self.folders if f.kind == phase]
-                if not mine or not self.acc[f"opt_{phase}"]:
+                if not mine or not self._wanted(phase):
                     continue
                 if phase not in self.targets:
                     self.log(f"{len(mine)} {phase} folder(s) at the source, no target for them: not migrated", "warning")
@@ -214,6 +231,8 @@ class ConnectorJobRunner(JobRunner):
             for phase in phases:
                 self._run_phase(phase)
             self.verify_targets(phases)
+            if TASKS in phases:
+                self.report[TASKS] = dict(self.progress.get(TASKS) or {})
         finally:
             self.source.close()
 
@@ -318,7 +337,7 @@ class ConnectorJobRunner(JobRunner):
 
     def _run_phase(self, phase: str) -> None:
         self.set_phase(phase)
-        kind = KIND_OF_PHASE[phase]
+        kind = CARRIED[phase]
         target = self.targets[phase]
         plan = self.plans[phase]
         session = target.session()
@@ -448,7 +467,7 @@ class ConnectorJobRunner(JobRunner):
     def _check_target(self, session, phase: str, fkey: str, target: str) -> dict:
         """Items of ours present in a target folder >= items marked as sent to it. Pre-existing content is not
         counted. Same report entries as the PST path."""
-        kind = KIND_OF_PHASE[phase]
+        kind = CARRIED[phase]
         where = (self.account_id, self.pst_key, kind, target)
         n_ok = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? AND "
                      "status='ok'", where)["n"]
@@ -477,7 +496,7 @@ class ConnectorJobRunner(JobRunner):
         problems: list[str] = []
         verify: dict = {}
         for phase in phases:
-            kind = KIND_OF_PHASE[phase]
+            kind = CARRIED[phase]
             target = self.targets[phase]
             session = target.session()
             try:

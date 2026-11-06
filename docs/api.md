@@ -34,6 +34,12 @@ JSON over HTTP, `/api` prefix, session cookie. `/docs`, `/redoc` and `/openapi.j
   (`secrets` omitted with `account_id`: those stored on the account for this kind) →
   `{ok:true,msg,folders:[{path,kind,special,count}]}` for a source, `{ok:true,msg,quota,...}` for a target,
   `{ok:false,error_kind:'auth'|'config'|'unreachable'|'transient'|'rejected'|'quota'|'folder_missing',msg}` when refused.
+  Exchange kinds and their fields: see [Exchange](exchange.md). A job's `progress` and report gain `tasks` on routes that carry tasks.
+  `POST /api/accounts/{id}/rules {delimiter?,root_folder?,trash_folder?,managesieve?:{host?,port?,security?,verify_tls?,login?,password?,script_name?,activate?}}`
+  reads the inbox rules of a source with the `rules` capability and converts them to Sieve, best effort →
+  `{ok:true,script,converted:[name],partial:[{name,dropped:[...]}],not_converted:[{name,reasons:[...]}],warnings:[...],uploaded,activated,upload_error:{error_kind,msg}|null}`,
+  `{ok:false,error_kind,msg}` if the source refuses. `managesieve` uploads the script (default host, login and password: those of the account);
+  it is not activated unless `activate` is true. **422** if the source cannot read rules.
 - PST upload (resumable):
   `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
   `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 `{n,ok}` / 422 if wrong hash

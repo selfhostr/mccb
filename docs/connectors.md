@@ -8,8 +8,13 @@ A route is a source and a target. `JobRunner` keeps the state: pause, stop, resu
 |---|---|---|---|
 | `pst` | yes | | mail, calendar, contacts |
 | `imap` | yes | yes | mail |
-| `caldav` | | yes | calendar |
-| `carddav` | | yes | contacts |
+| `imap_oauth2` | yes | yes | mail |
+| `caldav` | yes | yes | calendar, tasks |
+| `carddav` | yes | yes | contacts |
+| `exchange_ews` | yes | yes | mail, calendar, contacts, tasks |
+| `m365_graph` | yes | yes | mail, calendar, contacts, tasks |
+
+The Exchange connectors have been tested against simulated servers, not real Exchange: see [Exchange](exchange.md).
 
 `GET /api/connectors` returns this catalogue with the capabilities and the fields of each role. The UI renders its forms from it, so a new kind needs no UI code.
 
@@ -17,7 +22,7 @@ A route is a source and a target. `JobRunner` keeps the state: pause, stop, resu
 
 - `source_kind` empty: the PST linked to the account. `target_kind` empty: the server of the account (IMAP and DAV, with the account's password).
 - Both empty is the historical path of `JobRunner`, with its builder processes. Accounts created before connectors existed stay on it, unchanged.
-- Anything else runs in `app/server/connector_runner.py`, one path for every kind.
+- Anything else runs in `app/server/connector_runner.py`, one path for every kind. This path also carries tasks, to a target that declares them: they follow the calendar option of the account.
 
 ## Add a connector
 
@@ -68,4 +73,4 @@ A field declared with `secret=True` is refused in `config`, stored encrypted wit
 
 ## Tests
 
-`tests/server/test_connectors.py` runs the route with no network service, through the in-memory connectors. `tests/server/test_connectors_imap.py` runs IMAP to IMAP against GreenMail.
+`tests/server/test_connectors.py` runs the route with no network service, through the in-memory connectors. `tests/server/test_connectors_imap.py` runs IMAP to IMAP against GreenMail. `tests/server/test_connectors_exchange.py` runs the Exchange connectors against the simulated servers of `tests/server/fake_exchange.py`.

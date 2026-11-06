@@ -7,7 +7,7 @@ import json
 from ..server import db
 from ..server.security import decrypt, encrypt
 from . import registry
-from .base import CALENDAR, CONTACTS, MAIL, ConnectorError, Source, Target
+from .base import CALENDAR, CONTACTS, MAIL, TASKS, ConnectorError, Source, Target
 
 PST = "pst"
 
@@ -89,10 +89,12 @@ def targets_of_account(acc, srv) -> dict[str, Target]:
                 out[item] = registry.make_target(kind, {
                     "url": srv[col], "login": login, "email": acc["email"], "verify_tls": verify,
                     "discovery_host": srv["imap_host"]}, secrets)
+            out[TASKS] = out[CALENDAR].for_item(TASKS)
     kind = acc["target_kind"]
     if kind:
         role = registry.role_of(kind, "target")
         own = role.factory(db.jload(acc["target_config"], {}) or {}, load_secrets(acc["target_secret_enc"]), {})
         for item in role.items:
-            out[item] = own
+            pick = getattr(own, "for_item", None)  # DAV: tasks do not go to the same collection as events
+            out[item] = pick(item) if pick is not None else own
     return out

@@ -7,9 +7,10 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..connectors import registry, wiring
-from ..connectors.base import ConnectorError
+from ..connectors import registry, sieve, wiring
+from ..connectors.base import CAP_RULES, ConnectorError
 from . import db, repo
+from .security import decrypt
 
 router = APIRouter(prefix="/api")
 ACTIVE = "('queued','running','paused','stopping')"
@@ -27,6 +28,24 @@ class ProbeIn(BaseModel):
     config: dict[str, Any] | None = None
     secrets: dict[str, str] | None = None
     account_id: int | None = None  # secrets omitted: those stored for this kind on this account
+
+
+class ManageSieveIn(BaseModel):
+    host: str | None = None        # default: the IMAP host of the account's server
+    port: int = 4190
+    security: Literal["starttls", "ssl", "none"] = "starttls"
+    verify_tls: bool = True
+    login: str | None = None       # default: those of the account
+    password: str | None = None
+    script_name: str = sieve.DEFAULT_SCRIPT
+    activate: bool = False         # replaces the active script of the user
+
+
+class RulesIn(BaseModel):
+    delimiter: str = "/"
+    root_folder: str = ""
+    trash_folder: str = "Trash"
+    managesieve: ManageSieveIn | None = None
 
 
 def _account(aid: int):
@@ -141,3 +160,44 @@ def test_connector(kind: str, body: ProbeIn):
             session.close()
     except ConnectorError as e:
         return {"ok": False, "error_kind": e.kind, "msg": str(e)}
+
+
+@router.post("/accounts/{aid:int}/rules")
+def convert_rules(aid: int, body: RulesIn):
+    """Inbox rules of the account's source as a Sieve script, uploaded if `managesieve` is given. Best effort: see
+    docs/exchange.md. A refused connection is an answer, not an HTTP error: {ok: false, error_kind, msg}."""
+    r = _account(aid)
+    kind = wiring.source_kind(r)
+    spec = registry.get(kind)
+    if spec is None or spec.source is None or CAP_RULES not in spec.source.capabilities:
+        raise HTTPException(422, f"source '{kind}' cannot read mail rules")
+    try:
+        with wiring.source_of_account(r) as src:
+            rules = src.read_rules()
+    except ConnectorError as e:
+        return {"ok": False, "error_kind": e.kind, "msg": str(e)}
+    out = sieve.convert(rules, body.delimiter, body.root_folder, body.trash_folder)
+    out.update(ok=True, uploaded=False, activated=False, upload_error=None)
+    ms = body.managesieve
+    if ms is None:
+        return out
+    srv = db.q1("SELECT imap_host FROM servers WHERE id=?", (r["server_id"],))
+    host = ms.host or (srv["imap_host"] if srv else "")
+    login = ms.login or r["login"] or r["email"]
+    password = ms.password
+    if password is None and r["password_enc"]:
+        try:
+            password = decrypt(r["password_enc"])
+        except ValueError as e:
+            out["upload_error"] = {"error_kind": ConnectorError.CONFIG, "msg": str(e)}
+            return out
+    if not host or not password:
+        out["upload_error"] = {"error_kind": ConnectorError.CONFIG, "msg": "ManageSieve: no host or no password"}
+        return out
+    try:
+        sieve.upload(out["script"], host, login, password, ms.port, ms.security, ms.verify_tls, ms.script_name, ms.activate)
+    except ConnectorError as e:
+        out["upload_error"] = {"error_kind": e.kind, "msg": str(e)}
+        return out
+    out.update(uploaded=True, activated=ms.activate)
+    return out

@@ -108,7 +108,7 @@ def test_catalogue_declares_every_builtin():
     assert {"imap", "pst", "caldav", "carddav"} <= set(cat)
     assert cat["imap"]["source"]["items"] == ["mail"] and cat["imap"]["target"]["items"] == ["mail"]
     assert "incremental" in cat["imap"]["source"]["capabilities"]
-    assert cat["caldav"]["source"] is None and cat["pst"]["target"] is None
+    assert cat["caldav"]["source"]["items"] == ["calendar", "tasks"] and cat["pst"]["target"] is None
     pw = [f for f in cat["imap"]["source"]["fields"] if f["name"] == "password"][0]
     assert pw["secret"] is True and pw["type"] == "password"
     assert [f for f in cat["imap"]["source"]["fields"] if f["name"] == "security"][0]["options"]

@@ -18,7 +18,7 @@
     is the limit whatever the tuning. A PST sent to another target has no builder processes either.
   - One whole message is held in memory while it is sent; `BUILD_MAX_INFLIGHT_MB` bounds the total, not a single message.
   - An account still needs a server, even with its own target: the tuning settings come from it.
-  - Tasks are listed by the interface, but no route migrates them.
+  - Tasks go where the target can hold them: Exchange to Exchange, CalDAV `VTODO`, in either direction. They follow the calendar option of the account. A PST source does not read them, an IMAP target cannot hold them.
   - Every calendar or address book of a source goes to one DAV collection.
 - **IMAP as a source**:
   - One pass, not a sync: a flag changed or a message deleted at the source after its copy is not carried over. A rerun lists every
@@ -41,6 +41,13 @@
   - After 2000 log lines about single items in a run, the next ones are only in the report (5000 at most) and the errors list.
   - `SEARCH HEADER` on a large folder can be slow on servers without a header index, and each resume or final check runs one per folder.
 - **Auto-tuning signals.** A connection limit is learned by hitting it: the job then gets a few errors from the server, which it retries. Without `/proc/pressure/io` and without a block device behind the PST folder (network mount, for example), a saturated disk is not seen. The connection budget is counted per server entry: two entries pointing at one real server have one budget each.
+- **Exchange** (see [Exchange](exchange.md), which lists these in full):
+  - The Exchange connectors have been tested against simulated servers, not real Exchange.
+  - Graph imports mail through a beta API, or as drafts through the stable one. The received date becomes the date of the import. IMAP with OAuth2 keeps it.
+  - Graph mails every attendee of an event it creates: by default attendees are written as text in the body. Organisers and responses are not kept on an Exchange target.
+  - `m365_graph` does not migrate archive mailboxes: Graph's mail API does not expose them.
+  - Attachments of events and contact photos are not copied. Bodies of events, contacts and tasks are plain text.
+  - Mail rules are converted to Sieve as best effort, what has no equivalent is reported and not guessed.
 - **No Swagger UI**: `/docs`, `/redoc` and `/openapi.json` are disabled (the API reference
   is in [API](api.md)).
 - **In-memory login rate limiting**: 5 failures / 5 min per IP, reset when `web` restarts.
