@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "Para archivos sin dominio en el nombre: jane.doe.pst va a jane.doe@ seguido del dominio de ese servidor.",
 	"settings_intake_domains_set": "Definidos: {count}",
 	"settings_intake_inbox": "Vigilar la carpeta de entrega",
-	"settings_intake_inbox_hint": "Solo se toman archivos .pst y .ost, cuando dejan de cambiar.",
+	"settings_intake_inbox_hint": "Se toman archivos de correo, calendario y contactos, y archivos comprimidos, cuando dejan de cambiar.",
 	"settings_intake_load_failed": "No se pudieron cargar los ajustes",
 	"settings_intake_sentence": "Los archivos copiados en una carpeta del servidor se recogen y analizan, y pueden asignarse solos a su cuenta.",
 	"settings_intake_start": "Iniciar también la importación",

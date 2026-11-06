@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "Per i file senza dominio nel nome: jane.doe.pst va a jane.doe@ seguito dal dominio di quel server.",
 	"settings_intake_domains_set": "Impostati: {count}",
 	"settings_intake_inbox": "Controlla la cartella di deposito",
-	"settings_intake_inbox_hint": "Vengono presi solo i file .pst e .ost, quando smettono di cambiare.",
+	"settings_intake_inbox_hint": "Vengono presi file di posta, calendario e contatti e archivi, quando smettono di cambiare.",
 	"settings_intake_load_failed": "Impossibile caricare le impostazioni",
 	"settings_intake_sentence": "I file copiati in una cartella del server vengono presi e analizzati, e possono essere assegnati da soli al loro account.",
 	"settings_intake_start": "Avvia anche l'importazione",

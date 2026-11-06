@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "For files named without a domain: jane.doe.pst goes to jane.doe@ followed by the domain of that server.",
 	"settings_intake_domains_set": "Set: {count}",
 	"settings_intake_inbox": "Watch the drop folder",
-	"settings_intake_inbox_hint": "Only .pst and .ost files are taken, once they stop changing.",
+	"settings_intake_inbox_hint": "Mail, calendar and contact files and archives are taken, once they stop changing.",
 	"settings_intake_load_failed": "The settings could not be loaded",
 	"settings_intake_sentence": "Files copied into a folder on the server are picked up and analysed, and can be assigned to their account on their own.",
 	"settings_intake_start": "Start the import too",

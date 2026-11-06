@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "Для файлов без домена в имени: jane.doe.pst попадает в jane.doe@ с доменом этого сервера.",
 	"settings_intake_domains_set": "Задано: {count}",
 	"settings_intake_inbox": "Следить за папкой для файлов",
-	"settings_intake_inbox_hint": "Берутся только файлы .pst и .ost, когда они перестают меняться.",
+	"settings_intake_inbox_hint": "Берутся файлы почты, календаря и контактов, а также архивы, когда они перестают меняться.",
 	"settings_intake_load_failed": "Не удалось загрузить настройки",
 	"settings_intake_sentence": "Файлы, скопированные в папку на сервере, подхватываются и анализируются, а затем могут сами назначаться своей учётной записи.",
 	"settings_intake_start": "Также запускать импорт",

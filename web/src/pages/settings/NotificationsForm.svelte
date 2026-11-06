@@ -111,6 +111,7 @@
 
 	<div class="flex flex-col gap-3" data-testid="notify-ntfy">
 		<Toggle checked={draft.ntfy.enabled} label={m.settings_notifications_ntfy_use()} onchange={(v) => (draft.ntfy.enabled = v)} />
+		{#if draft.ntfy.enabled}
 		<div class="grid max-w-[460px] grid-cols-1 gap-3">
 			<Field label={m.settings_notifications_url()}>
 				<input class="input font-mono" type="url" autocomplete="off" bind:value={draft.ntfy.url} data-testid="ntfy-url" />
@@ -127,6 +128,7 @@
 		</div>
 		{#if publicNtfy}
 			<Notice><p class="m-0" data-testid="ntfy-public-warning">{m.settings_notifications_public_warning()}</p></Notice>
+		{/if}
 		{/if}
 	</div>
 

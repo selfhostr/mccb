@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "对于文件名不含域名的文件：jane.doe.pst 会分配给 jane.doe@ 加上该服务器的域名。",
 	"settings_intake_domains_set": "已设置：{count}",
 	"settings_intake_inbox": "监视投放文件夹",
-	"settings_intake_inbox_hint": "仅收取 .pst 和 .ost 文件，且在文件不再变化后。",
+	"settings_intake_inbox_hint": "收取邮件、日历和联系人文件以及压缩包，且在文件不再变化后。",
 	"settings_intake_load_failed": "无法加载设置",
 	"settings_intake_sentence": "复制到服务器文件夹中的文件会被收取并分析，也可以自动分配给对应账户。",
 	"settings_intake_start": "同时开始导入",

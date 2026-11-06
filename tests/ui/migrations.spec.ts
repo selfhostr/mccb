@@ -278,6 +278,8 @@ test.describe('migrations', () => {
 		await expect(page.getByTestId('selection-count')).toContainText(/5[\s,.  ]?000/);
 
 		await mock(page.request, 'burst', { rounds: 3, gap: 50 });
+		// Reaching the select-all box scrolled back up: the last row left the window.
+		await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
 		await expect(row(page, 'user05000@example.com').locator('[data-job-link]')).toBeVisible();
 	});
 

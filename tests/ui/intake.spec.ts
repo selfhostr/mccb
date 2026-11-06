@@ -15,13 +15,14 @@ test.describe('settings: notifications', () => {
 		await expect(page.getByTestId('ntfy-public-warning')).toHaveCount(0);
 		await expect(page.getByTestId('notify-save')).toBeDisabled();
 
+		await expect(page.getByTestId('ntfy-topic')).toHaveCount(0);
+		await section.getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await page.getByTestId('ntfy-topic').fill('mccb-7f3k9');
 		await expect(page.getByTestId('ntfy-public-warning')).toContainText('anyone who knows the topic name can read');
 		await page.getByTestId('ntfy-url').fill('https://ntfy.example.org');
 		await expect(page.getByTestId('ntfy-public-warning')).toHaveCount(0);
 		await page.getByTestId('ntfy-url').fill('https://ntfy.sh');
 
-		await section.getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await section.getByRole('checkbox', { name: /^Send notifications/ }).check();
 		await page.getByTestId('ntfy-token').fill('tk_secret');
 		await page.getByTestId('notify-save').click();
@@ -57,8 +58,8 @@ test.describe('settings: notifications', () => {
 		await form.getByText('Webhook and e-mail').click();
 		await expect(form.getByTestId('webhook-url')).toBeVisible();
 
-		await page.getByTestId('ntfy-topic').fill('mccb-7f3k9');
 		await form.getByRole('checkbox', { name: 'Use ntfy' }).check();
+		await page.getByTestId('ntfy-topic').fill('mccb-7f3k9');
 		await form.getByRole('checkbox', { name: 'Send to a webhook' }).check();
 		await page.getByTestId('webhook-url').fill('https://hooks.example.com/fail');
 		// The test uses what is stored: edits are saved first.

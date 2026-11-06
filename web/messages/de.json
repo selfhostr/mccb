@@ -308,7 +308,7 @@
 	"settings_intake_domains_hint": "Für Dateien ohne Domain im Namen: jane.doe.pst geht an jane.doe@ plus die Domain dieses Servers.",
 	"settings_intake_domains_set": "Gesetzt: {count}",
 	"settings_intake_inbox": "Ablageordner überwachen",
-	"settings_intake_inbox_hint": "Nur .pst- und .ost-Dateien werden übernommen, sobald sie sich nicht mehr ändern.",
+	"settings_intake_inbox_hint": "Mail-, Kalender- und Kontaktdateien sowie Archive werden übernommen, sobald sie sich nicht mehr ändern.",
 	"settings_intake_load_failed": "Die Einstellungen konnten nicht geladen werden",
 	"settings_intake_sentence": "Dateien, die in einen Ordner auf dem Server kopiert werden, werden übernommen und analysiert und können selbstständig ihrem Konto zugewiesen werden.",
 	"settings_intake_start": "Import ebenfalls starten",
