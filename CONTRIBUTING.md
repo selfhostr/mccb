@@ -21,11 +21,13 @@ docker compose -f docker-compose.test.yml run --rm --build tests
 docker compose -f docker-compose.test.yml down -v      # cleanup
 ```
 
-The unit test of the web upload code needs nothing installed:
+The web UI (`web/`) has its own checks, run in a Node container:
 
 ```bash
-docker run --rm -v "$PWD":/w -w /w node:22-slim node --test 'tests/web/*.test.mjs'
+docker run --rm -v "$PWD":/w -w /w/web node:26-slim sh -c "npm ci && npm run check && npm test && npm run build"
 ```
+
+The browser tests (`tests/ui/`, against the mock API in `tests/ui/mock-api.mjs`) need Playwright's Chromium: `npx playwright install --with-deps chromium`, then `npm run test:ui`. See [web/messages/README.md](web/messages/README.md) for translations.
 
 CI (`.github/workflows/tests.yml`) runs the first command on every pull request and every push to `main`. Run it before opening a pull request. See [Development](docs/development.md) and [Specification](docs/specification.md).
 
@@ -40,7 +42,8 @@ CI (`.github/workflows/tests.yml`) runs the first command on every pull request 
 ## Conventions
 
 - Python code follows the existing style; the engine (`app/engine/`) stays pure, with no network access.
-- The web UI is static (`app/web/`), with vendored JavaScript: no Node build step.
+- The web UI lives in `web/` (Svelte 5, Vite, Tailwind 4, Paraglide). The build goes to `app/web/`, which is generated and not committed. The Docker image builds it in a Node stage.
+- Every visible string goes through Paraglide in nine locales, colours are tokens from `web/src/tokens.css`, primitives live in `web/src/lib/ui/`.
 - Never log or return a mailbox password.
 - Pull requests that change the UI include before and after screenshots.
 

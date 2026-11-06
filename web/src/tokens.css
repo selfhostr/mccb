@@ -1,0 +1,83 @@
+/* Section 3.1 and 6 of the yety guidelines. Same names in both themes. */
+:root,
+html[data-theme='dark'] {
+	color-scheme: dark;
+	--c-canvas: #07080a;
+	--c-canvas-deep: #050607;
+	--c-surface: #0b0d10;
+	--c-surface-2: #111419;
+	--c-line: #16191e;
+	--c-line-strong: #23272e;
+	--c-ink: #eceef1;
+	--c-ink-2: #8a919c;
+	--c-ink-3: #7a818c;
+	--c-ghost: rgb(236 238 241 / 0.08);
+	--c-signal: #2fd17c;
+	--c-signal-ink: #7be3a8;
+	--c-signal-soft: rgb(47 209 124 / 0.12);
+	--c-advisory: #f2b033;
+	--c-advisory-ink: #f7c766;
+	--c-advisory-soft: rgb(242 176 51 / 0.13);
+	--c-warning: #ff5c5c;
+	--c-warning-ink: #ff8a8a;
+	--c-warning-soft: rgb(255 92 92 / 0.13);
+	--c-info: #7da9ff;
+	--c-info-ink: #b3ccff;
+	--c-info-soft: rgb(125 169 255 / 0.13);
+	--c-primary: #eceef1;
+	--c-on-primary: #07080a;
+	--c-scrim: rgb(0 0 0 / 0.6);
+	--c-shadow-lift: 0 1px 0 rgb(255 255 255 / 0.02) inset, 0 1px 2px rgb(0 0 0 / 0.5);
+	--c-shadow-float: 0 2px 8px rgb(0 0 0 / 0.5), 0 24px 48px -16px rgb(0 0 0 / 0.8);
+}
+
+html[data-theme='light'] {
+	color-scheme: light;
+	--c-canvas: #f6f6f7;
+	--c-canvas-deep: #eeeef0;
+	--c-surface: #ffffff;
+	--c-surface-2: #efeff1;
+	--c-line: #e4e4e7;
+	--c-line-strong: #8e8e96;
+	--c-ink: #18181b;
+	--c-ink-2: #52525b;
+	--c-ink-3: #63636b;
+	--c-ghost: rgb(24 24 27 / 0.08);
+	--c-signal: #16a34a;
+	--c-signal-ink: #166534;
+	--c-signal-soft: rgb(22 163 74 / 0.12);
+	--c-advisory: #d97706;
+	--c-advisory-ink: #8a3c0a;
+	--c-advisory-soft: rgb(217 119 6 / 0.13);
+	--c-warning: #d11f1f;
+	--c-warning-ink: #b42318;
+	--c-warning-soft: rgb(209 31 31 / 0.1);
+	--c-info: #2563eb;
+	--c-info-ink: #1d4ed8;
+	--c-info-soft: rgb(37 99 235 / 0.1);
+	--c-primary: #18181b;
+	--c-on-primary: #ffffff;
+	--c-scrim: rgb(24 24 27 / 0.4);
+	--c-shadow-lift: 0 1px 2px rgb(24 24 27 / 0.08);
+	--c-shadow-float: 0 2px 8px rgb(24 24 27 / 0.1), 0 24px 48px -16px rgb(24 24 27 / 0.25);
+}
+
+:root {
+	--font-ui: 'Inter Variable', 'Segoe UI', system-ui, sans-serif;
+	--font-code: 'JetBrains Mono Variable', ui-monospace, monospace;
+	--gutter: 16px;
+	--ease: cubic-bezier(0.16, 1, 0.3, 1);
+	--row-h: 52px;
+	--bar-h: 56px;
+	--tab-h: 56px;
+}
+
+html[data-density='comfortable'] {
+	--row-h: 64px;
+}
+
+@media (min-width: 600px) {
+	:root {
+		--gutter: 24px;
+	}
+}

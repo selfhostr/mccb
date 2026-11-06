@@ -1,0 +1,38 @@
+{
+  "name": "mccb-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "mock": "node ../tests/ui/mock-api.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --strategy localStorage preferredLanguage baseLocale --output-structure locale-modules --emit-ts-declarations --silent && svelte-check --tsconfig ./tsconfig.json && node scripts/i18n-check.mjs",
+    "test": "vitest run",
+    "test:ui": "playwright test --config playwright.config.ts",
+    "i18n:check": "node scripts/i18n-check.mjs",
+    "licences": "node scripts/check-licences.mjs"
+  },
+  "devDependencies": {
+    "@inlang/paraglide-js": "^3.2.0",
+    "@inlang/plugin-message-format": "^4.6.0",
+    "@playwright/test": "^1.65.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tailwindcss/vite": "^4.3.5",
+    "svelte": "^5.57.3",
+    "svelte-check": "^4.7.8",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@lucide/svelte": "^1.70.0"
+  },
+  "imports": {
+    "#lib/*": "./src/lib/*"
+  }
+}
