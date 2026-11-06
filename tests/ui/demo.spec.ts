@@ -116,7 +116,7 @@ test('an upload is simulated and the file becomes valid', async ({ page }) => {
 
 test('starting an import runs a job', async ({ page }) => {
 	await open(page);
-	const email = 'hana.kovacs@example.com';
+	const email = 'ines.costa@example.com';
 	await row(page, email).getByRole('checkbox').check();
 	await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
 	await page.getByTestId('import-confirm').click();
