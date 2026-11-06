@@ -20,7 +20,7 @@ body:
     attributes:
       label: Version
       description: Shown in the sidebar footer, or `curl http://localhost:22362/api/version`.
-      placeholder: 1.1.1
+      placeholder: 1.1.2
     validations:
       required: true
   - type: input
