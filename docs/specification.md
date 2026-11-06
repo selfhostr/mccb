@@ -86,14 +86,14 @@ analysis → PST `invalid` "libpff crash during analysis". A brutal container st
   otherwise a password generated on first start, stored hashed in `data/admin.json` and printed once in the `web` container
   log as a boxed banner containing `Admin password: XXXX`. Reset: delete `data/admin.json` and restart, or set
   `ADMIN_PASSWORD`. Mailbox passwords are encrypted (Fernet, key = `SECRET_KEY` env var, or generated in `data/secret.key` if empty).
-- No Node build: static front-end served by FastAPI (`app/web/`), JS libs **vendored** (works offline).
+- Front-end in `web/` (Svelte 5, Vite, Tailwind 4, Paraglide), built in a Node stage of the Docker image and served statically by FastAPI from `app/web/`. No CDN and no third party at run time (works offline).
 
 ## Layout
 ```
 docker-compose.yml  Dockerfile  .env.example  README.md
 app/engine/   # ENGINE agent: PST reading → EML / vCard / ICS, checks (pure, no network)
 app/server/   # SERVER agent: API, DB, upload, IMAP, DAV, runner/worker
-app/web/      # WEB agent   : static SPA
+web/          # WEB agent   : UI sources; the build goes to app/web/ (generated)
 tests/        # pytest tests; tests/fixtures/ sample PSTs; docker-compose.test.yml (dovecot/greenmail + radicale)
 ```
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+- New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
+- Live events update only what changed, at most once per frame. Rows are keyed and long lists are windowed, so clicks are not lost and open selects stay open during imports.
+- Selection is explicit: what a filter hides is counted, shown and left out of any action. The selection bar is fixed and shifts nothing.
+- Connection tests show a running state, cannot start twice, report IMAP, CalDAV and CardDAV, and stay visible after a reload.
+- Upload queue: one file at a time by default (setting), order chosen when adding several files, reorder, pause, resume, cancel. Hashing no longer blocks the page.
+- Dark and light themes, density, visible columns, mask addresses, nine languages, stored in the browser.
+
 ## 1.1.2
 - The product is now MCCB (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.
 - The session cookie is renamed: everyone signs in again once after the upgrade.

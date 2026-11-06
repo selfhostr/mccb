@@ -17,11 +17,13 @@ docker compose -f docker-compose.test.yml run --rm --build tests
 docker compose -f docker-compose.test.yml down -v      # cleanup
 ```
 
-Unit test of the web code (chunked sending), with nothing to install:
+Web UI (`web/`): type check, translations, unit tests and build, in a Node container. The build goes to `app/web/`, generated and not committed:
 
 ```bash
-docker run --rm -v "$PWD":/w -w /w node:22-slim node --test 'tests/web/*.test.mjs'
+docker run --rm -v "$PWD":/w -w /w/web node:26-slim sh -c "npm ci && npm run check && npm test && npm run build"
 ```
+
+Browser tests (`tests/ui/`) drive that build against a mock API (`tests/ui/mock-api.mjs`, password `admin`). They need Playwright's Chromium: `npx playwright install --with-deps chromium`, then `npm run test:ui`. For UI work, `npm run mock` and `MCCB_DEV_API=http://127.0.0.1:4173 npm run dev` run without the backend.
 
 Coverage: CRUD, authentication, SSE, CSV import (`;` and `,`, optional header, UTF-8, cp1252, BOM),
 resumable upload (chunk with wrong hash → 422, resume, identical final file, disk space

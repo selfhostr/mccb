@@ -1,0 +1,7 @@
+node_modules/
+src/lib/paraglide/
+project.inlang/cache/
+project.inlang/.gitignore
+project.inlang/README.md
+test-results/
+playwright-report/

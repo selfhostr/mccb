@@ -749,11 +749,15 @@ def spa(path: str):
     if path:
         f = (root / path).resolve()
         if f.is_file() and (f == root or root in f.parents):
-            return FileResponse(f)
+            # Hashed file names from the build: the URL changes with the content.
+            immutable = path.startswith("assets/")
+            return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"} if immutable else None)
+        if path.startswith("assets/"):  # a stale page asking for an old chunk must not get HTML
+            raise HTTPException(404, "unknown asset")
     index = root / "index.html"
     if index.is_file():
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
-    return PlainTextResponse("Web interface missing (app/web/index.html)", status_code=200)
+    return PlainTextResponse("Web interface missing: build it with `npm run build` in web/ (app/web/index.html)", status_code=200)
 
 
 def main() -> None:
