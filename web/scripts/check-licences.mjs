@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-const OSI = new Set(['MIT', 'MIT-0', 'ISC', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'OFL-1.1', 'MPL-2.0', 'Python-2.0', 'BlueOak-1.0.0', 'Unlicense', 'Zlib']);
+const OSI = new Set(['MIT', 'MIT-0', 'ISC', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'OFL-1.1', 'MPL-2.0', 'Python-2.0', 'BlueOak-1.0.0', 'Unlicense', 'Zlib']);
 
 function allowed(licence) {
 	if (!licence) return false;
