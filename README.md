@@ -6,7 +6,6 @@
 
 
 [![CI](https://github.com/yetysw/mccb/actions/workflows/tests.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/tests.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/yetysw/mccb/badge)](https://scorecard.dev/viewer/?uri=github.com/yetysw/mccb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
