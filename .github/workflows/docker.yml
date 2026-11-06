@@ -2,7 +2,7 @@ name: Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -37,17 +37,18 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
             org.opencontainers.image.title=MCCB
-            org.opencontainers.image.description=Web tool to migrate Outlook PST/OST mailboxes to IMAP, CalDAV and CardDAV
+            org.opencontainers.image.description=Web tool to migrate mailboxes, calendars and contacts between PST files and mail servers
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
           annotations: |
-            org.opencontainers.image.description=Web tool to migrate Outlook PST/OST mailboxes to IMAP, CalDAV and CardDAV
+            org.opencontainers.image.description=Web tool to migrate mailboxes, calendars and contacts between PST files and mail servers
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 

@@ -85,7 +85,7 @@ def test_default_processes(monkeypatch):
     monkeypatch.delenv("BUILD_PROCESSES", raising=False)
     cpus = {"n": 12}
     monkeypatch.setattr(tuner, "probe_machine", lambda *a, **k: tuner.MachineProbe(cpus["n"], 64 << 30))
-    assert builders.default_processes() == 8
+    assert builders.default_processes() == 11
     cpus["n"] = 4
     assert builders.default_processes() == 3
     cpus["n"] = 1

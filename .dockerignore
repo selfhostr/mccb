@@ -1,4 +1,9 @@
 data/
+web/node_modules/
+web/src/lib/paraglide/
+web/test-results/
+app/web/
+tests/ui/
 .git/
 **/__pycache__/
 *.pst

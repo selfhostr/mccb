@@ -3,7 +3,7 @@
 By the end of this page you will know what happens when a job is paused, stopped or interrupted, and why a resume never duplicates mail.
 
 **Item states.** Each mail, contact or appointment has a row in the `items` table:
-`pending` → `inflight` (marked just before the APPEND) → `ok` or `error` (or `skipped`).
+`pending` → `inflight` (marked just before the APPEND) → `ok` or `error` (or `skipped`). An item left out by a filter is `filtered`: it counts as done, is not an error and is judged again at every run. A message the target refused for its size is an `error` starting with `[oversize]`; a rerun of the whole job leaves it alone, "retry errors" tries it again (see [Plan, filter and control a migration](planning.md)).
 
 **`X-PST-Import-Id` marker.** Each imported mail carries the header `X-PST-Import-Id: <pst_sha-item_key>`.
 The value is delimited by `<` and `>`: no identifier is a prefix of another. On resume:
@@ -22,6 +22,11 @@ SHA-256 of its chunks and its size), not to its internal id. Deleting a PST then
 the same file therefore recovers the already migrated state, without duplicates. **This fingerprint depends on
 `UPLOAD_CHUNK_SIZE`**: with a different chunk size, the same file has a different fingerprint and would be
 treated as a new PST. Keep the value constant for the whole migration of a batch.
+
+**Other sources.** The same states and the same marker apply to every route (see [Connectors](connectors.md)): the header holds
+`<namespace-item_key>`, where the namespace identifies the source mailbox. Items are kept per source, so changing a password
+keeps the state, and going back to a source already migrated sends nothing twice. For an IMAP source, `item_key` comes from the
+folder, UIDVALIDITY and UID; if UIDVALIDITY changes, messages are recognized by Message-ID instead of being copied again.
 
 **Pause, stop.** APPENDs not yet started are cancelled (back to `pending`), those in progress run to completion.
 

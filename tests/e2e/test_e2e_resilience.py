@@ -39,7 +39,7 @@ def _setup(st, prefix: str):
 
 
 def test_worker_sigkill_mid_import_resumes_without_duplicates(stack_factory):
-    st = stack_factory(PSTMIG_TEST_ITEM_DELAY="0.08")
+    st = stack_factory(PSTMIG_TEST_ITEM_DELAY="0.08", BUILD_PROCESSES="1")  # one builder: the job is still running when stopped
     user, acc, pst, model = _setup(st, "kill")
     n_mail = sum(len(v) for v in model["mail"].values())
     jid = st.api("POST", "/api/runs", json={"account_ids": [acc["id"]]}).json()[0]["id"]

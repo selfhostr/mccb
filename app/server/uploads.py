@@ -147,18 +147,22 @@ async def put_chunk(pid: int, n: int, request: Request) -> dict:
             _CHUNK_LOCKS[key] = (lock, users - 1)
 
 
-def _record_chunk(pid: int, n: int, sha: str) -> list[int]:
-    db.ex("INSERT INTO upload_chunks(pst_id, n, sha256) VALUES (?,?,?) "
-          "ON CONFLICT(pst_id, n) DO UPDATE SET sha256=excluded.sha256", (pid, n, sha))
-    db.ex("UPDATE psts SET updated_at=? WHERE id=?", (time.time(), pid))
-    return repo.received_chunks(pid)
+def _record_chunk(pid: int, n: int, sha: str) -> None:
+    with db.tx() as c:
+        c.execute("INSERT INTO upload_chunks(pst_id, n, sha256) VALUES (?,?,?) "
+                  "ON CONFLICT(pst_id, n) DO UPDATE SET sha256=excluded.sha256", (pid, n, sha))
+        c.execute("UPDATE psts SET updated_at=? WHERE id=?", (time.time(), pid))
 
 
-def _finalized_reply(pid: int, n: int, sha: str) -> list[int] | None:
+def _finalized_reply(pid: int, n: int, sha: str) -> bool:
     prev = db.q1("SELECT sha256 FROM upload_chunks WHERE pst_id=? AND n=?", (pid, n))
-    if prev and prev["sha256"] == sha:
-        return repo.received_chunks(pid)
-    return None
+    return bool(prev and prev["sha256"] == sha)
+
+
+def _hash_and_write(h, fd: int, data: bytearray, offset: int) -> None:
+    """In a worker thread: the event loop keeps serving requests, parallel chunks hash on separate cores."""
+    h.update(data)
+    _write_at(fd, data, offset)
 
 
 async def _put_chunk(pid: int, n: int, request: Request) -> dict:
@@ -181,9 +185,8 @@ async def _put_chunk(pid: int, n: int, request: Request) -> dict:
     if row["status"] != "uploading":
         async for _ in request.stream():
             pass
-        rec = await asyncio.to_thread(_finalized_reply, pid, n, expected_sha)
-        if rec is not None:
-            return {"n": n, "ok": True, "received": rec}
+        if await asyncio.to_thread(_finalized_reply, pid, n, expected_sha):
+            return {"n": n, "ok": True}
         raise HTTPException(409, f"upload already finalized (status {row['status']})")
 
     h = hashlib.sha256()
@@ -196,17 +199,14 @@ async def _put_chunk(pid: int, n: int, request: Request) -> dict:
                 continue
             if written + len(buf) + len(part) > expected_len:
                 raise HTTPException(422, f"chunk {n} too long (> {expected_len} bytes)")
-            h.update(part)
             buf += part
             if len(buf) >= WRITE_BUF:
-                data = bytes(buf)
-                buf.clear()
-                await asyncio.to_thread(_write_at, fd, data, offset + written)
+                data, buf = buf, bytearray()
+                await asyncio.to_thread(_hash_and_write, h, fd, data, offset + written)
                 written += len(data)
         if buf:
-            data = bytes(buf)
-            await asyncio.to_thread(_write_at, fd, data, offset + written)
-            written += len(data)
+            await asyncio.to_thread(_hash_and_write, h, fd, buf, offset + written)
+            written += len(buf)
         if written != expected_len:
             raise HTTPException(422, f"chunk {n} incomplete: {written}/{expected_len} bytes")
         got = h.hexdigest()
@@ -215,8 +215,10 @@ async def _put_chunk(pid: int, n: int, request: Request) -> dict:
         await asyncio.to_thread(os.fdatasync, fd)
     finally:
         os.close(fd)
-    received = await asyncio.to_thread(_record_chunk, pid, n, got)
-    return {"n": n, "ok": True, "received": received}
+    await asyncio.to_thread(_record_chunk, pid, n, got)
+    # no list of received chunks here: 16,000 chunks for 500 GB, read and sent again for each of them
+    # (GET /api/uploads/{id} gives it)
+    return {"n": n, "ok": True}
 
 
 def complete(pid: int) -> dict:
@@ -262,6 +264,19 @@ def delete_pst(pid: int) -> None:
     db.ex("DELETE FROM psts WHERE id=?", (pid,))
 
 
+def _scan_other_file(path: str, filename: str) -> dict:
+    """Analysis of a file that is not a PST. Raises ValueError, with the PST message first, when it is none of the
+    supported formats."""
+    from ..connectors import files
+    if not files.looks_like_files(path, filename):
+        raise ValueError("PST signature '!BDN' missing: this is not a PST file, nor a supported mbox, .eml, .msg, "
+                         ".ics, .vcf or .zip file")
+    try:
+        return files.scan_upload(path, filename)
+    except (ValueError, OSError) as e:
+        raise ValueError(f"not a PST; as a mail, calendar or contact file: {e}") from e
+
+
 def validate(pid: int) -> None:
     """Run by the worker: signature + full scan by the engine."""
     from .engine_loader import check_signature, engine
@@ -271,7 +286,12 @@ def validate(pid: int) -> None:
     path = row["path"]
     try:
         if not check_signature(path):
-            raise ValueError("PST signature '!BDN' missing: this is not a PST file")
+            scan = _scan_other_file(path, row["filename"])  # mbox, Maildir, .eml...: see connectors/files.py
+            db.ex("UPDATE psts SET status='valid', scan=?, error=NULL, updated_at=? WHERE id=? AND status='validating'",
+                  (db.jdump(scan), time.time(), pid))
+            from ..connectors import wiring
+            wiring.sync_files_sources_of(pid)
+            return
         eng = engine()
         from .crash import maybe_crash
         maybe_crash("validate")  # test hook (subprocess only)

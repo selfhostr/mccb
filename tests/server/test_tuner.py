@@ -65,6 +65,41 @@ def test_probe_cgroup_v1_unlimited(tmp_path):
     assert (p.cpus, p.mem_available_bytes) == (4, 2048 * 1024)
 
 
+def test_probe_cgroup_file_cache_is_available(tmp_path):
+    """A container reading a large PST has its page cache charged to it: that memory is still available."""
+    root = _cg(tmp_path, {"memory.max": str(1024 * MB), "memory.current": str(1000 * MB),
+                          "memory.stat": f"anon {100 * MB}\ninactive_file {600 * MB}\nactive_file {300 * MB}\n"})
+    p = tuner.probe_machine(root, _meminfo(tmp_path, 8 * 1024 * 1024), cpu_count=4, affinity=range(4))
+    assert p.mem_available_bytes == 924 * MB
+    root = _cg(tmp_path, {"memory/memory.limit_in_bytes": str(1024 * MB), "memory/memory.usage_in_bytes": str(1000 * MB),
+                          "memory/memory.stat": f"total_inactive_file {500 * MB}\n"})
+    (tmp_path / "cg" / "memory.max").unlink()
+    assert tuner.cgroup_mem_available(root) == 524 * MB
+
+
+def test_proc_stat_iowait_is_not_idle(tmp_path):
+    p = tmp_path / "stat"
+    p.write_text("cpu  10 0 10 50 30 0 0 0 0 0\ncpu0 1 1 1 1 1\n")
+    assert tuner.proc_stat(str(p)) == (50.0, 100.0)
+    assert tuner.proc_stat(str(tmp_path / "missing")) is None
+
+
+def test_io_pressure_and_disk_ticks(tmp_path):
+    p = tmp_path / "io"
+    p.write_text("some avg10=12.50 avg60=1.00 avg300=0.00 total=1\nfull avg10=2.00 avg60=0.00 avg300=0.00 total=1\n")
+    assert tuner.io_pressure(str(p)) == 12.5
+    assert tuner.io_pressure(str(tmp_path / "missing")) is None
+    st = (tmp_path / "x")
+    st.write_text("")
+    import os
+    dev = os.stat(st).st_dev
+    d = tmp_path / "sys" / "dev" / "block" / f"{os.major(dev)}:{os.minor(dev)}"
+    d.mkdir(parents=True)
+    (d / "stat").write_text("1 2 3 4 5 6 7 8 9 4242 11\n")
+    assert tuner.disk_io_ticks(str(st), str(tmp_path / "sys")) == 4242
+    assert tuner.disk_io_ticks(str(st), str(tmp_path / "nothing")) is None
+
+
 def test_probe_benchmark_hook(tmp_path):
     root = _cg(tmp_path, {})
     p = tuner.probe_machine(root, _meminfo(tmp_path, 1), cpu_count=2, affinity=[0, 1], benchmark=lambda: 123.0)
@@ -95,7 +130,8 @@ def test_choose_builders_leaves_one_core():
     assert tuner.choose_builders(probe(8)) == 7
     assert tuner.choose_builders(probe(1)) == 1
     assert tuner.choose_builders(probe(2)) == 1
-    assert tuner.choose_builders(probe(32)) == 8  # cap
+    assert tuner.choose_builders(probe(32)) == 31
+    assert tuner.choose_builders(probe(128, mem_mb=64000)) == tuner.MAX_BUILDERS  # cap
 
 
 def test_choose_builders_memory_budget():
@@ -120,7 +156,8 @@ def test_build_processes_override():
 def test_choose_worker_concurrency():
     assert tuner.choose_worker_concurrency(1) == 1
     assert tuner.choose_worker_concurrency(5) == 2
-    assert tuner.choose_worker_concurrency(64) == 4
+    assert tuner.choose_worker_concurrency(64) == 31
+    assert tuner.choose_worker_concurrency(256) == tuner.MAX_JOBS  # cap
     assert tuner.choose_worker_concurrency(64, pending=2) == 2
     assert tuner.choose_worker_concurrency(64, mem_available_bytes=1200 * MB) == 2
     assert tuner.choose_worker_concurrency(64, cap=16, cores_per_job=4) == 15
@@ -326,6 +363,112 @@ def test_ceiling_respected_after_backoff():
     after = hist[first_err + 1:]
     assert max(after) <= 8  # 8 was the highest error-free count (4, 6, 8, then 10 failed)
     assert t.ceiling == 8 and hist[-1] == 8 and not t.fallback
+
+
+def test_one_error_at_a_proven_count_is_not_a_limit():
+    """Regression: one network error at 4 connections set the ceiling at 2 for the rest of the job."""
+    t = AutoTuner(builders=2, max_builders=2)
+    for _ in range(3):
+        t.feed(Sample(40 * MB, 10.0, tuner.BALANCED))
+    d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["* BYE reset"]))
+    assert (d.prev_connections, d.connections, t.ceiling) == (4, 2, 4)
+    hist, _ = run_sim(t, saturating(100), windows=10)
+    assert hist[-1] == 4
+    # a second error at the same count: that is a limit, as before
+    d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["* BYE reset"]))
+    assert d.connections == 2 and t.ceiling == 2
+
+
+def test_ceiling_relaxes_after_a_long_clean_time():
+    t = AutoTuner(builders=2, max_builders=2, connections=16, ceiling_relax_s=100)
+    t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [LIMIT]"]))
+    assert t.ceiling == 8
+    for _ in range(11):
+        t.feed(Sample(MB, 10.0, tuner.BALANCED))
+    assert t.ceiling == 9
+
+
+def test_plateau_is_tried_again():
+    t = AutoTuner(builders=2, max_builders=2, plateau_retry_s=300)
+    hist, logs = run_sim(t, saturating(8), windows=25)  # 250 s
+    assert t.plateau == 8 and set(hist[-5:]) == {8}
+    run_sim(t, saturating(100), windows=40)
+    assert t.plateau is None or t.plateau > 8
+    assert t.connections > 8
+
+
+def test_one_noisy_window_does_not_set_a_plateau():
+    """The gain is measured on 2 windows: mail sizes vary, one poor window must not end the growth."""
+    t = AutoTuner(builders=2, max_builders=2)
+    for r in (10, 10, 10, 15, 1, 40):  # 4 connections, then 6: cooldown, one poor window, one good window
+        t.feed(Sample(r * MB * 10, 10.0, tuner.BACKLOG))
+    assert t.plateau is None and t.connections == 8
+
+
+def test_growth_is_faster_on_many_connections():
+    t = AutoTuner(builders=2, max_builders=2, connections=16, cap=64)
+    hist, _ = run_sim(t, saturating(1000), windows=5)
+    assert max(hist) == 20  # 16 // 4
+
+
+def test_fallback_ends_after_a_quiet_time():
+    t = AutoTuner(builders=6, max_builders=7, cap=16, fallback_recover_s=300)
+    run_sim(t, saturating(100), windows=30)
+    assert t.connections == 16
+    for _ in range(3):
+        t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["NO [UNAVAILABLE]"]))
+    assert t.fallback and t.connections == 2
+    out = [t.feed(Sample(MB * 10, 10.0, tuner.STARVED)) for _ in range(30)]  # exactly 300 s
+    assert not t.fallback and t.ceiling == 8  # 16 then 8 each had their error, 8 is the last one proven
+    assert out[-1].log.startswith("Auto-tune: no error for 300 s, leaving fallback")
+    hist, _ = run_sim(t, saturating(100), windows=20)
+    assert hist[-1] > 2  # grows again
+    # an error restarts the wait
+    t = AutoTuner(builders=2, max_builders=2, connections=1, fallback_recover_s=100)
+    t.feed(Sample(MB, 10.0, tuner.BACKLOG, errors=["* BYE"]))
+    for _ in range(9):
+        t.feed(Sample(MB, 10.0, tuner.BALANCED))
+    t.feed(Sample(MB, 10.0, tuner.BALANCED, errors=["* BYE"]))
+    for _ in range(9):
+        t.feed(Sample(MB, 10.0, tuner.BALANCED))
+    assert t.fallback
+
+
+def test_shared_server_budget():
+    t = AutoTuner(builders=2, max_builders=2, connections=12)
+    d = t.feed(Sample(MB, 10.0, tuner.BACKLOG, conn_limit=8))
+    assert (d.prev_connections, d.connections) == (12, 8) and "shared with other jobs" in d.log
+    assert t.ceiling == t.cap and not t.fallback  # not an error
+    hist, _ = run_sim(t, saturating(100), windows=20, conn_limit=8)
+    assert set(hist) == {8}
+    hist, _ = run_sim(t, saturating(100), windows=20, conn_limit=12)
+    assert max(hist) == 12
+
+
+def test_pressure_from_another_job_blocks_growth():
+    t = AutoTuner(builders=2, max_builders=2)
+    hist, logs = run_sim(t, saturating(100), windows=20, hold=True)
+    assert set(hist) == {4} and logs == []
+    hist, _ = run_sim(t, saturating(100), windows=10)
+    assert max(hist) > 4
+
+
+def test_builders_shrink_to_fair_share_when_cpu_is_saturated():
+    t = AutoTuner(builders=7, max_builders=7)
+    for _ in range(40):
+        t.feed(Sample(MB, 10.0, tuner.BALANCED, cpu_headroom=0.1, fair_builders=3))
+    assert t.builders == 3
+    t = AutoTuner(builders=7, max_builders=7)  # idle cores: work-conserving, nothing taken back
+    for _ in range(40):
+        t.feed(Sample(MB, 10.0, tuner.BALANCED, cpu_headroom=2.0, fair_builders=3))
+    assert t.builders == 7
+
+
+def test_builders_do_not_grow_short_of_memory():
+    t = AutoTuner(builders=2, max_builders=5)
+    for _ in range(30):
+        t.feed(Sample(10 * MB, 10.0, tuner.STARVED, builder_util=0.95, cpu_headroom=3.0, mem_ok=False))
+    assert t.builders == 2
 
 
 def test_fallback_after_repeated_errors():

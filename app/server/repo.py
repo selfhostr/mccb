@@ -43,6 +43,11 @@ def job_view(r) -> dict:
         "mode": r["mode"], "created_at": r["created_at"],
         # current pipeline sizes {mode: auto|manual, builders, connections, fallback} (None before the job starts)
         "tuning": db.jload(r["tuning"], None) if "tuning" in r.keys() else None,
+        # queue order (higher first), named batch, and why a paused job is paused ('window': outside the allowed
+        # hours of its server, it resumes by itself; null: paused by the administrator)
+        "priority": r["priority"] if "priority" in r.keys() else 0,
+        "batch_id": r["batch_id"] if "batch_id" in r.keys() else None,
+        "pause_reason": r["pause_reason"] if "pause_reason" in r.keys() else None,
     }
 
 
@@ -55,6 +60,22 @@ def latest_job_row(account_id: int):
     return db.q1("SELECT * FROM jobs WHERE account_id=? ORDER BY id DESC LIMIT 1", (account_id,))
 
 
+def source_view(r) -> dict:
+    """Source of an account: config without secrets. No source_kind = the PST of the account."""
+    if not r["source_kind"]:
+        return {"kind": "pst", "config": {"pst_id": r["pst_id"]}, "has_secret": False}
+    return {"kind": r["source_kind"], "config": db.jload(r["source_config"], {}) or {},
+            "has_secret": bool(r["source_secret_enc"])}
+
+
+def target_view(r) -> dict:
+    """Own target of an account, kind None = its server (IMAP + DAV with the account's password)."""
+    if not r["target_kind"]:
+        return {"kind": None, "config": {}, "has_secret": False}
+    return {"kind": r["target_kind"], "config": db.jload(r["target_config"], {}) or {},
+            "has_secret": bool(r["target_secret_enc"])}
+
+
 def account_view(r, with_job: bool = True) -> dict:
     job = None
     if with_job:
@@ -64,7 +85,7 @@ def account_view(r, with_job: bool = True) -> dict:
         "id": r["id"], "server_id": r["server_id"], "email": r["email"], "login": r["login"] or r["email"],
         "has_password": bool(r["password_enc"]), "status": r["status"], "last_test": r["last_test"],
         "last_test_result": db.jload(r["last_test_result"], None),
-        "pst_id": r["pst_id"],
+        "pst_id": r["pst_id"], "source": source_view(r), "target": target_view(r),
         "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"])},
         "job": job,
     }
@@ -84,6 +105,12 @@ def pst_view(r) -> dict:
         "id": r["id"], "filename": r["filename"], "size": r["size"], "status": r["status"],
         "scan": db.jload(r["scan"], None), "error": r["error"], "pst_sha": r["pst_sha"],
         "created_at": r["created_at"], "updated_at": r["updated_at"],
+        # intake: 'upload' | 'inbox' | 'fetch'; origin = label without secrets; received_bytes = progress while
+        # status is 'fetching' (size is 0 until the remote size is known); chain = auto-assignment outcome
+        "source": (r["source"] if "source" in r.keys() else None) or "upload",
+        "origin": r["origin"] if "origin" in r.keys() else None,
+        "received_bytes": r["received_bytes"] if "received_bytes" in r.keys() else None,
+        "chain": db.jload(db.kv_get(f"chain:{r['id']}"), None),
     }
 
 
@@ -128,6 +155,15 @@ def event_object(kind: str, ref_id: int) -> Any:
         return get_account(ref_id)
     if kind == "pst":
         return get_pst(ref_id)
+    if kind in ("plan", "compare"):
+        from . import planning
+        r = db.q1(f"SELECT * FROM {'plans' if kind == 'plan' else 'compares'} WHERE id=?", (ref_id,))
+        if r is None:
+            return None
+        return planning.plan_view(r, full=False) if kind == "plan" else planning.compare_view(r)
     if kind == "upload":
-        return get_upload(ref_id)
+        # no list of received chunks: 100 KB per event on a 500 GB file (GET /api/uploads/{id} gives it)
+        r = db.q1("SELECT p.id, p.status, COUNT(c.n) AS received_count FROM psts p "
+                  "LEFT JOIN upload_chunks c ON c.pst_id = p.id WHERE p.id=? GROUP BY p.id", (ref_id,))
+        return dict(r) if r else None
     return None
