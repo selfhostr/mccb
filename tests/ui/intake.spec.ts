@@ -249,7 +249,7 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await page.getByTestId('fetch-kind').selectOption('sftp');
 		await expect(page.getByRole('dialog').locator('[data-field="host"]')).toBeVisible();
 		await page.getByRole('dialog').locator('[data-field="host"]').fill('files.example.com');
-		await page.getByRole('dialog').locator('[data-field="path"]').fill('/backups/bob.pst');
+		await page.getByRole('dialog').locator('[data-field="path"]').fill('/backups/nas-backup.pst');
 		await page.getByRole('dialog').locator('[data-field="username"]').fill('backup');
 		await page.getByTestId('fetch-submit').click();
 		await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Password');
@@ -257,8 +257,8 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await page.getByRole('dialog').getByText('More options').click();
 		await page.getByRole('dialog').locator('[data-field="port"]').fill('2222');
 		await page.getByTestId('fetch-submit').click();
-		await expect(page.locator('li[data-pst="bob.pst"]')).toBeVisible();
-		expect((await state(page)).fetchCalls.at(-1)).toEqual({ kind: 'sftp', host: 'files.example.com', path: '/backups/bob.pst', username: 'backup', password: 'pw', port: 2222 });
+		await expect(page.locator('li[data-pst="nas-backup.pst"]')).toBeVisible();
+		expect((await state(page)).fetchCalls.at(-1)).toEqual({ kind: 'sftp', host: 'files.example.com', path: '/backups/nas-backup.pst', username: 'backup', password: 'pw', port: 2222 });
 
 		await page.getByTestId('fetch-open').click();
 		await page.getByTestId('fetch-kind').selectOption('s3');

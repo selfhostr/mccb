@@ -351,7 +351,8 @@ test.describe('policies', () => {
 test.describe('API tokens', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
-	test('create, copy once, revoke', async ({ page }) => {
+	test('create, copy once, revoke', async ({ page, context }) => {
+		await context.grantPermissions(['clipboard-read', 'clipboard-write']);
 		await ready(page, '/settings');
 		const section = page.getByTestId('section-tokens');
 		await expect(section).toContainText('No token yet');
@@ -362,7 +363,7 @@ test.describe('API tokens', () => {
 		await expect(created.getByTestId('token-value')).toContainText('mccb_');
 		await expect(created).toContainText('shown only once');
 		await created.getByRole('button', { name: 'Copy the token' }).click();
-		await expect(created.getByRole('button', { name: 'Copied' })).toBeVisible();
+		await expect(created.getByRole('button', { name: 'Copied', exact: true })).toBeVisible();
 		await created.getByTestId('token-hide').click();
 		await expect(created).toHaveCount(0);
 
