@@ -76,9 +76,9 @@ test.describe('settings: notifications', () => {
 	test('with nothing enabled the test is not offered, and the server refusal is shown', async ({ page }) => {
 		await ready(page, '/settings');
 		await expect(page.getByTestId('notify-test')).toBeDisabled();
+		await page.getByTestId('notifications-form').getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await page.getByTestId('ntfy-topic').fill('abc');
 		await page.getByTestId('notifications-form').getByRole('checkbox', { name: /^Send notifications/ }).check();
-		await page.getByTestId('notifications-form').getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await page.getByTestId('ntfy-topic').fill('');
 		await page.getByTestId('notify-save').click();
 		await expect(page.getByRole('alert')).toContainText('ntfy.topic is required');
