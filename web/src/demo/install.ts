@@ -75,7 +75,7 @@ class DemoEventSource extends EventTarget {
 			const open = new Event('open');
 			this.onopen?.(open);
 			this.dispatchEvent(open);
-			this.stop = subscribe((kind, data) => this.dispatchEvent(new MessageEvent(kind, { data: JSON.stringify(data) })));
+			this.stop = subscribe((kind: string, data: unknown) => this.dispatchEvent(new MessageEvent(kind, { data: JSON.stringify(data) })));
 		}, 30);
 	}
 
