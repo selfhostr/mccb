@@ -49,11 +49,12 @@ registry.register(registry.ConnectorSpec(
 ))
 ```
 
-A target is a `Target` (settings, thread-safe) that makes one `TargetSession` per thread: `connect`, `close`, `plan_folders`, `ensure_folder`, `put`, `find`, `count_ours`, and optionally `read` and `quota`. Declare `CAP_PARALLEL` if several sessions may write at once, `CAP_READBACK` if `read` returns what was written. See `app/connectors/base.py` for the exact contract, `tests/server/connector_fakes.py` for the smallest complete example.
+A target is a `Target` (settings, thread-safe) that makes one `TargetSession` per thread: `connect`, `close`, `plan_folders`, `ensure_folder`, `put`, `find`, `count_ours`, and optionally `read`, `quota` and `has_folder` (used by the dry run to tell which folders will be created). `info()` may return `append_limit`, the largest message in bytes that the target accepts: a larger message is not sent and is reported as oversized. Declare `CAP_PARALLEL` if several sessions may write at once, `CAP_READBACK` if `read` returns what was written. See `app/connectors/base.py` for the exact contract, `tests/server/connector_fakes.py` for the smallest complete example.
 
 ## What a connector must get right
 
 - **`SourceItem.key` is stable across runs.** It is ASCII, at most 200 characters, unique within the account and the item kind, so include the folder when the protocol's ids are per folder. It decides what is already migrated.
+- **`changed_since` is used by the final resync.** A source that declares `CAP_INCREMENTAL` answers with the items new since an opaque cursor; the runner stores the cursor per folder once the items are recorded. `Changes.reset=True` means the list is complete.
 - **`SourceItem.alt_key` is optional and survives a key change.** After a change of UIDVALIDITY, for instance, the runner matches it against the rows whose key the source no longer lists.
 - **`identity` names the mailbox, from the config alone.** No secret, no network. The same text keeps the migration state; another text starts afresh.
 - **`fetch` never alters the source.** Use read-only access.

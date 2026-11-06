@@ -16,8 +16,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from ..connectors.wiring import items_key_of_account, source_problem, sync_files_source
-from . import crash, csvimport, db, preview, repo, uploads
+from . import crash, csvaccounts, csvimport, db, planning, preview, repo, tokens, uploads
 from .api_connectors import router as connectors_router
+from .api_planning import router as planning_router
+from .api_tokens import router as tokens_router
 from .config import settings
 from .dav import DavClient
 from .imap import ImapConn, ImapError, ImapParams
@@ -67,9 +69,14 @@ app = FastAPI(title="PST → IMAP/CalDAV/CardDAV", docs_url=None, openapi_url=No
 @app.middleware("http")
 async def auth_mw(request: Request, call_next):
     path = request.url.path
+    request.state.via = "session"
     if path.startswith("/api/") and path not in PUBLIC_API:
         if not check_session(request.cookies.get(COOKIE)):
-            return JSONResponse({"detail": "not authenticated"}, status_code=401)
+            # scripts and the `mccb` command: Authorization: Bearer <API token> (see tokens.py)
+            header = request.headers.get("authorization")
+            if not (header and await asyncio.to_thread(tokens.verify_header, header)):
+                return JSONResponse({"detail": "not authenticated"}, status_code=401)
+            request.state.via = "token"
     return await call_next(request)
 
 
@@ -366,6 +373,7 @@ def update_account(aid: int, a: AccountUpdate):
             db.ex(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", (*vals, aid))
             if target_changed:  # new target: everything must be re-sent
                 db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+                planning.forget_cursors(aid)
             if "pst_id" in a.model_fields_set:
                 sync_files_source(aid)
         except Exception as e:
@@ -451,19 +459,8 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
     data = await file.read(5 * 1024 * 1024 + 1)
     if len(data) > 5 * 1024 * 1024:
         raise HTTPException(413, "CSV file too large (5 MB max)")
-    rows, errors = csvimport.parse(data)
-    created = updated = 0
-    for row in rows:
-        ex = db.q1("SELECT id FROM accounts WHERE server_id=? AND email=?", (server_id, row["email"]))
-        if ex:
-            db.ex("UPDATE accounts SET password_enc=?, login=?, status='new' WHERE id=?",
-                  (encrypt(row["password"]), row["login"], ex["id"]))
-            updated += 1
-        else:
-            db.ex("INSERT INTO accounts(server_id,email,login,password_enc,created_at) VALUES (?,?,?,?,?)",
-                  (server_id, row["email"], row["login"], encrypt(row["password"]), time.time()))
-            created += 1
-    return {"created": created, "updated": updated, "errors": errors}
+    rows, errors, _extended = csvimport.parse_ext(data)
+    return csvaccounts.apply(server_id, rows, errors)
 
 
 @app.get("/api/accounts/csv-template")
@@ -551,11 +548,17 @@ app.include_router(intake_router)
 # ======================================================================= jobs
 class RunIn(BaseModel):
     account_ids: list[int]
+    # optional: a named batch groups the jobs started together (GET /api/batches); mode "delta" is the final resync
+    # (what arrived since the previous pass); priority: higher runs first among the queued jobs
+    name: str | None = Field(None, max_length=120)
+    mode: str = Field("full", pattern="^(full|delta)$")
+    priority: int = 0
 
 
 @app.post("/api/runs")
 def create_runs(body: RunIn):
     jobs, errors = [], []
+    batch_id = None
     for aid in body.account_ids:
         a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
         if a is None:
@@ -573,9 +576,13 @@ def create_runs(body: RunIn):
         if active:
             jobs.append(repo.job_view(active))
             continue
-        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, created_at) VALUES (?, 'queued', 'precheck', ?, ?)",
-                    (aid, db.jdump(repo.empty_progress()), time.time()))
-        repo.log(cur.lastrowid, "Job queued")
+        if body.name and body.name.strip() and batch_id is None:
+            batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",
+                             (body.name.strip(), time.time())).lastrowid
+        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at) "
+                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?)",
+                    (aid, db.jdump(repo.empty_progress()), body.mode, batch_id, body.priority, time.time()))
+        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if body.mode == "delta" else ""))
         jobs.append(repo.get_job(cur.lastrowid))
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})
@@ -616,7 +623,7 @@ def pause_job(jid: int):
     r = _job_or_404(jid)
     if r["status"] not in ("queued", "running"):
         raise HTTPException(409, f"cannot pause a job in status '{r['status']}'")
-    db.ex("UPDATE jobs SET status='paused' WHERE id=? AND status IN ('queued','running')", (jid,))
+    db.ex("UPDATE jobs SET status='paused', pause_reason=NULL WHERE id=? AND status IN ('queued','running')", (jid,))
     repo.log(jid, "Pause requested")
     return repo.get_job(jid)
 
@@ -628,8 +635,9 @@ def resume_job(jid: int):
         raise HTTPException(409, f"the job is not paused ('{r['status']}')")
     if r["worker_id"]:
         # the worker has not yet taken the pause into account: let it continue
-        db.ex("UPDATE jobs SET status='running' WHERE id=? AND status='paused' AND worker_id IS NOT NULL", (jid,))
-    db.ex("UPDATE jobs SET status='queued' WHERE id=? AND status='paused'", (jid,))
+        db.ex("UPDATE jobs SET status='running', pause_reason=NULL WHERE id=? AND status='paused' AND worker_id IS NOT NULL",
+              (jid,))
+    db.ex("UPDATE jobs SET status='queued', pause_reason=NULL WHERE id=? AND status='paused'", (jid,))
     repo.log(jid, "Resume requested")
     return repo.get_job(jid)
 
@@ -654,7 +662,8 @@ def _requeue(jid: int, mode: str) -> dict:
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND id<>? AND status IN ('queued','running','paused','stopping')",
              (r["account_id"], jid)):
         raise HTTPException(409, "another job is active for this account")
-    db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck' WHERE id=?", (mode, jid))
+    db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck', pause_reason=NULL "
+          "WHERE id=?", (mode, jid))
     crash.reset_crashes(jid)  # new rerun: "retry errors" retries the "libpff crash" items once
     repo.log(jid, "Rerun (errors only)" if mode == "errors" else "Full rerun (already imported items skipped)")
     return repo.get_job(jid)  # type: ignore[return-value]
@@ -686,6 +695,9 @@ def job_report(jid: int, download: int = 0):
     if not p.exists():
         raise HTTPException(404, "report not available yet")
     data = json.loads(p.read_text(encoding="utf-8"))
+    cmp = db.q1("SELECT * FROM compares WHERE job_id=? AND status='done' ORDER BY id DESC LIMIT 1", (jid,))
+    if cmp is not None:  # the last comparison asked for this job, with the date it was made
+        data["compare"] = {"id": cmp["id"], "generated_at": cmp["updated_at"], **(db.jload(cmp["result"], {}) or {})}
     headers = {"Content-Disposition": f'attachment; filename="job-report-{jid}.json"'} if download else {}
     return JSONResponse(data, headers=headers)
 
@@ -750,6 +762,8 @@ async def _prune_events() -> None:
 
 
 app.include_router(connectors_router)  # before the /api catch-all below
+app.include_router(planning_router)
+app.include_router(tokens_router)
 
 
 # ======================================================================= static SPA

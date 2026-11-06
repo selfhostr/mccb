@@ -33,7 +33,7 @@ Each event can be switched on or off in `notifications.events`:
 | `disk_low` (below `disk_low_mb`, 5120 by default; at most once every 6 hours) | on |
 | `repeated_crash` (a job crashed at least twice) | on |
 
-When several jobs finish together, one message is sent instead of one per job: events that arrive within `group_window` seconds (30 by default) of each other are grouped, and when the queue becomes empty after two or more jobs, a single "Batch finished" message summarises them.
+When several jobs finish together, one message is sent instead of one per job: events that arrive within `group_window` seconds (30 by default) of each other are grouped, and when the queue becomes empty after two or more jobs, a single "Batch finished" message summarises them. A batch started with a name (`POST /api/runs` with `name`) is announced by name when its last job ends, with the jobs that failed or ended with errors listed; those jobs then do not appear in the generic summary, and the individual messages of the ones that went well are dropped. A job that is paused to wait for the allowed hours of its server sends nothing.
 
 ## Privacy
 

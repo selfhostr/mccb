@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ..connectors import registry, sieve, wiring
 from ..connectors.base import CAP_RULES, ConnectorError
-from . import db, repo
+from . import db, planning, repo
 from .security import decrypt
 
 router = APIRouter(prefix="/api")
@@ -130,6 +130,7 @@ def put_target(aid: int, body: EndpointIn):
         new = (body.kind, config)
     if old != new:
         db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+        planning.forget_cursors(aid)
     return repo.get_account(aid)
 
 

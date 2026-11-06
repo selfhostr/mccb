@@ -13,10 +13,11 @@ import time
 from dataclasses import dataclass
 from datetime import timezone
 
-from ..connectors import wiring
-from ..connectors.base import (CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, OutgoingItem, Target,
-                               stamp_import_id)
-from . import crash, db, ordering
+from ..connectors import registry, wiring
+from ..connectors.base import (CAP_INCREMENTAL, CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, OutgoingItem,
+                               Target, stamp_import_id)
+from . import crash, db, foldermap, ordering
+from . import policy as pol
 from .config import settings
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
                      StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
@@ -128,6 +129,8 @@ class ConnectorJobRunner(JobRunner):
         self.setup_error: str | None = None
         self.source_errors = 0
         self.totals["task"] = 0
+        self._incremental = False                 # the source can list what changed since a cursor (delta mode)
+        self._cursors: dict[str, str] = {}        # delta cursors to store once the phase is complete
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -216,6 +219,15 @@ class ConnectorJobRunner(JobRunner):
             except ConnectorError as e:
                 raise JobFailed(f"Source ({self.source_kind}): {e}") from e
             self._mark()
+            self.folders = [f for f in self.folders if not self._excluded(f)]
+            if self.mode == "delta":
+                try:
+                    self._incremental = CAP_INCREMENTAL in registry.role_of(self.source_kind, "source").capabilities
+                except ConnectorError:
+                    self._incremental = False
+                self.log("Final resync (delta): " + ("only what changed since the previous pass is listed"
+                                                     if self._incremental else
+                                                     "this source cannot list changes, full listing filtered by the items already migrated"))
             phases = []
             for phase, kind in CARRIED.items():
                 mine = [f for f in self.folders if f.kind == phase]
@@ -245,9 +257,17 @@ class ConnectorJobRunner(JobRunner):
             try:
                 self._on_session(session, session.ensure)
                 folders = [f for f in self.folders if f.kind == phase]
-                self.plans[phase] = self._on_session(session, lambda: session.plan_folders(folders))
+                if phase == MAIL:
+                    self.plans[phase] = self._on_session(
+                        session, lambda: foldermap.plan_mapped(session.plan_folders, folders, self.policy.mapper()))
+                else:
+                    self.plans[phase] = self._on_session(session, lambda: session.plan_folders(folders))
                 quota = self._on_session(session, session.quota)
-                self.report["precheck"][phase] = {"ok": True, "quota": quota, **session.info()}
+                info = session.info()
+                self.report["precheck"][phase] = {"ok": True, "quota": quota, **info}
+                if phase == MAIL and info.get("append_limit"):
+                    self.append_limit = int(info["append_limit"])
+                    self.log(f"The target accepts messages up to {self.append_limit / 2 ** 20:.1f} MB")
                 if phase == MAIL and quota and quota.get("limit"):
                     self._free_bytes = quota["limit"] - (quota.get("used") or 0)
             except ConnectorError as e:
@@ -303,16 +323,26 @@ class ConnectorJobRunner(JobRunner):
         self._resolve(session, kind, rows)
         self.current_folder = f"Listing {fkey}"
         self.flush()
-        listing = self._on_source(lambda: list(self.source.iter_items(f)))
-        self.totals[kind] += len(listing) - int(f.count or 0)
-        f.count = len(listing)
+        partial = False  # delta: the listing holds what changed, not the whole folder
+        if self.mode == "delta" and self._incremental:
+            ckey = f"delta:{self.account_id}:{self.pst_key}:{fkey}"
+            ch = self._on_source(lambda: self.source.changed_since(f, db.kv_get(ckey)))
+            listing, partial = ch.items, not ch.reset
+            if ch.cursor:
+                self._cursors[ckey] = ch.cursor
+        else:
+            listing = self._on_source(lambda: list(self.source.iter_items(f)))
+        if not partial:
+            self.totals[kind] += len(listing) - int(f.count or 0)
+            f.count = len(listing)
         seen = {it.key for it in listing}
         # rows of keys the source no longer lists: the same messages may be back under other keys (UIDVALIDITY)
         orphans: dict[str, list[dict]] = {}
         for r in rows.values():
-            if r["item_key"] not in seen and r["source_ref"]:
+            if not partial and r["item_key"] not in seen and r["source_ref"]:
                 orphans.setdefault(r["source_ref"], []).append(r)
         entries = []
+        filtered: dict[str, list[tuple]] = {}
         for it in listing:
             r = rows.get(it.key)
             old = None
@@ -322,17 +352,26 @@ class ConnectorJobRunner(JobRunner):
                 continue
             if old is not None:  # processed again under its new key (an `ok` one was never wanted)
                 db.ex("DELETE FROM items WHERE id=? AND status<>'ok'", (old["id"],))
+            if self.policy.has_filters and kind != "contact":
+                why = self.policy.reason(it.date, it.size if kind == "mail" else None)
+                if why:
+                    filtered.setdefault(why, []).append((it.key, fkey, it.size, None, it.alt_key))
+                    continue
             ts = it.date.timestamp() if it.date is not None else None
             entries.append((-ts if ts is not None else ordering.NO_DATE, it.key, fi, it))
+        for why, group in filtered.items():
+            self._mark_filtered(kind, group, why)
         # gone from the source before being written: nothing left to wait for
-        for group in orphans.values():
-            for r in group:
-                if r["status"] in ("pending", "inflight"):
+        if not partial:
+            for group in orphans.values():
+                for r in group:
+                    if r["status"] in ("pending", "inflight"):
+                        self.set_item(r["id"], "skipped", "no longer at the source")
+            for r in rows.values():
+                if r["item_key"] not in seen and not r["source_ref"] and r["status"] in ("pending", "inflight"):
                     self.set_item(r["id"], "skipped", "no longer at the source")
-        for r in rows.values():
-            if r["item_key"] not in seen and not r["source_ref"] and r["status"] in ("pending", "inflight"):
-                self.set_item(r["id"], "skipped", "no longer at the source")
-        self.log(f"Folder '{fkey}' -> {plan_name}: {len(listing)} item(s), {len(entries)} to migrate")
+        self.log(f"Folder '{fkey}' -> {plan_name}: {len(listing)} item(s)"
+                 + (" changed since the previous pass" if partial else "") + f", {len(entries)} to migrate")
         return entries
 
     def _run_phase(self, phase: str) -> None:
@@ -356,6 +395,7 @@ class ConnectorJobRunner(JobRunner):
                     self.log(f"Folder '{fk}': {self.folder_errors[fk]}", "error")
             parallel = CAP_PARALLEL in target.capabilities
             pool = TargetPool(target, self.connections if parallel else 1, self._should_stop)
+            pool.limiter = self._limiter
             self._tune_t0 = None
             entries: list = []
             todo = [f for f in folders if self._folder_has_work(kind, f)]
@@ -387,6 +427,10 @@ class ConnectorJobRunner(JobRunner):
             self._wait_pool(pool)
             self._mark()
             self.check()
+            # everything listed is now recorded: the next delta pass may start from these cursors
+            for ckey, cursor in self._cursors.items():
+                db.kv_set(ckey, cursor)
+            self._cursors.clear()
             for f in folders:
                 fk = folder_key(f.path)
                 if fk not in self.folder_errors:
@@ -455,6 +499,8 @@ class ConnectorJobRunner(JobRunner):
             digest = hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:32]
             raw, name = got.raw, got.name or f"{digest}.{DAV_EXT[phase]}"
             mark = name  # as on the PST path: the hash column of a DAV item is its resource name
+        if self._size_gate(kind, key, fkey, len(raw), got.subject, target, it.alt_key):
+            return
         warnings = db.jdump(got.warnings) if got.warnings else None
         if got.warnings:
             self.log(f"Warning '{got.subject}': {', '.join(got.warnings)}", "warning")

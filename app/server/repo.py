@@ -43,6 +43,11 @@ def job_view(r) -> dict:
         "mode": r["mode"], "created_at": r["created_at"],
         # current pipeline sizes {mode: auto|manual, builders, connections, fallback} (None before the job starts)
         "tuning": db.jload(r["tuning"], None) if "tuning" in r.keys() else None,
+        # queue order (higher first), named batch, and why a paused job is paused ('window': outside the allowed
+        # hours of its server, it resumes by itself; null: paused by the administrator)
+        "priority": r["priority"] if "priority" in r.keys() else 0,
+        "batch_id": r["batch_id"] if "batch_id" in r.keys() else None,
+        "pause_reason": r["pause_reason"] if "pause_reason" in r.keys() else None,
     }
 
 
@@ -150,6 +155,12 @@ def event_object(kind: str, ref_id: int) -> Any:
         return get_account(ref_id)
     if kind == "pst":
         return get_pst(ref_id)
+    if kind in ("plan", "compare"):
+        from . import planning
+        r = db.q1(f"SELECT * FROM {'plans' if kind == 'plan' else 'compares'} WHERE id=?", (ref_id,))
+        if r is None:
+            return None
+        return planning.plan_view(r, full=False) if kind == "plan" else planning.compare_view(r)
     if kind == "upload":
         # no list of received chunks: 100 KB per event on a 500 GB file (GET /api/uploads/{id} gives it)
         r = db.q1("SELECT p.id, p.status, COUNT(c.n) AS received_count FROM psts p "

@@ -403,7 +403,15 @@ class ImapSession(TargetSession):
             return self.conn.quota()
 
     def info(self) -> dict:
-        return {"capabilities": sorted(self.conn.caps)[:50]}
+        from ..server.policy import append_limit
+        out = {"capabilities": sorted(self.conn.caps)[:50]}
+        limit = append_limit(self.conn.caps)  # RFC 7889: the largest message the server accepts
+        if limit:
+            out["append_limit"] = limit
+        return out
+
+    def has_folder(self, name: str) -> bool | None:
+        return name.upper() == "INBOX" or name in self._existing
 
 
 class ImapTarget(Target):

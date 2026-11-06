@@ -22,7 +22,8 @@
   - Every calendar or address book of a source goes to one DAV collection.
 - **IMAP as a source**:
   - One pass, not a sync: a flag changed or a message deleted at the source after its copy is not carried over. A rerun lists every
-    folder again and copies what is new. `changed_since` exists in the interface, but jobs do not use it yet.
+    folder again and copies what is new. The final resync (`mode: "delta"`) asks only for the messages newer than the previous pass
+    (`changed_since`): new messages only, in the same way.
   - Each copied mail gains an `X-PST-Import-Id` header at the top; the rest of the message is unchanged. The target may refuse
     keywords (`$Forwarded`...): the message is then copied with its system flags only.
   - Messages flagged `\Deleted` are not copied, nor are virtual folders (`\All`, `\Flagged`, `\Important`), so nothing is copied
@@ -73,3 +74,12 @@
   with a short timeout, then the message is dropped and a line is logged. Events are detected by the worker every
   second, so a notification can arrive a few seconds late, and are not replayed after a long worker outage. Nothing is
   sent for events that happened before notifications were enabled.
+- **Planning tools** (see [Plan, filter and control a migration](planning.md)).
+  - A dry run of a PST estimates its sizes from the file size and does not apply the date and size filters to its counts. A live source is listed in full, which takes as long as the listing of a job.
+  - A change of folder mapping applies to items not yet imported. Items already imported stay in the folder they were written to, and are never sent again.
+  - The date filter does not apply to contacts. Items without a date are never left out by it.
+  - The bandwidth limit is split equally between the running jobs of a server, recounted every few seconds, and applied when a message is sent: a very large message goes at once and the next ones wait. It counts message bytes, not protocol overhead. Jobs on two server entries pointing at the same real server have a limit each.
+  - Allowed hours are checked between two items, at most every 2 seconds, and the clock is that of the worker. A message being sent when the window closes is finished first.
+  - A final resync finds new messages only (IMAP). It does not carry flag changes or deletions, and a PST is a snapshot: it has nothing new to find.
+  - The comparison counts the messages that carry this migration's marker, per target folder. It cannot tell a message moved by the user from a missing one.
+  - API tokens do not expire and are not tied to the admin password: revoke them by hand.

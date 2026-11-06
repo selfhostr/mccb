@@ -6,6 +6,7 @@ This page lists what MCCB protects, and what it does not.
 
 - **One admin password.** Stored as a scrypt hash in `data/admin.json` (file mode 600), or taken from `ADMIN_PASSWORD`. A generated password is printed once.
 - **Sessions.** A signed cookie, `HttpOnly`, `SameSite=Lax`, and `Secure` when `COOKIE_SECURE=1` or the request arrives over HTTPS. Lifetime is `SESSION_MAX_AGE` (7 days by default). Changing the password invalidates every other session.
+- **API tokens.** Bearer tokens for scripts (see [Command line and API tokens](cli.md)): 256 random bits, only the SHA-256 is stored, shown once, revocable. A token has the rights of the administrator but cannot create or revoke tokens.
 - **Login throttling.** After 5 failed logins within 5 minutes from the same IP, `POST /api/login` answers 429, and each failure is delayed by 0.5 s. The counter is in memory and resets when `web` restarts.
 - **Mailbox passwords** are encrypted with Fernet. The key comes from `SECRET_KEY`, or from `data/secret.key` when it is empty.
 - **Uploads.** Each chunk is verified by SHA-256 on the server, and the PST signature is checked before the scan.
@@ -20,7 +21,7 @@ This page lists what MCCB protects, and what it does not.
 
 ## What it does not do
 
-- There are no accounts or roles: anyone with the admin password can do everything.
+- There are no accounts or roles: anyone with the admin password, or with an API token, can do everything. Tokens do not expire and failed token attempts are not throttled (the secret is 256 random bits).
 - Mailbox passwords can be decrypted by the application. Protect `./data` and `SECRET_KEY`.
 - The server speaks plain HTTP. HTTPS is the job of your [reverse proxy](reverse-proxy.md), which also must filter port 22362.
 - TLS verification of an IMAP server can be turned off per server. Do that only for a server you control.

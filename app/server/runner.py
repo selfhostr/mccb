@@ -17,7 +17,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import builders, crash, db, ordering, repo, tuner
+from . import builders, crash, db, foldermap, ordering, repo, tuner
+from . import policy as pol
 from .config import settings
 from .dav import DavClient, DavError
 from .engine_loader import engine
@@ -42,6 +43,9 @@ RECOUNT_SHARE = 50         # a recount taking t seconds is not repeated before 5
 SERVER_PRESSURE_SECONDS = 60.0  # after a server error seen by any job, no job to that server grows for this long
 # rows of a folder already ok/skipped (never wanted again, whatever the mode): one shared row, a key is all they need
 DONE_ROW = {"id": None, "item_key": None, "status": "ok", "target": None, "hash": None, "error": None}
+# rows left out by the date filter (judged again on every run): shared too, a size-filtered row keeps its size
+FILTERED_ROW = {"id": None, "item_key": None, "status": pol.FILTERED, "target": None, "hash": None,
+                "error": pol.FILTER_PREFIX + "date", "size": None}
 
 
 UPSERT_ITEM = (
@@ -53,6 +57,14 @@ UPSERT_ITEM = (
     "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
     "job_id=excluded.job_id, updated_at=excluded.updated_at "
     "RETURNING id")
+# an item left out by a filter: never overwrites a row that is already migrated
+UPSERT_FILTERED = (
+    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,error,subject,size,source_ref,job_id,updated_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, "
+    "status=excluded.status, error=excluded.error, subject=COALESCE(excluded.subject, items.subject), "
+    "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
+    "job_id=excluded.job_id, updated_at=excluded.updated_at WHERE items.status NOT IN ('ok', 'skipped')")
 
 
 class PauseRequested(Exception):
@@ -182,6 +194,8 @@ class AppendPool:
       two tasks — after the current APPEND is finished and its result reported — and queued tasks stay queued
       for the remaining threads: no task is lost or run twice. The task queue bound (2 x connections)
       follows the current size."""
+
+    limiter = None  # policy.Limiter of the server (bandwidth limit), set by the runner; None = unlimited
 
     def __init__(self, params: ImapParams, n: int, create_folder, should_stop, base_delay: float = 1.0):
         self.params = params
@@ -322,6 +336,8 @@ class AppendPool:
                     return
                 try:
                     self._wait_hold()
+                    if self.limiter is not None and not self._stopping():
+                        self.limiter.wait(t.size or len(t.raw or b""), self._stopping)
                     if self._stopping():
                         r = AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)")
                     else:
@@ -471,6 +487,12 @@ class JobRunner:
     _defer_inflight = False
     _ok_items = 0
     _item_logged = 0
+    policy = pol.Policy()                  # see policy.py; set by __init__ (this default: nothing configured)
+    filtered_folders: dict = {}
+    _window = None
+    _win_t = 0.0
+    _limiter = None
+    append_limit: int | None = None        # largest message the target accepts (APPENDLIMIT), None = unknown
 
     def __init__(self, job_id: int, worker_id: str):
         self.job_id = job_id
@@ -527,6 +549,11 @@ class JobRunner:
         # native crashes already suffered by this job (subprocess) and unreadable indexes known for the PST
         self.crashes = crash.get_crashes(job_id)
         self.skips = crash.get_skips(self.pst_key) if self.pst_key else set()
+        # folder mapping, filters, allowed hours and bandwidth of the server and of the account
+        self.policy = pol.effective(self.acc, self.srv) if self.acc else pol.Policy()
+        self._window = self.policy.window
+        self._limiter = pol.Limiter(self.srv["id"], self.policy.rate, self.log) if self.policy.rate and self.srv else None
+        self.filtered_folders: dict[str, int] = {}  # excluded folder -> items it holds
 
     # ------------------------------------------------------------ utilities
     def log(self, msg: str, level: str = "info") -> None:
@@ -586,7 +613,27 @@ class JobRunner:
             raise PauseRequested()
         if st in ("stopping", "stopped"):
             raise StopRequested()
+        if self._window is not None:
+            self._check_window()
         self.flush()
+
+    def _check_window(self) -> None:
+        """Allowed hours of the server: outside them the job pauses by itself (reason `window`) and the worker
+        resumes it when they open again. Not a failure. Looked at every 2 s at most."""
+        now = time.monotonic()
+        if now - self._win_t < 2.0:
+            return
+        self._win_t = now
+        if pol.window_open(self._window):
+            return
+        cur = db.ex("UPDATE jobs SET status='paused', pause_reason='window' WHERE id=? AND status IN ('running','queued')",
+                    (self.job_id,))
+        if cur.rowcount:
+            nxt = pol.next_open(self._window)
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)) if nxt else "later"
+            self.log(f"Paused: outside the allowed hours ({pol.describe_window(self._window)}). "
+                     f"It resumes by itself, next opening {when}", "warning")
+        raise PauseRequested()
 
     def _sleep(self, seconds: float) -> None:
         end = time.time() + seconds
@@ -641,7 +688,7 @@ class JobRunner:
             rows = db.q("SELECT status, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? GROUP BY status",
                         (self.account_id, self.pst_key, kind))
             c = {r["status"]: r["n"] for r in rows}
-            self.progress[pk] = {"done": c.get("ok", 0) + c.get("skipped", 0), "total": self.totals[kind],
+            self.progress[pk] = {"done": c.get("ok", 0) + c.get("skipped", 0) + c.get(pol.FILTERED, 0), "total": self.totals[kind],
                                  "errors": c.get("error", 0)}
 
     def flush(self, force: bool = False) -> None:
@@ -699,9 +746,14 @@ class JobRunner:
         self._flush_items(force=True)
         out: dict[str, dict] = {}
         for r in db.conn().execute(
-                "SELECT id, item_key, status, target, hash, error FROM items WHERE account_id=? AND pst_key=? AND kind=? "
+                "SELECT id, item_key, status, target, hash, error, size FROM items WHERE account_id=? AND pst_key=? AND kind=? "
                 "AND folder IN (?, ?)", (self.account_id, self.pst_key, kind, fkey, legacy)):
-            out[r["item_key"]] = DONE_ROW if r["status"] in ("ok", "skipped") else dict(r)
+            if r["status"] in ("ok", "skipped"):
+                out[r["item_key"]] = DONE_ROW
+            elif r["status"] == pol.FILTERED and r["error"] == FILTERED_ROW["error"]:
+                out[r["item_key"]] = FILTERED_ROW
+            else:
+                out[r["item_key"]] = dict(r)
         return out
 
     @staticmethod
@@ -771,6 +823,8 @@ class JobRunner:
         if st == "error" and (r.get("error") or "").startswith(crash.CRASH_MSG):
             # item that crashed libpff: ignored, except on "retry errors" as long as this run has not crashed
             return self.mode == "errors" and self.crashes == 0
+        if st == "error" and (r.get("error") or "").startswith(pol.OVERSIZE_PREFIX):
+            return self.mode == "errors"  # refused for its size: sent again only when the administrator asks
         if self.mode == "errors":
             return st in ("error", "inflight", "pending")
         return st not in ("ok", "skipped")
@@ -789,6 +843,11 @@ class JobRunner:
         self.report.update({"job_id": self.job_id, "account": self.acc["email"], "server": self.srv["name"],
                             "mode": self.mode, "started_at": started})
         self.log(f"Job {self.job_id} started for {self.acc['email']} (mode {self.mode})")
+        if self.policy.summary():
+            self.log("Policy: " + json.dumps(self.policy.summary(), ensure_ascii=False))
+        if self._limiter is not None:
+            self.log(f"Bandwidth limit of the server: {self._limiter.rate / 2 ** 20:.2f} MB/s, shared between its "
+                     "running jobs; the tuner will not open more connections to get around it")
         self._mark()  # stale marker from a killed process (abrupt container stop): not a crash
         try:
             self._setup_tuning()
@@ -838,6 +897,8 @@ class JobRunner:
             for f in self.folders:
                 k = {"mail": "mail", "calendar": "event", "contacts": "contact"}.get(f.kind)
                 if k and self._phase_enabled(k):
+                    if self._excluded(f):
+                        continue
                     self.totals[k] += int(f.count or 0)
             self.flush(force=True)
             self.precheck()
@@ -848,6 +909,56 @@ class JobRunner:
             if self.srv["dav_enabled"] and self.acc["opt_contacts"]:
                 self.phase_dav("contacts")
             self.phase_verify()
+
+    def _excluded(self, f) -> bool:
+        """Folder left out by the policy (exclude_folders): not listed, not counted, mentioned in the report."""
+        if not self.policy.exclude or not self.policy.excluded(list(f.path)):
+            return False
+        fk = folder_key(f.path)
+        if fk not in self.filtered_folders:
+            self.filtered_folders[fk] = int(f.count or 0)
+            self.log(f"Folder '{fk}' excluded by the policy ({int(f.count or 0)} item(s) not migrated)")
+        return True
+
+    def _mark_filtered(self, kind: str, rows: list[tuple], reason: str) -> None:
+        """Records items left out by a filter, [(item_key, folder key, size, subject, source_ref)], in a few
+        transactions. They are done (no error), counted as filtered in the report, judged again on every run."""
+        if not rows:
+            return
+        now, msg = time.time(), pol.FILTER_PREFIX + reason
+        self._flush_items(force=True)
+        for i in range(0, len(rows), 5000):
+            with db.tx() as c:
+                c.executemany(UPSERT_FILTERED, [(self.account_id, self.pst_id, self.pst_key, kind, key, fkey,
+                                                 pol.FILTERED, msg, subj, size, ref, self.job_id, now)
+                                                for key, fkey, size, subj, ref in rows[i:i + 5000]])
+        self.log(f"{len(rows)} {ITEM_LABEL.get(kind, kind)} item(s) left out by the {reason} filter")
+
+    def _apply_date_filter(self, kind: str, entries: list) -> list:
+        """Index entries (sort value, key, folder index, item index) outside the date range are recorded as
+        filtered; items without a date are kept. Contacts have no date range."""
+        p = self.policy
+        if kind == "contact" or not (p.date_from or p.date_to) or not entries:
+            return entries
+        keep, drop = [], []
+        for e in entries:
+            (drop if p.reason_ts(None if e[0] == ordering.NO_DATE else -e[0]) else keep).append(e)
+        self._mark_filtered(kind, [(e[1], folder_key(self.folders[e[2]].path), None, None, None) for e in drop], "date")
+        return keep
+
+    def _size_gate(self, kind: str, key: str, fkey: str, size: int, subject: str | None, target: str,
+                   ref: str | None = None) -> bool:
+        """True (and the item recorded) when a message must not be sent: over the maximum size of the policy
+        (filtered) or over the limit the target announced (an error, reported as oversized)."""
+        if self.policy.max_size and size > self.policy.max_size and kind == "mail":
+            self._mark_filtered(kind, [(key, fkey, size, subject, ref)], "size")
+            return True
+        if self.append_limit and size > self.append_limit and kind == "mail":
+            self.upsert_item(kind, key, fkey, "error", target=target, subject=subject, size=size,
+                             error=pol.oversize_message(size, self.append_limit), source_ref=ref)
+            self._item_log(f"Not sent, over the limit of the target ({size // 1024} KB): {subject}", "error")
+            return True
+        return False
 
     def count_unfinished(self) -> int:
         """Items of active phases left `pending`/`inflight`: the job cannot be "finished"."""
@@ -991,6 +1102,8 @@ class JobRunner:
         state = tuner.queue_state(pool.pending, pool.n, sum(self._inflight_bytes.values()), self.byte_budget,
                                   idle_appenders=max(0, pool.alive() - pool.busy()))
         conn_limit, hold, running = self._server_share([e for e in errs if tuner.classify_error(e)])
+        if self._limiter is not None and self._limiter.active():
+            hold = True  # the bandwidth limit is the bottleneck, more connections would only queue behind it
         movable = self.build_procs > 0 and not self._builders_forced
         sample = tuner.Sample(bytes_appended=self._bytes_done - self._tune_b0, duration_s=dur, queue_state=state,
                               append_buckets=lat_buckets or None, builder_util=util,
@@ -1032,6 +1145,9 @@ class JobRunner:
             quota = conn.quota()
             self.report["precheck"]["imap"] = {"ok": True, "capabilities": sorted(conn.caps)[:50], "quota": quota}
             self.log(f"IMAP connection OK ({params.host})")
+            self.append_limit = pol.append_limit(conn.caps)
+            if self.append_limit:
+                self.log(f"The target accepts messages up to {self.append_limit / 2 ** 20:.1f} MB (APPENDLIMIT)")
             if quota and quota.get("limit"):
                 free = quota["limit"] - (quota.get("used") or 0)
                 est = int(self.pst_row["size"] * 0.8)
@@ -1078,7 +1194,7 @@ class JobRunner:
         """Mail phase: all IMAP folders created up front, then every mail still to import, across all the
         folders, newest first (see ordering.py)."""
         self.set_phase("mail")
-        mail_folders = [f for f in self.folders if f.kind == "mail"]
+        mail_folders = [f for f in self.folders if f.kind == "mail" and not self._excluded(f)]
         params = self.imap_params()
         conn = ImapConn(params)
         with_retry(lambda c: c.connect(), conn, settings.max_retries, should_stop=self._should_stop)
@@ -1090,7 +1206,9 @@ class JobRunner:
             if prefix and not prefix.endswith(delim):
                 prefix = ""
             existing = {b.name for b in boxes}
-            plan = plan_folders(mail_folders, boxes, delim, (self.srv["root_folder"] or "").strip() or None, prefix)
+            root = (self.srv["root_folder"] or "").strip() or None
+            plan = foldermap.plan_mapped(lambda fs: plan_folders(fs, boxes, delim, root, prefix), mail_folders,
+                                         self.policy.mapper())
             self.report["imap_delimiter"] = delim
             for f in mail_folders:
                 fk = folder_key(f.path)
@@ -1110,6 +1228,7 @@ class JobRunner:
                 c.create(target)
 
             pool = AppendPool(params, self.connections, create_folder, self._should_stop)
+            pool.limiter = self._limiter
             self._tune_t0 = None
             todo = []
             for f in mail_folders:
@@ -1176,6 +1295,11 @@ class JobRunner:
                 self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():
                 continue  # interrupted by pause/stop: stays "inflight", rechecked on resume
+            elif pol.is_oversize(r.msg) and r.kind != "temp":
+                # refused for its size: one clear entry, never retried by itself (see wants), the others go on
+                self.set_item(r.item_id, "error", pol.oversize_message(size, self.append_limit, r.msg))
+                self._item_log(f"Refused for its size by the target (item {r.item_id}, {size // 1024} KB): {r.msg}",
+                               "error")
             else:
                 self.set_item(r.item_id, "error", f"[{r.kind}] {r.msg}")
                 self._item_log(f"APPEND failure (item {r.item_id}): {r.msg}", "error")
@@ -1339,6 +1463,8 @@ class JobRunner:
         if others:
             self._item_log(f"Warning '{res['subject']}': {', '.join(others)}", "warning")
         raw = res["raw"]
+        if self._size_gate("mail", key, fkey, len(raw), res["subject"], target):
+            return
         params = self._upsert_params("mail", key, fkey, "inflight", target=target, subject=res["subject"],
                                      hash=res["hash"], size=len(raw), warnings=warnings)
         self._inflight_buf.append((params, AppendTask(0, target, raw, res["flags"], res["internaldate"], len(raw),
@@ -1422,6 +1548,9 @@ class JobRunner:
             r, fb = self._resolve_key(state["rows"], state["fallback"], idx, key)
             if not self.wants(r):
                 return False
+            if r is not None and r["status"] == pol.FILTERED and self.policy.max_size \
+                    and r["error"] == pol.FILTER_PREFIX + "size" and (r.get("size") or 0) > self.policy.max_size:
+                return False  # still over the maximum size: not built again
             if fb is not None:
                 self._fallbacks[(spec.folder_index, idx)] = {"id": fb["id"]}
             return True
@@ -1454,6 +1583,7 @@ class JobRunner:
         except ordering.IndexingError as e:
             raise JobFailed(str(e)) from e
         self.current_folder = None
+        entries = self._apply_date_filter(kind, entries)
         self.log(f"Indexed {st.seen:,} item(s) in {st.seconds:.1f} s — {st.kept:,} to import, newest first"
                  + (f" ({st.undated:,} without date, imported last)" if st.undated else ""))
         if st.date_crashes:
@@ -1587,7 +1717,7 @@ class JobRunner:
     def phase_dav(self, phase: str) -> None:
         """Calendar (start desc) / contacts (last modification desc): all the folders of the phase, newest
         first (see ordering.py); builds and PUTs in this process."""
-        folders = [f for f in self.folders if f.kind == phase]
+        folders = [f for f in self.folders if f.kind == phase and not self._excluded(f)]
         if not folders:
             return
         self.set_phase(phase)
@@ -1788,6 +1918,7 @@ class JobRunner:
                 present = (self.report.get("dav", {}).get(pk) or {}).get("present")
             totals[pk] = {"source": self.totals[kind], "sent": c.get("ok", 0), "present": present,
                           "errors": c.get("error", 0), "warnings": nwarn, "skipped": c.get("skipped", 0),
+                          "filtered": c.get(pol.FILTERED, 0),
                           "pending": c.get("pending", 0) + c.get("inflight", 0)}
         errors = [dict(r) for r in db.q(
             "SELECT kind, folder, item_key, subject, error FROM items WHERE account_id=? AND pst_key=? AND status='error' "
@@ -1802,11 +1933,14 @@ class JobRunner:
         rep = dict(self.report)
         for pk in ("mail", "calendar", "contacts"):
             t = totals[pk]
-            rep[pk] = {k: t[k] for k in ("sent", "present", "errors", "warnings", "skipped")}
+            rep[pk] = {k: t[k] for k in ("sent", "present", "errors", "warnings", "skipped", "filtered")}
         smp = (self.report.get("verify") or {}).get("sample")
         if smp:
             rep["sample_check"] = (f"{smp['ok']}/{smp['checked']} mail(s) re-read by X-PST-Import-Id, identical hash"
                                    + (f" — {len(smp['problems'])} problem(s)" if smp["problems"] else ""))
+        extras = pol.report_extras(self.account_id, self.pst_key, self.policy)
+        extras["filtered"]["folders"] = dict(self.filtered_folders)
+        rep.update(extras)
         rep.update({"status": status, "error": error, "finished_at": finished, "totals": totals,
                     "errors": errors, "item_warnings": warns,
                     "pst": {"id": self.pst_id, "filename": self.pst_row["filename"] if self.pst_row else None,

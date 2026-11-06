@@ -232,6 +232,7 @@ class Notifier:
             since_f = float(since)
             self._poll_psts(cfg, since_f)
             self._poll_jobs(cfg, since_f)
+            self._poll_batches(cfg, since_f)
             self._poll_phases(cfg, since_f)
             self._poll_crashes(cfg)
             self._check_disk(cfg)
@@ -283,6 +284,39 @@ class Notifier:
             text = f"{head}: {who}" + (f"\n{counts}" if counts else "") + (f"\n{r['error']}" if r["error"] else "")
             self._add(cfg, Event("job", f"job_{st}", r["id"], f"{who}: {st.replace('_', ' ')}", text,
                                  priority=4 if st == "failed" else None))
+
+    def _poll_batches(self, cfg: dict, since: float) -> None:
+        """A named batch (POST /api/runs with `name`) whose jobs are all over: one `batch_finished` message with its
+        name and totals. Its jobs then leave the generic "queue idle" summary, and the individual messages of the
+        jobs that went well, so that it is not announced twice; the ones with problems keep their own."""
+        done = db.q(f"SELECT b.* FROM batches b WHERE b.created_at>=? AND EXISTS (SELECT 1 FROM jobs j WHERE "
+                    f"j.batch_id=b.id) AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.batch_id=b.id AND j.status IN "
+                    f"({','.join('?' * len(ACTIVE))})) AND NOT EXISTS (SELECT 1 FROM notify_sent n WHERE "
+                    f"n.kind='batch' AND n.ref_id=b.id) ORDER BY b.id", (since, *ACTIVE))
+        for b in done:
+            if not _claim("batch", b["id"]):
+                continue
+            jobs = db.q("SELECT j.*, a.email AS email FROM jobs j LEFT JOIN accounts a ON a.id=j.account_id "
+                        "WHERE j.batch_id=? ORDER BY j.id", (b["id"],))
+            ids = {j["id"] for j in jobs}
+            self.batch = [e for e in self.batch if e.ref not in ids]
+            self.pending = [e for e in self.pending
+                            if not (e.group == "job" and e.ref in ids and e.kind in ("job_done", "job_stopped"))]
+            if not cfg["events"].get("batch_finished"):
+                continue
+            counts: dict[str, int] = {}
+            for j in jobs:
+                counts[j["status"]] = counts.get(j["status"], 0) + 1
+            bad = [j for j in jobs if j["status"] in ("failed", "done_with_errors")]
+            head = f"Batch '{b['name']}' finished: " + ", ".join(f"{n} {s.replace('_', ' ')}" for s, n in
+                                                                 sorted(counts.items()))
+            lines = [f"- {j['email'] or 'account ' + str(j['account_id'])}: {j['status'].replace('_', ' ')}"
+                     + (f" ({j['error']})" if j["error"] else "") for j in bad[:MAX_LINES]]
+            if len(bad) > MAX_LINES:
+                lines.append(f"... and {len(bad) - MAX_LINES} more")
+            self.dispatcher.submit(Message("batch_finished", head, "\n".join(lines) or head, 4 if bad else None,
+                                           {"batch_id": b["id"], "name": b["name"], "jobs": len(jobs),
+                                            "by_status": counts}))
 
     def _poll_phases(self, cfg: dict, since: float) -> None:
         if not any(cfg["events"].get(f"phase_{k}") for k in ("mail", "calendar", "contacts")):

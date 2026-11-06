@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Planning (see [Plan, filter and control a migration](docs/planning.md)): dry run (`POST /api/runs/plan`), folder mapping with built-in names in nine languages, per-server and per-account policy (folder rules, excluded folders, date range, maximum size), allowed hours and a bandwidth limit per server, named batches with group actions, queue order, comparison of source and target (CSV, in the report), final resync (`mode: "delta"`) and a clear report of messages the target refuses for their size.
+- Accounts CSV: optional columns (PST file name, content toggles, source settings) and an export that never contains a password. Old three-column files are read as before.
+- API tokens and the `mccb` command line (upload with resume, run, watch, plan), see [Command line and API tokens](docs/cli.md).
 - Auto mode can use far more of a large machine: up to 32 mailboxes at once (more while cores stay idle), 32 builders and 32 connections per mailbox. `.env.example` no longer pins `WORKER_CONCURRENCY`: remove that line from an existing `.env` to get the auto mode. See [Tune](docs/tuning.md).
 - Costs that grew with the mailbox: the progress is recounted less often on large mailboxes, the average size no longer reads the whole table at each update, item results are written in batches.
 - One network error no longer limits a job for good: the connection ceiling, the plateau and the fallback all recover with time.

@@ -211,6 +211,10 @@ class TargetSession(abc.ABC):
         """Free-form details for the report and the connection test."""
         return {}
 
+    def has_folder(self, name: str) -> bool | None:
+        """After plan_folders: does this folder already exist? None when the target cannot tell (dry run only)."""
+        return None
+
 
 class Target(abc.ABC):
     """Settings of a target (thread-safe, holds no connection). Makes the sessions."""
