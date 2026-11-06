@@ -55,6 +55,22 @@ def latest_job_row(account_id: int):
     return db.q1("SELECT * FROM jobs WHERE account_id=? ORDER BY id DESC LIMIT 1", (account_id,))
 
 
+def source_view(r) -> dict:
+    """Source of an account: config without secrets. No source_kind = the PST of the account."""
+    if not r["source_kind"]:
+        return {"kind": "pst", "config": {"pst_id": r["pst_id"]}, "has_secret": False}
+    return {"kind": r["source_kind"], "config": db.jload(r["source_config"], {}) or {},
+            "has_secret": bool(r["source_secret_enc"])}
+
+
+def target_view(r) -> dict:
+    """Own target of an account, kind None = its server (IMAP + DAV with the account's password)."""
+    if not r["target_kind"]:
+        return {"kind": None, "config": {}, "has_secret": False}
+    return {"kind": r["target_kind"], "config": db.jload(r["target_config"], {}) or {},
+            "has_secret": bool(r["target_secret_enc"])}
+
+
 def account_view(r, with_job: bool = True) -> dict:
     job = None
     if with_job:
@@ -64,7 +80,7 @@ def account_view(r, with_job: bool = True) -> dict:
         "id": r["id"], "server_id": r["server_id"], "email": r["email"], "login": r["login"] or r["email"],
         "has_password": bool(r["password_enc"]), "status": r["status"], "last_test": r["last_test"],
         "last_test_result": db.jload(r["last_test_result"], None),
-        "pst_id": r["pst_id"],
+        "pst_id": r["pst_id"], "source": source_view(r), "target": target_view(r),
         "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"])},
         "job": job,
     }

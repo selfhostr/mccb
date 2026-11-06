@@ -23,6 +23,11 @@ the same file therefore recovers the already migrated state, without duplicates.
 `UPLOAD_CHUNK_SIZE`**: with a different chunk size, the same file has a different fingerprint and would be
 treated as a new PST. Keep the value constant for the whole migration of a batch.
 
+**Other sources.** The same states and the same marker apply to every route (see [Connectors](connectors.md)): the header holds
+`<namespace-item_key>`, where the namespace identifies the source mailbox. Items are kept per source, so changing a password
+keeps the state, and going back to a source already migrated sends nothing twice. For an IMAP source, `item_key` comes from the
+folder, UIDVALIDITY and UID; if UIDVALIDITY changes, messages are recognized by Message-ID instead of being copied again.
+
 **Pause, stop.** APPENDs not yet started are cancelled (back to `pending`), those in progress run to completion.
 
 **Worker restart or brutal stop.** On `SIGTERM`, subprocesses receive SIGTERM

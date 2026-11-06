@@ -18,7 +18,22 @@ JSON over HTTP, `/api` prefix, session cookie. `/docs`, `/redoc` and `/openapi.j
   `POST /api/accounts/import-csv` (multipart file + server_id; columns `email;password[;login]`, `,` or `;`, optional header)
   → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
   Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
-  `pst_id|null,options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
+  `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
+- Connectors (see [Connectors](connectors.md)):
+  `GET /api/connectors` → `[{kind,label,description,source:Role|null,target:Role|null}]`, with
+  Role = `{items:[...],capabilities:[...],fields:[{name,label,type,required,secret,default,options?,help?}]}`.
+  Render forms from it: `type` is `text`, `password`, `number`, `boolean`, `select` or `url`, and new kinds need no UI change.
+  `GET/PUT /api/accounts/{id}/source`, `PUT` body `{kind,config,secrets?}`, returns the account. `kind:"pst"` goes back to the PST
+  (`config:{pst_id}` optional). Migration state is kept per source: pointing at a source again resumes it without duplicates.
+  `PUT /api/accounts/{id}/pst` only changes the linked PST: it does not switch an account away from another source.
+  `GET/PUT /api/accounts/{id}/target`, same body, `kind:null` goes back to the server of the account. The target serves the items
+  it declares, the server covers the others. Pointing at another mailbox forgets the account's items: everything is sent again.
+  Secrets: `secrets` omitted keeps them, `{}` clears them, a value replaces that field. They are never returned (`has_secret` only).
+  **422** invalid config or unknown kind, **409** while a job is active for the account.
+  `POST /api/connectors/{kind}/test {role:'source'|'target',config,secrets?,account_id?}` tries a config without saving it
+  (`secrets` omitted with `account_id`: those stored on the account for this kind) →
+  `{ok:true,msg,folders:[{path,kind,special,count}]}` for a source, `{ok:true,msg,quota,...}` for a target,
+  `{ok:false,error_kind:'auth'|'config'|'unreachable'|'transient'|'rejected'|'quota'|'folder_missing',msg}` when refused.
 - PST upload (resumable):
   `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
   `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 / 422 if wrong hash

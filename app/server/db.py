@@ -28,11 +28,14 @@ CREATE TABLE IF NOT EXISTS {name} (
     size INTEGER,
     job_id INTEGER,
     updated_at REAL NOT NULL,
+    source_ref TEXT,
     UNIQUE (account_id, pst_key, kind, item_key)
 );
 """
 # Items are attached to the PST by its fingerprint (`pst_key` = psts.pst_sha) and not by its id:
 # deleting then re-uploading the same file recovers the progress state (no re-import or duplicate).
+# Other sources use a namespace of their own in pst_key ("src-...", see connectors/registry.py) and pst_id 0.
+# source_ref: second identity of the item at the source (SourceItem.alt_key), survives a change of item_key.
 ITEMS_INDEXES = """
 CREATE INDEX IF NOT EXISTS items_status2 ON items(account_id, pst_key, kind, status);
 CREATE INDEX IF NOT EXISTS items_folder2 ON items(account_id, pst_key, kind, folder);
@@ -93,6 +96,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     opt_calendar INTEGER NOT NULL DEFAULT 1,
     opt_contacts INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL,
+    source_kind TEXT,
+    source_config TEXT,
+    source_secret_enc TEXT,
+    target_kind TEXT,
+    target_config TEXT,
+    target_secret_enc TEXT,
     UNIQUE (server_id, email)
 );
 CREATE TABLE IF NOT EXISTS jobs (
@@ -195,7 +204,12 @@ def _migrate_tuning(conn: sqlite3.Connection) -> None:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migrations: jobs.rate_bytes, jobs.tuning, servers.tuning/builders, items(pst_id) -> items(pst_key = PST
-    fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
+    fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`, accounts.source_* / target_* (NULL: the PST
+    of the account, written to its server) and items.source_ref."""
+    for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
+                "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
+        _add_column(conn, "accounts", ddl)
+    _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
     _migrate_tuning(conn)

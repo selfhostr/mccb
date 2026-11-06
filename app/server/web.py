@@ -15,7 +15,9 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..connectors.wiring import items_key_of_account, source_problem
 from . import crash, csvimport, db, preview, repo, uploads
+from .api_connectors import router as connectors_router
 from .config import settings
 from .dav import DavClient
 from .imap import ImapConn, ImapError, ImapParams
@@ -549,12 +551,12 @@ def create_runs(body: RunIn):
         if a is None:
             errors.append({"account_id": aid, "msg": "unknown account"})
             continue
-        if not a["password_enc"]:
+        if not a["password_enc"] and not a["target_kind"]:
             errors.append({"account_id": aid, "msg": "password missing"})
             continue
-        p = db.q1("SELECT status FROM psts WHERE id=?", (a["pst_id"],)) if a["pst_id"] else None
-        if p is None or p["status"] != "valid":
-            errors.append({"account_id": aid, "msg": "no valid PST linked"})
+        problem = source_problem(a)
+        if problem:
+            errors.append({"account_id": aid, "msg": problem})
             continue
         active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
                        "ORDER BY id DESC LIMIT 1", (aid,))
@@ -681,10 +683,10 @@ def job_report(jid: int, download: int = 0):
 @app.get("/api/jobs/{jid}/errors")
 def job_errors(jid: int, limit: int = 1000):
     r = _job_or_404(jid)
-    a = db.q1("SELECT pst_id FROM accounts WHERE id=?", (r["account_id"],))
-    if a is None or a["pst_id"] is None:
+    a = db.q1("SELECT * FROM accounts WHERE id=?", (r["account_id"],))
+    pkey = items_key_of_account(a) if a is not None else None
+    if pkey is None:
         return []
-    pkey = db.pst_key_of(db.q1("SELECT id, pst_sha FROM psts WHERE id=?", (a["pst_id"],)))
     rows = db.q("SELECT id, kind, folder, item_key, subject, error, updated_at FROM items WHERE account_id=? AND pst_key=? "
                 "AND status='error' ORDER BY id LIMIT ?", (r["account_id"], pkey, max(1, min(limit, 10000))))
     return [dict(x) for x in rows]
@@ -735,6 +737,9 @@ async def _prune_events() -> None:
         except Exception:
             pass
         await asyncio.sleep(300)
+
+
+app.include_router(connectors_router)  # before the /api catch-all below
 
 
 # ======================================================================= static SPA

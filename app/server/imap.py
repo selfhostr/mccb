@@ -396,10 +396,13 @@ class ImapConn:
             except Exception as e:
                 raise wrap_exc(e) from e
             self._check(typ, data, "FETCH")
-            for d in data or []:
+            data = list(data or [])
+            for i, d in enumerate(data):
                 if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
                     continue
-                m = re.search(rb"UID\s+(\d+)", d[0] or b"")
+                # attribute order is free: UID may come after the literal (next element of imaplib's list)
+                tail = data[i + 1] if i + 1 < len(data) and isinstance(data[i + 1], bytes) else b""
+                m = re.search(rb"UID\s+(\d+)", (d[0] or b"") + b" " + tail)
                 if not m:
                     continue
                 msg = BytesHeaderParser().parsebytes(d[1])

@@ -268,8 +268,12 @@ class AppendPool:
                     return None
                 self.cond.wait()
 
+    def _new_conn(self):
+        """Not connected yet: _do connects it (a subclass may use another kind of session)."""
+        return ImapConn(self.params)
+
     def _run(self) -> None:
-        conn = ImapConn(self.params)
+        conn = self._new_conn()
         try:
             while True:
                 t = self._next()
@@ -650,17 +654,19 @@ class JobRunner:
     def upsert_item(self, kind: str, key: str, fkey: str, status: str, **kw) -> int:
         now = time.time()
         cols = {"target": kw.get("target"), "error": kw.get("error"), "warnings": kw.get("warnings"),
-                "subject": kw.get("subject"), "hash": kw.get("hash"), "size": kw.get("size")}
+                "subject": kw.get("subject"), "hash": kw.get("hash"), "size": kw.get("size"),
+                "source_ref": kw.get("source_ref")}
         cur = db.ex(
-            "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,job_id,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
             "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
             "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
-            "size=COALESCE(excluded.size, items.size), job_id=excluded.job_id, updated_at=excluded.updated_at "
+            "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
+            "job_id=excluded.job_id, updated_at=excluded.updated_at "
             "RETURNING id",
             (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, cols["target"], cols["error"], cols["warnings"],
-             cols["subject"], cols["hash"], cols["size"], self.job_id, now))
+             cols["subject"], cols["hash"], cols["size"], cols["source_ref"], self.job_id, now))
         return cur.fetchone()[0]
 
     def set_item(self, item_id: int, status: str, error: str | None = None) -> None:
@@ -693,30 +699,7 @@ class JobRunner:
         self._mark()  # stale marker from a killed process (abrupt container stop): not a crash
         try:
             self._setup_tuning()
-            if not self.pst_row:
-                raise JobFailed("no PST linked to the account")
-            if self.pst_row["status"] != "valid":
-                raise JobFailed(f"PST not valid (status {self.pst_row['status']})")
-            eng = engine()
-            self._mark(phase="open")
-            with eng.PstFile(self.pst_row["path"]) as pst:
-                self.pst = pst
-                self.eng = eng
-                self.folders = pst.folders()
-                self._mark()
-                for f in self.folders:
-                    k = {"mail": "mail", "calendar": "event", "contacts": "contact"}.get(f.kind)
-                    if k and self._phase_enabled(k):
-                        self.totals[k] += int(f.count or 0)
-                self.flush(force=True)
-                self.precheck()
-                if self.acc["opt_mail"]:
-                    self.phase_mail()
-                if self.srv["dav_enabled"] and self.acc["opt_calendar"]:
-                    self.phase_dav("calendar")
-                if self.srv["dav_enabled"] and self.acc["opt_contacts"]:
-                    self.phase_dav("contacts")
-                self.phase_verify()
+            self._execute()
         except PauseRequested:
             self.flush(force=True)
             db.ex("UPDATE jobs SET worker_id=NULL, rate=NULL, eta=NULL WHERE id=?", (self.job_id,))
@@ -745,6 +728,33 @@ class JobRunner:
         status = "done_with_errors" if (n_err or verify_ko or n_unfinished) else "done"
         self.log(f"Finished: {status} ({n_err} error(s))", "warning" if status != "done" else "info")
         self._finish(status, err)
+
+    def _execute(self) -> None:
+        """The phases of the job. Here the PST to server route; see connector_runner.py for the others."""
+        if not self.pst_row:
+            raise JobFailed("no PST linked to the account")
+        if self.pst_row["status"] != "valid":
+            raise JobFailed(f"PST not valid (status {self.pst_row['status']})")
+        eng = engine()
+        self._mark(phase="open")
+        with eng.PstFile(self.pst_row["path"]) as pst:
+            self.pst = pst
+            self.eng = eng
+            self.folders = pst.folders()
+            self._mark()
+            for f in self.folders:
+                k = {"mail": "mail", "calendar": "event", "contacts": "contact"}.get(f.kind)
+                if k and self._phase_enabled(k):
+                    self.totals[k] += int(f.count or 0)
+            self.flush(force=True)
+            self.precheck()
+            if self.acc["opt_mail"]:
+                self.phase_mail()
+            if self.srv["dav_enabled"] and self.acc["opt_calendar"]:
+                self.phase_dav("calendar")
+            if self.srv["dav_enabled"] and self.acc["opt_contacts"]:
+                self.phase_dav("contacts")
+            self.phase_verify()
 
     def count_unfinished(self) -> int:
         """Items of active phases left `pending`/`inflight`: the job cannot be "finished"."""
@@ -832,7 +842,7 @@ class JobRunner:
     def _tune_tick(self, pool: AppendPool) -> None:
         """Mail phase: one Sample about every `tune_interval` seconds (sooner on a transient IMAP error)
         fed to the AutoTuner, whose decision is applied at once."""
-        if self.tuner is None or pool is None:
+        if self.tuner is None or pool is None or not getattr(pool, "tunable", True):
             return
         now = time.monotonic()
         bpool = getattr(self, "_bpool", None)
@@ -1568,10 +1578,10 @@ class JobRunner:
         totals = {}
         for kind, pk in PROGRESS_KEY.items():
             rows = db.q("SELECT status, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? GROUP BY status",
-                        (self.account_id, self.pst_key, kind)) if self.pst_id else []
+                        (self.account_id, self.pst_key, kind)) if self.pst_key else []
             c = {r["status"]: r["n"] for r in rows}
             nwarn = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? AND warnings IS NOT NULL",
-                          (self.account_id, self.pst_key, kind))["n"] if self.pst_id else 0
+                          (self.account_id, self.pst_key, kind))["n"] if self.pst_key else 0
             present = None
             if pk == "mail":
                 fs = [f.get("present") for f in self.report.get("folders", [])]
@@ -1583,9 +1593,9 @@ class JobRunner:
                           "pending": c.get("pending", 0) + c.get("inflight", 0)}
         errors = [dict(r) for r in db.q(
             "SELECT kind, folder, item_key, subject, error FROM items WHERE account_id=? AND pst_key=? AND status='error' "
-            "ORDER BY id LIMIT 5000", (self.account_id, self.pst_key))] if self.pst_id else []
+            "ORDER BY id LIMIT 5000", (self.account_id, self.pst_key))] if self.pst_key else []
         warns = []
-        if self.pst_id:
+        if self.pst_key:
             for r in db.q("SELECT kind, folder, item_key, subject, warnings FROM items WHERE account_id=? AND pst_key=? "
                           "AND warnings IS NOT NULL ORDER BY id LIMIT 5000", (self.account_id, self.pst_key)):
                 d = dict(r)
@@ -1611,4 +1621,10 @@ class JobRunner:
 
 
 def run_job(job_id: int, worker_id: str) -> None:
+    r = db.q1("SELECT a.source_kind, a.target_kind FROM jobs j JOIN accounts a ON a.id=j.account_id WHERE j.id=?",
+              (job_id,))
+    if r is not None and ((r["source_kind"] or "pst") != "pst" or r["target_kind"]):
+        from .connector_runner import ConnectorJobRunner
+        ConnectorJobRunner(job_id, worker_id).run()
+        return
     JobRunner(job_id, worker_id).run()
