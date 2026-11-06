@@ -79,6 +79,7 @@ def put_source(aid: int, body: EndpointIn):
             raise HTTPException(404, "unknown PST")
         db.ex("UPDATE accounts SET source_kind=NULL, source_config=NULL, source_secret_enc=NULL, pst_id=? WHERE id=?",
               (pst_id, aid))
+        wiring.sync_files_source(aid)  # an uploaded mbox, Maildir, .eml... is read by the `files` connector
     else:
         current = _stored(r["source_secret_enc"]) if r["source_kind"] == kind else {}
         config, secrets = _validated(kind, "source", body.config, current, body.secrets)

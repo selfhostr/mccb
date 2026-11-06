@@ -1,6 +1,6 @@
 [
   {"label":"Get started","items":["install.md","backup.md"]},
-  {"label":"Using it","items":["migrate.md","connectors.md","import-accounts.md","resume.md","server-intake.md","notifications.md","tuning.md","dav.md","how-it-works.md","reverse-proxy.md","admin-password.md"]},
+  {"label":"Using it","items":["migrate.md","connectors.md","protocols.md","import-accounts.md","resume.md","server-intake.md","notifications.md","tuning.md","dav.md","how-it-works.md","reverse-proxy.md","admin-password.md"]},
   {"label":"Reference","items":["configuration.md","api.md"]},
   {"label":"Security","items":["security.md"]},
   {"label":"Operations","items":["upgrading.md","troubleshooting.md","limits.md"]},

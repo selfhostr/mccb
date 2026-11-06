@@ -10,6 +10,11 @@ A route is a source and a target. `JobRunner` keeps the state: pause, stop, resu
 | `imap` | yes | yes | mail |
 | `caldav` | | yes | calendar |
 | `carddav` | | yes | contacts |
+| `jmap` | yes | yes | mail, contacts |
+| `google` | yes | | mail, calendar, contacts |
+| `files` | yes | | mail, calendar, contacts |
+
+The last three are described in [Protocols and file formats](protocols.md).
 
 `GET /api/connectors` returns this catalogue with the capabilities and the fields of each role. The UI renders its forms from it, so a new kind needs no UI code.
 

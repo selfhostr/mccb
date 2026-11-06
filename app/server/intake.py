@@ -22,13 +22,16 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
+from ..connectors import wiring
 from . import db, intake_settings, netsafe, repo, uploads
 from .config import settings
 from .security import decrypt, encrypt
 
 log = logging.getLogger("intake")
 
-EXTS = (".pst", ".ost")
+PST_EXTS = (".pst", ".ost")
+# also taken: mail, calendar and contact files read by the `files` connector (connectors/files.py)
+EXTS = PST_EXTS + (".mbox", ".mbx", ".eml", ".msg", ".ics", ".vcf", ".zip")
 TEMP_SUFFIXES = (".part", ".partial", ".tmp", ".temp", ".crdownload", ".filepart", ".swp", ".!qb")
 COPY_BUF = 4 * 1024 * 1024
 PROGRESS_EVERY = 1.0
@@ -48,7 +51,7 @@ class Cancelled(Exception):
 
 # ====================================================================================== helpers
 def is_candidate(name: str) -> bool:
-    """A file the drop folder may pick up: .pst/.ost, not a dotfile (rsync temp names are `.name.XXXXXX`),
+    """A file the drop folder may pick up: .pst/.ost, .mbox, .eml, .msg, .ics, .vcf, .zip, not a dotfile (rsync temp names are `.name.XXXXXX`),
     not a known temporary suffix."""
     low = name.lower()
     if name.startswith((".", "~")) or low.endswith(TEMP_SUFFIXES):
@@ -685,6 +688,7 @@ def chain_one(pst, cfg: dict) -> dict:
     cur = db.ex("UPDATE accounts SET pst_id=? WHERE id=? AND pst_id IS NULL", (pst["id"], a["id"]))
     if not cur.rowcount:
         return {"result": "account_has_pst", "account_id": a["id"]}
+    wiring.sync_files_source(a["id"])
     out = {"result": "assigned", "account_id": a["id"], "started": False, "job_id": None}
     if cfg["start_import"]:
         if not a["password_enc"]:

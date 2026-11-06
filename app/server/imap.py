@@ -9,6 +9,7 @@ import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 imaplib._MAXLINE = 10_000_000  # large LIST responses
 
@@ -84,6 +85,19 @@ def _login(M: imaplib.IMAP4, login: str, password: str) -> None:
         M.state = "AUTH"
     finally:
         M._encoding = old
+
+
+def _login_xoauth2(M: imaplib.IMAP4, login: str, token: str) -> None:
+    """SASL XOAUTH2. On a refusal the server sends a JSON challenge and waits for an empty line."""
+    sent = []
+
+    def answer(_challenge):
+        if sent:
+            return b""
+        sent.append(True)
+        return f"user={login}\x01auth=Bearer {token}\x01\x01".encode("utf-8")
+
+    M.authenticate("XOAUTH2", answer)
 
 
 # ---------------------------------------------------------------- errors
@@ -202,6 +216,7 @@ class ImapParams:
     login: str
     password: str
     timeout: float = 120.0
+    token_source: Callable[[], str] | None = None  # set: AUTHENTICATE XOAUTH2 with this token, no password
 
 
 def _ssl_ctx(verify: bool) -> ssl.SSLContext:
@@ -224,6 +239,8 @@ class ImapConn:
     def connect(self) -> "ImapConn":
         self.close()
         p = self.p
+        # first: a token refused or an unreachable provider keeps its own error kind (raised by the source)
+        token = p.token_source() if p.token_source is not None else None
         try:
             if p.security == "ssl":
                 M = imaplib.IMAP4_SSL(p.host, p.port, ssl_context=_ssl_ctx(p.verify_tls), timeout=p.timeout)
@@ -234,7 +251,10 @@ class ImapConn:
         except Exception as e:
             raise ImapError(f"cannot connect to {p.host}:{p.port}: {e}", "temp") from e
         try:
-            _login(M, p.login, p.password)
+            if token is not None:
+                _login_xoauth2(M, p.login, token)
+            else:
+                _login(M, p.login, p.password)
         except imaplib.IMAP4.error as e:
             try:
                 M.logout()

@@ -31,6 +31,11 @@
   - After a UIDVALIDITY change, messages are recognized by Message-ID (date and size without one), in the same folder only. Two
     messages with no Message-ID and the same date and size can be confused.
   - Without SPECIAL-USE, special folders are recognized by their usual names only.
+- **JMAP, Google and files** (see [Protocols and file formats](protocols.md)):
+  - JMAP Calendars is an Internet-Draft and is not implemented: use CalDAV for the calendars of a JMAP provider. JMAP credentials are only sent to the host of the session URL.
+  - The Google connector was never run against Google, only against simulated servers. A Gmail message with several labels is copied once, in one folder, and the other labels are not carried. Contacts are the saved contacts only, calendars keep the time zone name without a `VTIMEZONE` block.
+  - `changed_since` exists for JMAP, Google and Calendar/People sync tokens, and jobs do not use it yet.
+  - A file source is one upload: a Maildir or a folder of messages must be zipped. A `.msg` is converted on a best-effort basis (no RTF-only bodies, embedded messages or OLE objects). Entries of a zip over 512 MB, with a compression ratio above 250, encrypted, or nested zips are skipped. The upload page of the UI may still filter on `.pst` and `.ost`.
 - **No Swagger UI**: `/docs`, `/redoc` and `/openapi.json` are disabled (the API reference
   is in [API](api.md)).
 - **In-memory login rate limiting**: 5 failures / 5 min per IP, reset when `web` restarts.
