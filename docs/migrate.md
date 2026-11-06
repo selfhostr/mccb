@@ -2,6 +2,8 @@
 
 By the end of this page a mailbox, its calendar and its contacts will be imported from a PST file, with a report.
 
+A PST is the most common source, so the steps below follow it. Other sources (mbox, Maildir, loose messages, a live IMAP, CalDAV, CardDAV, Exchange, Microsoft 365, JMAP or Google server) follow the same steps, except that uploading and linking a file is replaced by choosing the source and the target of the account: see [Connectors](connectors.md) and [Protocols and file formats](protocols.md). Files other than a PST arrive in the same way and are listed with the PSTs.
+
 1. **Servers.** Create a server: IMAP host and port, security (`ssl`, `starttls`, `none`), TLS
    verification (can be disabled), optional root folder (`root_folder`, e.g. `PST Import`), CalDAV/CardDAV URL
    (empty = auto-discovery, see [DAV discovery](dav.md)), number of parallel connections (`workers`). A test button

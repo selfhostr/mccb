@@ -3,8 +3,10 @@
 	import LogOut from '@lucide/svelte/icons/log-out';
 	import Unplug from '@lucide/svelte/icons/unplug';
 	import Wifi from '@lucide/svelte/icons/wifi';
+	import type { Component } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { post } from '../lib/api/client.ts';
+	import { asset } from '../lib/base.ts';
 	import { pct } from '../lib/format.ts';
 	import { router } from '../lib/router.svelte.ts';
 	import { data } from '../lib/stores/data.svelte.ts';
@@ -15,7 +17,8 @@
 	import MigrationsPage from './migrations/MigrationsPage.svelte';
 	import SettingsPage from './settings/SettingsPage.svelte';
 
-	let { onlogout }: { onlogout: () => void } = $props();
+	/** extra: only the static demo passes one (its badge); the product never does. */
+	let { onlogout, extra: Extra }: { onlogout: () => void; extra?: Component<{ part: 'badge' | 'footer' }> } = $props();
 
 	const NAV = $derived([
 		{ page: 'migrations', href: '/', label: m.shell_nav_migrations() },
@@ -48,7 +51,7 @@
 <header class="fixed inset-x-0 top-0 z-40 h-[var(--bar-h)] border-b border-line bg-canvas">
 	<div class="flex h-full flex-wrap content-center items-center gap-x-3 px-[var(--gutter)]">
 		<a class="flex min-h-10 items-center gap-2 no-underline" href="/" aria-label={m.shell_home()}>
-			<img src="/favicon.svg" alt="" width="28" height="28" />
+			<img src={asset('favicon.svg')} alt="" width="28" height="28" />
 			<span class="text-[0.9375rem] font-semibold">mccb</span>
 		</a>
 		<nav class="order-last flex w-full gap-0.5 sm:order-none sm:ml-2 sm:w-auto" aria-label={m.shell_nav_label()}>
@@ -62,7 +65,7 @@
 				</a>
 			{/each}
 		</nav>
-		<span class="flex-1"></span>
+		<span class="flex min-w-0 flex-1 justify-center">{#if Extra}<Extra part="badge" />{/if}</span>
 		{#if sending.length}
 			<a class="inline-flex min-h-10 items-center gap-2 rounded-btn px-2 text-ink-2 no-underline transition-colors duration-200 hover:text-ink" href="/files" data-testid="upload-indicator">
 				<FolderUp size={14} />
@@ -85,3 +88,5 @@
 		<SettingsPage />
 	{/if}
 </main>
+
+{#if Extra}<Extra part="footer" />{/if}

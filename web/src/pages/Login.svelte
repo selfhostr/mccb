@@ -1,13 +1,14 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { type Component, onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { ApiError, errorText, post } from '../lib/api/client.ts';
+	import { asset } from '../lib/base.ts';
 	import Button from '../lib/ui/Button.svelte';
 	import ErrorNotice from '../lib/ui/ErrorNotice.svelte';
 	import Field from '../lib/ui/Field.svelte';
 	import Notice from '../lib/ui/Notice.svelte';
 
-	let { expired = false, onlogin }: { expired?: boolean; onlogin: () => unknown } = $props();
+	let { expired = false, onlogin, extra: Extra }: { expired?: boolean; onlogin: () => unknown; extra?: Component<{ part: 'badge' | 'footer' }> } = $props();
 
 	let password = $state('');
 	let busy = $state(false);
@@ -37,7 +38,7 @@
 <main id="main" class="flex min-h-dvh items-center justify-center p-4">
 	<form class="flex w-full max-w-[320px] flex-col gap-4" onsubmit={submit}>
 		<div class="flex items-center gap-3">
-			<img src="/favicon.svg" alt="" width="32" height="32" />
+			<img src={asset('favicon.svg')} alt="" width="32" height="32" />
 			<h1 class="text-xl">mccb</h1>
 		</div>
 		{#if expired}<Notice>{m.login_form_expired()}</Notice>{/if}
@@ -46,5 +47,6 @@
 		</Field>
 		{#if error}<ErrorNotice title={m.login_form_failed()} message={error} />{/if}
 		<Button variant="primary" type="submit" loading={busy}>{m.login_form_submit()}</Button>
+		{#if Extra}<Extra part="badge" />{/if}
 	</form>
 </main>

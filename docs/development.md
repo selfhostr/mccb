@@ -25,6 +25,8 @@ docker run --rm -v "$PWD":/w -w /w/web node:26-slim sh -c "npm ci && npm run che
 
 Browser tests (`tests/ui/`) drive that build against a mock API (`tests/ui/mock-api.mjs`, password `admin`). They need Playwright's Chromium: `npx playwright install --with-deps chromium`, then `npm run test:ui`. For UI work, `npm run mock` and `MCCB_DEV_API=http://127.0.0.1:4173 npm run dev` run without the backend.
 
+The static demo (`/demo/` on the site) is the same UI built with `npm run build:demo` into `web/dist-demo/`. The mock API of the tests (`web/src/demo/mock-core.mjs`) runs in the visitor's browser instead of behind HTTP: `fetch` and `EventSource` are replaced, so no request leaves the page. Its headers are in `web/demo-headers`, and `npm run test:demo` serves the build with them and fails on a request to another origin or a policy violation.
+
 Coverage: CRUD, authentication, SSE, CSV import (`;` and `,`, optional header, UTF-8, cp1252, BOM),
 resumable upload (chunk with wrong hash → 422, resume, identical final file, disk space
 check), full import, root folder, pause and resume, stop then retry without duplicates, simulated

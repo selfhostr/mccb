@@ -5,6 +5,8 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
 	testDir: '../tests/ui',
 	testMatch: '*.spec.ts',
+	// The static demo has its own config (playwright.demo.config.ts): another server, another build.
+	testIgnore: 'demo.spec.ts',
 	outputDir: 'test-results',
 	workers: 1,
 	fullyParallel: false,

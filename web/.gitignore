@@ -5,3 +5,4 @@ project.inlang/.gitignore
 project.inlang/README.md
 test-results/
 playwright-report/
+dist-demo/

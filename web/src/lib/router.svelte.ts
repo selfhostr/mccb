@@ -1,15 +1,19 @@
 import { legacyRedirect, matchRoute, type Route } from './logic/routes.ts';
 
+/** The static demo lives under /demo/: the routes stay /files, /jobs/3, the address bar carries the prefix. */
+const BASE = __DEMO__ ? '/demo' : '';
+const inside = (path: string) => (BASE && (path === BASE || path.startsWith(`${BASE}/`)) ? path.slice(BASE.length) || '/' : path);
+
 class Router {
-	path = $state(location.pathname);
+	path = $state(inside(location.pathname));
 	search = $state(location.search);
 	route: Route = $derived(matchRoute(this.path));
 	params: URLSearchParams = $derived(new URLSearchParams(this.search));
 
 	constructor() {
-		const redirect = legacyRedirect(location.pathname, location.hash);
+		const redirect = legacyRedirect(inside(location.pathname), location.hash);
 		if (redirect) {
-			history.replaceState(null, '', redirect);
+			history.replaceState(null, '', BASE + redirect);
 			this.sync();
 		}
 		addEventListener('popstate', () => this.sync());
@@ -22,20 +26,20 @@ class Router {
 			if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
 			if (url.pathname === location.pathname && url.search === location.search && url.hash) return;
 			e.preventDefault();
-			this.go(url.pathname + url.search + url.hash);
+			this.go(inside(url.pathname) + url.search + url.hash);
 		});
 	}
 
 	private sync(): void {
-		this.path = location.pathname;
+		this.path = inside(location.pathname);
 		this.search = location.search;
 	}
 
 	go(url: string): void {
 		const before = this.route.page;
-		history.pushState(null, '', url);
+		history.pushState(null, '', BASE + url);
 		this.sync();
-		const hash = new URL(url, location.href).hash;
+		const hash = new URL(BASE + url, location.href).hash;
 		if (hash) setTimeout(() => document.getElementById(hash.slice(1))?.scrollIntoView());
 		// Opening and closing the job panel keeps the table where it is.
 		else if (this.route.page !== before) scrollTo(0, 0);

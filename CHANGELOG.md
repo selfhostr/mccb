@@ -14,6 +14,9 @@
 - Exchange in both directions: `exchange_ews` for Exchange on premises, `m365_graph` for Exchange Online, with mail, calendar, contacts and tasks. Tested against simulated servers, not real Exchange: see docs/exchange.md.
 - One credential for many mailboxes: EWS impersonation, Graph app-only, Dovecot-style master user on IMAP. OAuth2 on IMAP (`imap_oauth2`).
 - CalDAV and CardDAV can be sources. Tasks are carried to targets that can hold them.
+- JMAP (mail and contacts, as source and target) and Google (Gmail, Calendar, People, as source) connectors. Tested against simulated servers only, JMAP calendars are not carried: see [Protocols and file formats](docs/protocols.md).
+- Files as a source: mbox, Maildir (zipped), `.eml`, `.msg`, `.ics`, `.vcf` and zip files, uploaded like a PST.
+- Server-side intake: a drop folder, and fetch over HTTP(S), SFTP or S3, see [Server-side intake](docs/server-intake.md). Notifications by ntfy, webhook or e-mail, see [Notifications](docs/notifications.md).
 - Exchange inbox rules converted to Sieve, best effort, uploaded over ManageSieve or offered as a script.
 - New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
 - Live events update only what changed, at most once per frame. Rows are keyed and long lists are windowed, so clicks are not lost and open selects stay open during imports.
@@ -21,6 +24,8 @@
 - Connection tests show a running state, cannot start twice, report IMAP, CalDAV and CardDAV, and stay visible after a reload.
 - Upload queue: one file at a time by default (setting), order chosen when adding several files, reorder, pause, resume, cancel. Hashing no longer blocks the page.
 - Dark and light themes, density, visible columns, mask addresses, nine languages, stored in the browser.
+- Static demo of the interface, built with `npm run build:demo`: the real UI with a simulated API in the browser, fictional data only, nothing sent anywhere.
+- README and documentation describe every source and target, not only PST files.
 
 ## 1.1.2
 - The product is now MCCB (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.

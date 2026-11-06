@@ -7,10 +7,12 @@
     "dev": "vite dev",
     "mock": "node ../tests/ui/mock-api.mjs",
     "build": "vite build",
+    "build:demo": "vite build --mode demo",
     "preview": "vite preview",
     "check": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --strategy localStorage preferredLanguage baseLocale --output-structure locale-modules --emit-ts-declarations --silent && svelte-check --tsconfig ./tsconfig.json && node scripts/i18n-check.mjs",
     "test": "vitest run",
     "test:ui": "playwright test --config playwright.config.ts",
+    "test:demo": "playwright test --config playwright.demo.config.ts",
     "i18n:check": "node scripts/i18n-check.mjs",
     "licences": "node scripts/check-licences.mjs"
   },
