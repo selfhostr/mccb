@@ -5,6 +5,7 @@ import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 import CircleSlash from '@lucide/svelte/icons/circle-slash';
 import Clock from '@lucide/svelte/icons/clock';
 import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+import Download from '@lucide/svelte/icons/download';
 import Pause from '@lucide/svelte/icons/pause';
 import ScanSearch from '@lucide/svelte/icons/scan-search';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
@@ -54,6 +55,12 @@ export function pstLook(status: Pst['status']): StatusLook {
 			return { tone: 'signal', icon: CircleCheck, label: m.status_pst_valid() };
 		case 'invalid':
 			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_invalid() };
+		case 'fetching':
+			return { tone: 'info', icon: Download, label: m.status_pst_fetching(), spin: false };
+		case 'cancelling':
+			return { tone: 'advisory', icon: LoaderCircle, label: m.status_pst_cancelling(), spin: true };
+		case 'fetch_failed':
+			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_fetch_failed() };
 		default:
 			return { tone: 'ghost', icon: CircleDashed, label: String(status) };
 	}

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { m } from '#lib/paraglide/messages.js';
 	import { COLUMN_KEYS, type ColumnKey, prefs } from '../../lib/prefs.svelte.ts';
+	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import Field from '../../lib/ui/Field.svelte';
 	import LanguageSelect from '../../lib/ui/LanguageSelect.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
@@ -36,13 +37,12 @@
 			</Field>
 		</div>
 		<Toggle checked={prefs.value.maskAddresses} label={m.settings_appearance_mask()} hint={m.settings_appearance_mask_hint()} onchange={(v) => prefs.set('maskAddresses', v)} />
-		<details>
-			<summary class="flex min-h-10 cursor-pointer items-center font-medium text-ink-2">{m.settings_appearance_columns()}</summary>
+		<Disclosure title={m.settings_appearance_columns()} data-testid="columns-disclosure">
 			<div class="flex flex-col">
 				{#each COLUMN_KEYS as key (key)}
 					<Toggle checked={prefs.value.columns[key]} label={COLUMN_LABELS[key]} onchange={(v) => prefs.set('columns', { ...prefs.value.columns, [key]: v })} />
 				{/each}
 			</div>
-		</details>
+		</Disclosure>
 	</div>
 </section>
