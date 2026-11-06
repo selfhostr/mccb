@@ -16,7 +16,7 @@ The worker watches `DATA_DIR/inbox` (`./data/inbox` with the default compose fil
 rsync -av --partial *.pst user@server:/path/to/data/inbox/
 ```
 
-- Only `.pst` and `.ost` files are taken. Dotfiles (rsync temporary names are `.name.XXXXXX`) and names ending in `.part`, `.partial`, `.tmp`, `.temp`, `.crdownload` are ignored. Sub-folders are scanned, except hidden ones.
+- `.pst` and `.ost` files are taken, and also `.mbox`, `.mbx`, `.eml`, `.msg`, `.ics`, `.vcf` and `.zip` files, which become sources for the `files` connector (see [Protocols and file formats](protocols.md)). Keep unrelated archives out of the folder. Dotfiles (rsync temporary names are `.name.XXXXXX`) and names ending in `.part`, `.partial`, `.tmp`, `.temp`, `.crdownload` are ignored. Sub-folders are scanned, except hidden ones.
 - A file is picked up when its size and modification time have not changed for `inbox.settle_seconds` (60 by default). A file still being copied is left alone.
 - The file is moved into the PST folder: an atomic rename on the same filesystem, otherwise a copy followed by removal of the source. If the worker restarts in the middle, it finishes the move.
 - A file with the same content as a PST already known is left in the folder and not registered again. MCCB never deletes it.

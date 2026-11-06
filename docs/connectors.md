@@ -13,8 +13,11 @@ A route is a source and a target. `JobRunner` keeps the state: pause, stop, resu
 | `carddav` | yes | yes | contacts |
 | `exchange_ews` | yes | yes | mail, calendar, contacts, tasks |
 | `m365_graph` | yes | yes | mail, calendar, contacts, tasks |
+| `jmap` | yes | yes | mail, contacts |
+| `google` | yes | | mail, calendar, contacts |
+| `files` | yes | | mail, calendar, contacts |
 
-The Exchange connectors have been tested against simulated servers, not real Exchange: see [Exchange](exchange.md).
+The Exchange connectors have been tested against simulated servers, not real Exchange: see [Exchange](exchange.md). `jmap`, `google` and `files` are described in [Protocols and file formats](protocols.md).
 
 `GET /api/connectors` returns this catalogue with the capabilities and the fields of each role. The UI renders its forms from it, so a new kind needs no UI code.
 

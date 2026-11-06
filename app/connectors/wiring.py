@@ -10,6 +10,7 @@ from . import registry
 from .base import CALENDAR, CONTACTS, MAIL, TASKS, ConnectorError, Source, Target
 
 PST = "pst"
+FILES = "files"   # an uploaded file that is not a PST: mbox, Maildir, .eml, .msg, .ics, .vcf, .zip
 
 
 def source_kind(acc) -> str:
@@ -46,12 +47,36 @@ def source_of_account(acc, ctx: dict | None = None) -> Source:
     return registry.make_source(kind, source_config(acc), load_secrets(acc["source_secret_enc"]), ctx)
 
 
+def sync_files_source(aid: int) -> None:
+    """Keeps `source_kind` right after the file linked to an account changed. A PST keeps the historical empty
+    source_kind; any other uploaded file (see connectors/files.py) is read by the `files` connector. An account that
+    picked another connector (imap, jmap...) is left alone."""
+    acc = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
+    if acc is None or acc["source_kind"] not in (None, "", FILES):
+        return
+    pid = acc["pst_id"]
+    row = db.q1("SELECT scan FROM psts WHERE id=?", (pid,)) if pid else None
+    scan = db.jload(row["scan"], None) if row is not None else None
+    if isinstance(scan, dict) and scan.get("format") == FILES:
+        db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=NULL WHERE id=?",
+              (FILES, db.jdump({"pst_id": pid}), aid))
+    elif acc["source_kind"] == FILES:
+        db.ex("UPDATE accounts SET source_kind=NULL, source_config=NULL, source_secret_enc=NULL WHERE id=?", (aid,))
+
+
+def sync_files_sources_of(pst_id: int) -> None:
+    """After a file was analysed: the accounts already linked to it."""
+    for r in db.q("SELECT id FROM accounts WHERE pst_id=?", (pst_id,)):
+        sync_files_source(r["id"])
+
+
 def items_key_of_account(acc) -> str | None:
     """Value of items.pst_key for the current source of the account (None: nothing to attach items to yet)."""
-    if source_kind(acc) == PST:
-        if not acc["pst_id"]:
+    if source_kind(acc) in (PST, FILES):
+        pid = acc["pst_id"] if source_kind(acc) == PST else source_config(acc).get("pst_id")
+        if not pid:
             return None
-        return db.pst_key_of(db.q1("SELECT id, pst_sha FROM psts WHERE id=?", (acc["pst_id"],)))
+        return db.pst_key_of(db.q1("SELECT id, pst_sha FROM psts WHERE id=?", (pid,)))
     try:
         return registry.namespace(source_kind(acc), "source", source_config(acc))
     except ConnectorError:
@@ -61,9 +86,10 @@ def items_key_of_account(acc) -> str | None:
 def source_problem(acc) -> str | None:
     """Why a job cannot start for this account (None: it can)."""
     kind = source_kind(acc)
-    if kind == PST:
-        p = db.q1("SELECT status FROM psts WHERE id=?", (acc["pst_id"],)) if acc["pst_id"] else None
-        return None if p is not None and p["status"] == "valid" else "no valid PST linked"
+    if kind in (PST, FILES):
+        pid = acc["pst_id"] if kind == PST else source_config(acc).get("pst_id")
+        p = db.q1("SELECT status FROM psts WHERE id=?", (pid,)) if pid else None
+        return None if p is not None and p["status"] == "valid" else f"no valid {'PST' if kind == PST else 'file'} linked"
     spec = registry.get(kind)
     if spec is None or spec.source is None:
         return f"unknown source connector '{kind}'"

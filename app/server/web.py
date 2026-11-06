@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..connectors.wiring import items_key_of_account, source_problem
+from ..connectors.wiring import items_key_of_account, source_problem, sync_files_source
 from . import crash, csvimport, db, preview, repo, uploads
 from .api_connectors import router as connectors_router
 from .config import settings
@@ -323,6 +323,7 @@ def create_account(a: AccountIn):
                 (a.server_id, email, (a.login or "").strip(), encrypt(a.password) if a.password else None,
                  int(o.get("mail", True)), int(o.get("calendar", True)), int(o.get("contacts", True)),
                  a.pst_id if a.pst_id and repo.get_pst(a.pst_id) else None, time.time()))
+    sync_files_source(cur.lastrowid)
     return repo.get_account(cur.lastrowid)
 
 
@@ -365,6 +366,8 @@ def update_account(aid: int, a: AccountUpdate):
             db.ex(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", (*vals, aid))
             if target_changed:  # new target: everything must be re-sent
                 db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+            if "pst_id" in a.model_fields_set:
+                sync_files_source(aid)
         except Exception as e:
             if "UNIQUE" in str(e):
                 raise HTTPException(409, "this account already exists on this server")
@@ -388,6 +391,7 @@ def set_account_pst(aid: int, body: dict = Body(...)):
     if pid is not None and not repo.get_pst(int(pid)):
         raise HTTPException(404, "unknown PST")
     db.ex("UPDATE accounts SET pst_id=? WHERE id=?", (pid, aid))
+    sync_files_source(aid)
     return repo.get_account(aid)
 
 
@@ -519,6 +523,8 @@ async def preview_pst(pid: int, limit: int = 20):
         raise HTTPException(404, "unknown PST")
     if row["status"] != "valid":
         raise HTTPException(409, "PST not valid")
+    if (db.jload(row["scan"], None) or {}).get("format") == "files":
+        raise HTTPException(409, "no preview for this kind of file: it is not a PST")
     limit = max(1, min(200, limit))
     try:
         zpath, tmp = await preview.build_zip(row["path"], limit)

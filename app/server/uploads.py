@@ -264,6 +264,19 @@ def delete_pst(pid: int) -> None:
     db.ex("DELETE FROM psts WHERE id=?", (pid,))
 
 
+def _scan_other_file(path: str, filename: str) -> dict:
+    """Analysis of a file that is not a PST. Raises ValueError, with the PST message first, when it is none of the
+    supported formats."""
+    from ..connectors import files
+    if not files.looks_like_files(path, filename):
+        raise ValueError("PST signature '!BDN' missing: this is not a PST file, nor a supported mbox, .eml, .msg, "
+                         ".ics, .vcf or .zip file")
+    try:
+        return files.scan_upload(path, filename)
+    except (ValueError, OSError) as e:
+        raise ValueError(f"not a PST; as a mail, calendar or contact file: {e}") from e
+
+
 def validate(pid: int) -> None:
     """Run by the worker: signature + full scan by the engine."""
     from .engine_loader import check_signature, engine
@@ -273,7 +286,12 @@ def validate(pid: int) -> None:
     path = row["path"]
     try:
         if not check_signature(path):
-            raise ValueError("PST signature '!BDN' missing: this is not a PST file")
+            scan = _scan_other_file(path, row["filename"])  # mbox, Maildir, .eml...: see connectors/files.py
+            db.ex("UPDATE psts SET status='valid', scan=?, error=NULL, updated_at=? WHERE id=? AND status='validating'",
+                  (db.jdump(scan), time.time(), pid))
+            from ..connectors import wiring
+            wiring.sync_files_sources_of(pid)
+            return
         eng = engine()
         from .crash import maybe_crash
         maybe_crash("validate")  # test hook (subprocess only)
