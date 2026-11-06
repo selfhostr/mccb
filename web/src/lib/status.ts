@@ -11,7 +11,7 @@ import ScanSearch from '@lucide/svelte/icons/scan-search';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 import Upload from '@lucide/svelte/icons/upload';
 import { m } from '#lib/paraglide/messages.js';
-import type { JobStatus, Pst } from './api/types.ts';
+import type { Job, JobStatus, Pst } from './api/types.ts';
 import type { UploadStatus } from './upload/queue.ts';
 import type { Tone } from './ui/Plate.svelte';
 
@@ -43,6 +43,12 @@ export function jobLook(status: JobStatus): StatusLook {
 		default:
 			return { tone: 'ghost', icon: CircleDashed, label: String(status) };
 	}
+}
+
+/** A job paused by the allowed hours is waiting, not stopped and not failed. */
+export function jobLookOf(job: Pick<Job, 'status' | 'pause_reason'>): StatusLook {
+	if (job.status === 'paused' && job.pause_reason === 'window') return { tone: 'info', icon: Clock, label: m.status_job_waiting_hours() };
+	return jobLook(job.status);
 }
 
 export function pstLook(status: Pst['status']): StatusLook {

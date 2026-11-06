@@ -65,10 +65,15 @@ export interface StreamProgress {
 
 export interface Job {
 	id: number;
+	/** Higher runs first among queued jobs. */
+	priority?: number;
+	batch_id?: number | null;
+	/** 'window': waiting for the allowed hours of the server, resumes by itself. null: paused by the administrator. */
+	pause_reason?: 'window' | null;
 	account_id: number;
 	status: JobStatus;
 	phase: JobPhase | null;
-	progress: { mail: StreamProgress; calendar: StreamProgress; contacts: StreamProgress };
+	progress: { mail: StreamProgress; calendar: StreamProgress; contacts: StreamProgress; tasks?: StreamProgress };
 	current_folder: string | null;
 	rate: number | null;
 	rate_bytes: number | null;
@@ -121,7 +126,16 @@ export interface Pst {
 	filename: string;
 	size: number;
 	status: PstStatus;
-	scan: { folders?: ScanFolder[]; totals?: Record<string, number>; errors?: unknown[] } | null;
+	scan: {
+		/** 'files' for an upload that is not a PST (mbox, .eml, .msg, .ics, .vcf, .zip). */
+		format?: string;
+		/** The formats found in a 'files' upload. */
+		contents?: string[];
+		folders?: ScanFolder[];
+		totals?: Record<string, number>;
+		errors?: unknown[];
+		n_skipped?: number;
+	} | null;
 	error: string | null;
 	pst_sha?: string | null;
 	created_at?: number | null;
@@ -150,6 +164,7 @@ export interface CsvResult {
 	created: number;
 	updated: number;
 	errors: { line: number; msg: string }[];
+	warnings?: { line: number; msg: string }[];
 }
 
 export interface Health {
@@ -268,4 +283,180 @@ export interface InboxListing {
 	enabled: boolean;
 	settle_seconds: number;
 	files: { name: string; size: number; modified_ago: number }[];
+}
+
+/** POST /api/runs body. `name` makes a batch; `mode: 'delta'` is the final resync. */
+export interface RunInput {
+	account_ids: number[];
+	name?: string;
+	mode?: 'full' | 'delta';
+}
+
+export type PlanStatus = 'queued' | 'running' | 'done' | 'failed';
+export type PlanAccountStatus = 'ok' | 'warning' | 'error';
+export type PlanKind = 'mail' | 'calendar' | 'contacts';
+
+export interface PlanKindTotals {
+	folders: number;
+	items: number;
+	bytes: number | null;
+	done: number;
+	to_migrate: number;
+	to_migrate_bytes: number | null;
+	bytes_estimated?: boolean;
+	filtered: Record<string, number>;
+	oversized: number;
+	oversized_bytes: number;
+	folders_to_create: number;
+	excluded_folders: number;
+	excluded_items: number;
+}
+
+export interface PlanFolder {
+	path: string[] | string;
+	kind?: string;
+	items: number;
+	bytes: number | null;
+	to_migrate: number;
+	/** The folder it will land in. */
+	target: string | null;
+	/** null when the target cannot say (DAV). */
+	create: boolean | null;
+	excluded: boolean;
+	filtered?: Record<string, number>;
+	oversized?: number;
+	error?: string;
+}
+
+export interface PlanAccount {
+	account_id: number;
+	email?: string | null;
+	status: PlanAccountStatus;
+	error?: string;
+	source?: { kind: string | null; ok: boolean; msg: string; error_kind?: string } | null;
+	targets?: Record<string, { ok: boolean; msg?: string; quota?: unknown; append_limit?: number | null }>;
+	kinds?: Partial<Record<PlanKind, PlanKindTotals>>;
+	/** Absent in events. */
+	folders?: PlanFolder[];
+	quota?: { used: number | null; limit: number | null; free: number; need: number; enough: boolean } | null;
+	target_limit?: number | null;
+	warnings?: string[];
+	notes?: string[];
+}
+
+export interface PlanResult {
+	accounts: PlanAccount[];
+	totals: { accounts: number; ok: number; warning: number; error: number; to_migrate: number; to_migrate_bytes: number; oversized: number; filtered: number };
+	done: number;
+	total: number;
+}
+
+/** POST /api/runs/plan (202) then GET /api/plans/{id} until `status` is done or failed. */
+export interface Plan {
+	id: number;
+	status: PlanStatus;
+	account_ids: number[];
+	error: string | null;
+	result: PlanResult | null;
+}
+
+export type BatchState = 'queued' | 'running' | 'paused' | 'finished' | 'empty';
+export type BatchAction = 'pause' | 'resume' | 'stop' | 'retry-failed';
+
+export interface Batch {
+	id: number;
+	name: string;
+	created_at: number;
+	state: BatchState;
+	jobs: number;
+	by_status: Partial<Record<JobStatus, number>>;
+	items: Record<PlanKind, StreamProgress>;
+	failed: number;
+	with_errors: number;
+	finished_at: number | null;
+	/** Only from GET /api/batches/{id} and the actions. */
+	changed?: number;
+	skipped?: number;
+}
+
+export interface FolderRule {
+	source: string;
+	target: string;
+}
+
+export interface PolicyWindow {
+	days?: number[];
+	start: string;
+	end: string;
+	tz: string;
+}
+
+/** Server or account policy. `window` and `rate_mb_s` belong to servers. */
+export interface Policy {
+	folder_map?: FolderRule[];
+	exclude_folders?: string[];
+	date_from?: string;
+	date_to?: string;
+	max_size_mb?: number;
+	window?: PolicyWindow;
+	rate_mb_s?: number;
+}
+
+/** GET /api/servers/{id}/policy and /api/accounts/{id}/policy (the account also gets `effective`). */
+export interface PolicyDoc {
+	policy: Policy | null;
+	effective?: Policy;
+}
+
+export interface CompareFolder {
+	kind: string;
+	target: string | null;
+	folders: string[];
+	expected: number;
+	on_target: number | null;
+	missing: number;
+	extra?: number | null;
+	sent: number;
+	errors: number;
+	pending: number;
+	filtered: number;
+	skipped: number;
+	error?: string;
+}
+
+export interface Compare {
+	id?: number;
+	status: 'queued' | 'running' | 'done' | 'failed' | 'none';
+	error?: string | null;
+	result: {
+		ok: boolean;
+		totals: Record<string, number>;
+		folders: CompareFolder[];
+	} | null;
+}
+
+/** GET /api/jobs/{id}/filtered and /oversized. */
+export interface LeftOutItem {
+	id: number;
+	kind: string;
+	folder: string | null;
+	item_key: string | null;
+	subject: string | null;
+	size: number | null;
+	error: string | null;
+	reason?: string;
+}
+
+export interface ApiToken {
+	id: number;
+	name: string;
+	prefix: string;
+	created_at: number;
+	last_used_at: number | null;
+	revoked_at: number | null;
+}
+
+/** POST /api/tokens: `token` is in this answer only. */
+export interface CreatedToken extends ApiToken {
+	token: string;
 }

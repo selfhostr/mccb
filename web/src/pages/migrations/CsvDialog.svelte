@@ -55,7 +55,10 @@
 		<Field label={m.migrations_csv_file()}>
 			<input bind:this={input} class="input py-2" type="file" accept=".csv,.txt" required />
 		</Field>
-		<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="accounts.csv">{m.migrations_csv_template()}</Button>
+		<div class="flex flex-wrap gap-2">
+			<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="accounts.csv">{m.migrations_csv_template()}</Button>
+			<Button variant="ghost" icon={Download} href="/api/accounts/export-csv" download="accounts-export.csv" data-testid="csv-export">{m.migrations_csv_export()}</Button>
+		</div>
 		{#if error}<ErrorNotice title={m.migrations_csv_failed()} message={error} />{/if}
 		{#if result}
 			<p class="m-0" data-testid="csv-result">{m.migrations_csv_result({ created: result.created, updated: result.updated, errors: result.errors.length })}</p>
@@ -63,6 +66,16 @@
 				<Notice>
 					<ul class="m-0 list-none p-0 font-mono text-xs">
 						{#each result.errors.slice(0, 50) as line (line.line)}
+							<li>{m.migrations_csv_line({ line: line.line, message: line.msg })}</li>
+						{/each}
+					</ul>
+				</Notice>
+			{/if}
+			{#if result.warnings?.length}
+				<Notice>
+					<p class="m-0 font-medium">{m.migrations_csv_warnings()}</p>
+					<ul class="m-0 list-none p-0 font-mono text-xs" data-testid="csv-warnings">
+						{#each result.warnings.slice(0, 50) as line, i (i)}
 							<li>{m.migrations_csv_line({ line: line.line, message: line.msg })}</li>
 						{/each}
 					</ul>

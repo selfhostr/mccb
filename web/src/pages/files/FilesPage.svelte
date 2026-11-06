@@ -6,6 +6,7 @@
 	import { errorText, del } from '../../lib/api/client.ts';
 	import type { Pst } from '../../lib/api/types.ts';
 	import { fmtBytes } from '../../lib/format.ts';
+	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
@@ -38,9 +39,8 @@
 	function take(list: FileList | null | undefined) {
 		const files = [...(list ?? [])];
 		if (!files.length) return;
-		const odd = files.some((f) => !/\.(pst|ost)$/i.test(f.name));
-		// One plain PST goes straight to the queue: the order is only a question with several files.
-		if (files.length === 1 && !odd) uploads.add(files as FileLike[], 'size-asc');
+		// One file goes straight to the queue: the order is only a question with several.
+		if (files.length === 1) uploads.add(files as FileLike[], 'size-asc');
 		else pending = files;
 	}
 
@@ -88,6 +88,7 @@
 		class="sr-only"
 		type="file"
 		multiple
+		accept={FILE_ACCEPT}
 		tabindex="-1"
 		aria-label={m.files_drop_choose()}
 		onchange={(e) => {

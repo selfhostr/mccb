@@ -9,6 +9,7 @@
 	import { errorText, del } from '../../lib/api/client.ts';
 	import type { Account } from '../../lib/api/types.ts';
 	import { importPlan, type ImportPlan, matchesFilter, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
+	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { headerState, splitSelection, toggleAllVisible } from '../../lib/logic/selection.ts';
 	import { VIRTUAL_AT, windowRange } from '../../lib/logic/virtual.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
@@ -27,6 +28,7 @@
 	import { uploads } from '../../lib/upload/store.svelte.ts';
 	import AccountDialog from './AccountDialog.svelte';
 	import AccountRow from './AccountRow.svelte';
+	import BatchBar from './BatchBar.svelte';
 	import CsvDialog from './CsvDialog.svelte';
 	import ImportDialog from './ImportDialog.svelte';
 	import JobPanel from './JobPanel.svelte';
@@ -40,12 +42,16 @@
 		const value = router.params.get('status') as StatusFilter | null;
 		return value && STATUS_FILTERS.includes(value) ? value : '';
 	});
-	const hasFilter = $derived(!!(q || server || status));
-	const needsJob = $derived(status === 'active' || status === 'done' || status === 'problem');
+	const batch = $derived.by(() => {
+		const id = Number(router.params.get('batch')) || null;
+		return id && data.batches.some((b) => b.id === id) ? id : null;
+	});
+	const hasFilter = $derived(!!(q || server || status || batch));
+	const needsJob = $derived(status === 'active' || status === 'done' || status === 'problem' || batch != null);
 
 	const all = $derived([...data.accounts.values()].sort((a, b) => a.email.localeCompare(b.email)));
 	const rows = $derived.by(() => {
-		const filter = { q, server, status };
+		const filter = { q, server, status, batch };
 		// Without a status filter, job events must not run this: progress would refilter the list every frame.
 		const jobOf = needsJob ? (id: number) => data.jobs.get(id) : () => undefined;
 		return all.filter((a) => matchesFilter(a, jobOf(a.id), filter));
@@ -104,7 +110,7 @@
 	const closeDialog = () => (dialog = null);
 
 	function clearFilters() {
-		router.setParams({ q: null, server: null, status: null });
+		router.setParams({ q: null, server: null, status: null, batch: null });
 	}
 
 	function testSelected() {
@@ -138,7 +144,7 @@
 	function uploadFor(id: number) {
 		const input = document.createElement('input');
 		input.type = 'file';
-		input.accept = '.pst,.ost';
+		input.accept = FILE_ACCEPT;
 		input.onchange = () => {
 			const file = input.files?.[0];
 			if (!file) return;
@@ -228,7 +234,16 @@
 			<option value="done">{m.migrations_filter_done()}</option>
 			<option value="problem">{m.migrations_filter_problem()}</option>
 		</select>
+		{#if data.batches.length}
+			<select class="input w-auto max-w-48" aria-label={m.batch_filter()} value={batch == null ? '' : String(batch)} onchange={(e) => router.setParams({ batch: e.currentTarget.value || null })} data-testid="filter-batch">
+				<option value="">{m.batch_all()}</option>
+				{#each data.batches as item (item.id)}
+					<option value={String(item.id)}>{item.name}</option>
+				{/each}
+			</select>
+		{/if}
 	</div>
+	{#if batch}<BatchBar id={batch} />{/if}
 
 	{#if !rows.length}
 		<EmptyState icon={SearchX} title={m.migrations_empty_no_match_title()} description={m.migrations_empty_no_match_text({ total: all.length })}>

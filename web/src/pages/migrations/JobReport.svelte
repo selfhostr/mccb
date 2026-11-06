@@ -9,6 +9,8 @@
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
+	import JobCompare from './JobCompare.svelte';
+	import LeftOut from './LeftOut.svelte';
 
 	type Section = Record<string, number | undefined>;
 	type Report = Record<string, unknown> & { folders?: { path: string[] | string; name?: string; sent?: number; present?: number }[]; sample_check?: unknown };
@@ -34,6 +36,15 @@
 		void status;
 		void load();
 	});
+
+	const FINISHED: JobStatus[] = ['done', 'done_with_errors', 'stopped', 'failed'];
+
+	/** A section of the report that counts zero has nothing to list. Unknown shapes are shown. */
+	function hasItems(key: 'filtered' | 'oversized'): boolean {
+		const section = (report as Record<string, unknown> | null)?.[key] as { total?: unknown; count?: unknown } | undefined;
+		const n = section?.total ?? section?.count;
+		return typeof n === 'number' ? n > 0 : true;
+	}
 
 	const sections = $derived.by(() => {
 		if (!report) return [];
@@ -87,5 +98,8 @@
 		{#if report.sample_check}
 			<p class="m-0 text-ink-2">{m.jobs_report_sample({ result: typeof report.sample_check === 'string' ? report.sample_check : JSON.stringify(report.sample_check) })}</p>
 		{/if}
+		<JobCompare {jobId} finished={FINISHED.includes(status)} />
+		{#if hasItems('filtered')}<LeftOut {jobId} what="filtered" title={m.leftout_filtered()} />{/if}
+		{#if hasItems('oversized')}<LeftOut {jobId} what="oversized" title={m.leftout_oversized()} />{/if}
 	</div>
 {/if}

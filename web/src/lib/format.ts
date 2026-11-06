@@ -77,3 +77,8 @@ export function fmtRelative(date: Date | null, now: number): string {
 	}
 	return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(date);
 }
+
+/** Short weekday name; 0 is Monday, as in the server's allowed-hours days. */
+export function fmtWeekday(day: number): string {
+	return new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(2024, 0, 1 + day)));
+}

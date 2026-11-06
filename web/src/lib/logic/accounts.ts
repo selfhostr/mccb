@@ -28,9 +28,10 @@ export function needsAttention(account: Account, job: Job | undefined): boolean 
 export function matchesFilter(
 	account: Account,
 	job: Job | undefined,
-	filter: { q: string; server: number | null; status: StatusFilter }
+	filter: { q: string; server: number | null; status: StatusFilter; batch?: number | null }
 ): boolean {
 	if (filter.server && account.server_id !== filter.server) return false;
+	if (filter.batch && job?.batch_id !== filter.batch) return false;
 	if (filter.q && !`${account.email} ${account.login ?? ''}`.toLowerCase().includes(filter.q)) return false;
 	switch (filter.status) {
 		case 'untested':

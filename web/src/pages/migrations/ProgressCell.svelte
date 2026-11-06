@@ -3,7 +3,7 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import { pct } from '../../lib/format.ts';
 	import { router } from '../../lib/router.svelte.ts';
-	import { jobLook } from '../../lib/status.ts';
+	import { jobLookOf } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Plate from '../../lib/ui/Plate.svelte';
 	import StreamBars from './StreamBars.svelte';
@@ -11,7 +11,7 @@
 	let { accountId }: { accountId: number } = $props();
 
 	const job = $derived(data.jobs.get(accountId));
-	const look = $derived(job ? jobLook(job.status) : null);
+	const look = $derived(job ? jobLookOf(job) : null);
 	const percent = $derived.by(() => {
 		if (!job?.progress) return 0;
 		const { mail, calendar, contacts } = job.progress;

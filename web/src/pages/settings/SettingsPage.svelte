@@ -7,6 +7,7 @@
 	import NotificationsSection from './NotificationsSection.svelte';
 	import PasswordSection from './PasswordSection.svelte';
 	import ServersSection from './ServersSection.svelte';
+	import TokensSection from './TokensSection.svelte';
 	import TuningSection from './TuningSection.svelte';
 </script>
 
@@ -18,6 +19,7 @@
 	<NotificationsSection />
 	<TuningSection />
 	<PasswordSection />
+	<TokensSection />
 	<AppearanceSection />
 	{#if data.version}<p class="m-0 font-mono text-xs text-ink-3">{m.settings_page_version({ version: data.version })}</p>{/if}
 </div>
