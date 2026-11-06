@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Auto mode can use far more of a large machine: up to 32 mailboxes at once (more while cores stay idle), 32 builders and 32 connections per mailbox. `.env.example` no longer pins `WORKER_CONCURRENCY`: remove that line from an existing `.env` to get the auto mode. See [Tune](docs/tuning.md).
+- Costs that grew with the mailbox: the progress is recounted less often on large mailboxes, the average size no longer reads the whole table at each update, item results are written in batches.
+- One network error no longer limits a job for good: the connection ceiling, the plateau and the fallback all recover with time.
+- A server error now holds all the connections of the job and stops growth for every mailbox on that server. Servers answering "too many connections" with a plain NO are handled as overload. CalDAV and CardDAV honour `Retry-After`.
+- Memory guard: builds go one at a time when memory is short. File cache no longer counts as used inside a container.
+- Resume checks many items of a folder with one search. Final folder checks run once, no longer twice.
+- Upload: `PUT` of a chunk no longer returns the list of received chunks, the `upload` event carries `received_count` instead, and hashing no longer blocks the web process.
 - New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
 - Live events update only what changed, at most once per frame. Rows are keyed and long lists are windowed, so clicks are not lost and open selects stay open during imports.
 - Selection is explicit: what a filter hides is counted, shown and left out of any action. The selection bar is fixed and shifts nothing.

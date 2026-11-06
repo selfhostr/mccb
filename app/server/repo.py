@@ -151,5 +151,8 @@ def event_object(kind: str, ref_id: int) -> Any:
     if kind == "pst":
         return get_pst(ref_id)
     if kind == "upload":
-        return get_upload(ref_id)
+        # no list of received chunks: 100 KB per event on a 500 GB file (GET /api/uploads/{id} gives it)
+        r = db.q1("SELECT p.id, p.status, COUNT(c.n) AS received_count FROM psts p "
+                  "LEFT JOIN upload_chunks c ON c.pst_id = p.id WHERE p.id=? GROUP BY p.id", (ref_id,))
+        return dict(r) if r else None
     return None

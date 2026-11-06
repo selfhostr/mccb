@@ -16,8 +16,9 @@ RESULTS: dict[str, dict] = {}
 
 @pytest.fixture(scope="module")
 def stack(stack_factory):
-    # per-item delay: leaves time to drive the job (pause/stop) during a real import
-    return stack_factory(PSTMIG_TEST_ITEM_DELAY="0.04")
+    # per-item delay and one builder: at least 40 ms per mail, whatever the machine, which leaves time to drive the
+    # job (pause/stop) during a real import
+    return stack_factory(PSTMIG_TEST_ITEM_DELAY="0.04", BUILD_PROCESSES="1")
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +93,9 @@ def _check_preview(stack, pst: dict, model: dict) -> None:
 
 
 def _drive_controls(stack, jid: int, total_mail: int) -> None:
-    """During the run: pause → (progress frozen) → resume → stop → restart."""
+    """During the run: pause → (progress frozen) → resume → stop → restart.
+    `total_mail`: every item of the mail folders. `done` counts the items `ok` and `skipped` (a non-mail item filed in
+    a mail folder), each at most once: it reaches this total, never more, when the job finished the phase."""
     import time
     j = stack.wait_job(jid, ("running",), timeout=120, cond=lambda j: j["progress"]["mail"]["done"] >= 5)
     assert stack.api("POST", f"/api/jobs/{jid}/pause").json()["status"] == "paused"
@@ -108,7 +111,9 @@ def _drive_controls(stack, jid: int, total_mail: int) -> None:
     st = stack.api("POST", f"/api/jobs/{jid}/stop").json()["status"]
     assert st in ("stopping", "stopped"), st
     j = stack.wait_job(jid, ("stopped",), timeout=60)
-    assert j["progress"]["mail"]["done"] < total_mail, j
+    assert j["progress"]["mail"]["done"] <= total_mail, j
+    if j["phase"] == "mail":  # otherwise the stop came after the last mail: a slow test machine, not a bug
+        assert j["progress"]["mail"]["done"] < total_mail, j
     rep = stack.api("GET", f"/api/jobs/{jid}/report").json()
     assert rep["status"] == "stopped"
     assert stack.api("POST", f"/api/jobs/{jid}/retry").json()["status"] == "queued"
@@ -135,6 +140,7 @@ def test_import_fixture(stack, server, fixture):
     n_err = {k: sum(1 for e in model["errors"] if e["kind"] == k) for k in kind_of}
     final = "done_with_errors" if src_errs else "done"
     n_mail = sum(len(v) for v in model["mail"].values())
+    sk_mail = model["skipped"]["mail"]
     n_ev = sum(len(v) for v in model["calendar"].values())
     n_ct = sum(len(v) for v in model["contacts"].values())
     _check_preview(stack, pst, model)
@@ -143,7 +149,7 @@ def test_import_fixture(stack, server, fixture):
     jobs = stack.api("POST", "/api/runs", json={"account_ids": [acc["id"]]}).json()
     jid = jobs[0]["id"]
     if n_mail >= 50:
-        _drive_controls(stack, jid, n_mail)
+        _drive_controls(stack, jid, n_mail + sk_mail)
     j = stack.wait_job(jid, timeout=300)
     assert j["status"] == final, f"{j}\n{stack.job_log(jid)}"
     sk = model["skipped"]

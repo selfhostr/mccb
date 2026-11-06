@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import base64
 import imaplib
+import os
 import re
 import socket
 import ssl
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
-imaplib._MAXLINE = 10_000_000  # large LIST responses
+imaplib._MAXLINE = 100_000_000  # large LIST responses, SEARCH on a folder of millions of messages (8 bytes per UID)
 
 SPECIAL_FLAGS = {"sent": "\\Sent", "drafts": "\\Drafts", "trash": "\\Trash", "junk": "\\Junk"}
 SPECIAL_NAMES = {
@@ -100,7 +102,10 @@ class ImapError(Exception):
         return self.kind == "temp"
 
 
-TEMP_CODES = ("[UNAVAILABLE]", "[INUSE]", "[LIMIT]", "[SERVERBUG]", "[CONTACTADMIN]", "TRY AGAIN", "TEMPORAR")
+TEMP_CODES = ("[UNAVAILABLE]", "[INUSE]", "[LIMIT]", "[SERVERBUG]", "[CONTACTADMIN]", "TRY AGAIN", "TEMPORAR",
+              # servers answering NO to a login or a command when they are overloaded, without a response code
+              "TOO MANY CONNECTIONS", "TOO MANY SIMULTANEOUS", "TOO MANY SESSIONS", "TOO MANY LOGINS",
+              "MAXIMUM NUMBER OF CONNECTIONS", "CONNECTION LIMIT", "THROTTL", "RATE LIMIT", "BANDWIDTH LIMIT")
 FATAL_CODES = ("[OVERQUOTA]", "QUOTA EXCEEDED", "OVER QUOTA")
 
 
@@ -268,6 +273,27 @@ class ImapConn:
     def __exit__(self, *a):
         self.close()
 
+    @contextmanager
+    def _patient(self):
+        """Longer socket timeout for a SEARCH HEADER: a server without a header index reads every message of the
+        folder before its first byte of answer."""
+        sock = getattr(self.M, "sock", None)
+        if sock is None:
+            yield
+            return
+        try:
+            wait = float(os.environ.get("IMAP_SEARCH_TIMEOUT", "") or 900.0)
+        except ValueError:
+            wait = 900.0
+        sock.settimeout(max(self.p.timeout, wait))
+        try:
+            yield
+        finally:
+            try:
+                sock.settimeout(self.p.timeout)
+            except OSError:
+                pass
+
     def _m(self) -> imaplib.IMAP4:
         if self.M is None:
             self.connect()
@@ -357,7 +383,13 @@ class ImapConn:
         fl = "(" + " ".join(flags) + ")" if flags else None
         dt = imaplib.Time2Internaldate(internaldate) if internaldate else None
         try:
-            typ, data = M.append(quote(name), fl, dt, raw)
+            if raw.count(b"\n") == raw.count(b"\r\n") == raw.count(b"\r"):
+                # Already CRLF only. imaplib.append would run a regex over the literal, one substitution per line,
+                # holding the GIL (every other connection of the job waits) and copying the whole message.
+                M.literal = raw
+                typ, data = M._simple_command("APPEND", quote(name), fl, dt)
+            else:
+                typ, data = M.append(quote(name), fl, dt, raw)
         except Exception as e:
             raise wrap_exc(e) from e
         if typ != "OK":
@@ -371,11 +403,12 @@ class ImapConn:
             self.select(name, readonly=True)
         M = self._m()
         try:
-            if value.isascii():
-                typ, data = M.uid("SEARCH", "HEADER", header, quote(value))
-            else:
-                M.literal = value.encode("utf-8")
-                typ, data = M.uid("SEARCH", "CHARSET", "UTF-8", "HEADER", header)
+            with self._patient():
+                if value.isascii():
+                    typ, data = M.uid("SEARCH", "HEADER", header, quote(value))
+                else:
+                    M.literal = value.encode("utf-8")
+                    typ, data = M.uid("SEARCH", "CHARSET", "UTF-8", "HEADER", header)
         except Exception as e:
             raise wrap_exc(e) from e
         t = _text(self._check(typ, data, "SEARCH"))
@@ -423,6 +456,18 @@ class ImapConn:
             return []
         vals = self.fetch_header_values(name, cands, header)
         return [u for u in cands if any(v in wanted for v in vals.get(u, []))]
+
+    def import_ids_with_prefix(self, name: str, header: str, prefix: str) -> dict[str, list[str]]:
+        """{bare import id: UIDs} of every message of the folder whose `header` contains prefix: answers many
+        find_import_id at once, each of which would make the server read the whole folder."""
+        cands = self.search_header(name, header, prefix)
+        vals = self.fetch_header_values(name, cands, header)
+        out: dict[str, list[str]] = {}
+        for u in cands:
+            for v in vals.get(u, []):
+                bare = v[1:-1] if v.startswith("<") and v.endswith(">") else v
+                out.setdefault(bare, []).append(u)
+        return out
 
     def count_import_prefix(self, name: str, header: str, prefix: str) -> int:
         """Number of messages in the folder whose `header` header contains prefix (PST fingerprint + "-"):

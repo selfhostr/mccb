@@ -19,10 +19,11 @@ def _q(ns: str, name: str) -> str:
 
 
 class DavError(Exception):
-    def __init__(self, msg: str, temporary: bool = False, status: int | None = None):
+    def __init__(self, msg: str, temporary: bool = False, status: int | None = None, retry_after: float | None = None):
         super().__init__(msg)
         self.temporary = temporary
         self.status = status
+        self.retry_after = retry_after  # seconds asked by the server (Retry-After on 429/503)
 
 
 def expand_template(template: str, email: str, login: str) -> str:
@@ -33,6 +34,12 @@ def expand_template(template: str, email: str, login: str) -> str:
         .replace("{domain}", domain)
         .replace("{login}", login)
     )
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Retry-After in seconds. The HTTP date form is ignored: the caller then uses its own backoff."""
+    v = (resp.headers.get("retry-after") or "").strip()
+    return float(v) if v.isdigit() else None
 
 
 def _slash(url: str) -> str:
@@ -99,7 +106,7 @@ class DavClient:
         if not good:
             sc = resp.status_code
             raise DavError(f"{method} {url} -> HTTP {sc}",
-                           temporary=(sc >= 500 or sc == 429), status=sc)
+                           temporary=(sc >= 500 or sc == 429), status=sc, retry_after=_retry_after(resp))
         return resp
 
     def _propfind(self, url: str, props: list[tuple[str, str]], depth: int

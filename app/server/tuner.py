@@ -29,6 +29,11 @@ from typing import Callable, Iterable
 
 # ------------------------------------------------------------------------------------------------ probe
 UNLIMITED = 1 << 60  # cgroup v1 reports "no limit" as a huge number (PAGE_COUNTER_MAX * page size)
+MAX_BUILDERS = 32           # builder processes of one job, whatever the machine
+MAX_JOBS = 32               # mailboxes in parallel, whatever the machine
+MAX_CONNECTIONS = 32        # IMAP connections of one job (AUTOTUNE_MAX_CONNECTIONS)
+MAX_SERVER_CONNECTIONS = 64  # IMAP connections of all the jobs to one server (AUTOTUNE_MAX_SERVER_CONNECTIONS)
+JOB_ADMIT_MEM_BYTES = 1 << 30  # below this much free memory no further job starts
 
 
 @dataclass(frozen=True)
@@ -86,13 +91,28 @@ def cgroup_cpu_quota(root: str = "/sys/fs/cgroup") -> float | None:
     return None
 
 
+def _cgroup_reclaimable(base: str, names: tuple[str, ...]) -> int:
+    """File cache counted in the cgroup usage (memory.stat): the kernel gives it back under pressure."""
+    text = _read(os.path.join(base, "memory.stat"))
+    if not text:
+        return 0
+    total = 0
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in names and parts[1].isdigit():
+            total += int(parts[1])
+    return total
+
+
 def cgroup_mem_available(root: str = "/sys/fs/cgroup") -> int | None:
-    """Bytes still available in the cgroup (limit - usage), None = no limit."""
+    """Bytes still available in the cgroup (limit - usage + file cache), None = no limit. Without the file cache
+    a container reading a large PST looks full: its page cache is charged to it."""
     lim = _read(os.path.join(root, "memory.max"))
     if lim is not None:
         if lim == "max":
             return None
         limit, usage = _int(lim), _int(_read(os.path.join(root, "memory.current"))) or 0
+        usage -= _cgroup_reclaimable(root, ("inactive_file", "active_file"))
     else:
         limit = usage = None
         for sub in ("memory", ""):
@@ -100,10 +120,11 @@ def cgroup_mem_available(root: str = "/sys/fs/cgroup") -> int | None:
             limit = _int(_read(os.path.join(base, "memory.limit_in_bytes")))
             if limit is not None:
                 usage = _int(_read(os.path.join(base, "memory.usage_in_bytes"))) or 0
+                usage -= _cgroup_reclaimable(base, ("total_inactive_file", "total_active_file"))
                 break
     if limit is None or limit >= UNLIMITED:
         return None
-    return max(0, limit - (usage or 0))
+    return max(0, limit - max(0, usage or 0))
 
 
 def meminfo_available(path: str = "/proc/meminfo") -> int | None:
@@ -115,6 +136,56 @@ def meminfo_available(path: str = "/proc/meminfo") -> int | None:
             v = _int(line.split(":", 1)[1])
             return v * 1024 if v is not None else None
     return None
+
+
+def mem_available(cgroup_root: str = "/sys/fs/cgroup", meminfo_path: str = "/proc/meminfo") -> int:
+    """min(/proc/meminfo MemAvailable, cgroup limit - usage), 0 = unknown."""
+    mems = [m for m in (meminfo_available(meminfo_path), cgroup_mem_available(cgroup_root)) if m is not None]
+    return min(mems) if mems else 0
+
+
+def proc_stat(path: str = "/proc/stat") -> tuple[float, float] | None:
+    """(idle jiffies, total jiffies) of the machine, None if unavailable. iowait is not idle: a builder more does
+    not help a machine waiting for its disk."""
+    try:
+        with open(path, encoding="ascii") as fh:
+            parts = fh.readline().split()
+    except OSError:
+        return None
+    if not parts or parts[0] != "cpu":
+        return None
+    v = [float(x) for x in parts[1:]]
+    return v[3], sum(v[:8])
+
+
+def io_pressure(path: str = "/proc/pressure/io") -> float | None:
+    """Share of the last 10 s (percent) during which some task waited for the disk, None without PSI."""
+    text = _read(path)
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith("some "):
+            for field_ in line.split():
+                if field_.startswith("avg10="):
+                    try:
+                        return float(field_[6:])
+                    except ValueError:
+                        return None
+    return None
+
+
+def disk_io_ticks(path: str, sys_root: str = "/sys") -> int | None:
+    """Milliseconds the device holding `path` has been busy since boot (block stat, 10th field), None = unknown
+    (network or overlay file system, no sysfs entry). Used where PSI is not available."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    text = _read(os.path.join(sys_root, "dev", "block", f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}", "stat"))
+    try:
+        return int(text.split()[9]) if text else None
+    except (ValueError, IndexError):
+        return None
 
 
 def default_benchmark(seconds: float = 1.5, clock: Callable[[], float] = time.monotonic) -> float:
@@ -165,8 +236,7 @@ def probe_machine(cgroup_root: str = "/sys/fs/cgroup", meminfo_path: str = "/pro
         counts.append(max(1, math.ceil(quota - 1e-9)))
     cpus = max(1, min(counts) if counts else 1)
 
-    mems = [m for m in (meminfo_available(meminfo_path), cgroup_mem_available(cgroup_root)) if m is not None]
-    mem = min(mems) if mems else 0
+    mem = mem_available(cgroup_root, meminfo_path)
 
     rate = None
     if benchmark is True:
@@ -196,7 +266,7 @@ def parse_env_builders(value: str | int | None) -> int | None:
 
 
 def choose_builders(probe: MachineProbe, mem_budget_mb: float | None = None, per_builder_mb: float = 200,
-                    env_override: str | int | None = None, running_jobs: int = 1, cap: int = 8) -> int:
+                    env_override: str | int | None = None, running_jobs: int = 1, cap: int = MAX_BUILDERS) -> int:
     """Builder processes for one job.
 
     - ``env_override`` (the BUILD_PROCESSES value) forces the result globally when set (0 allowed).
@@ -216,7 +286,7 @@ def choose_builders(probe: MachineProbe, mem_budget_mb: float | None = None, per
 
 
 def choose_worker_concurrency(cpus: int, pending: int | None = None, mem_available_bytes: int | None = None,
-                              per_job_mb: float = 512, cores_per_job: int = 2, cap: int = 4) -> int:
+                              per_job_mb: float = 512, cores_per_job: int = 2, cap: int = MAX_JOBS) -> int:
     """Mailboxes (jobs) migrated in parallel in auto mode, without oversubscription: each job needs
     ``cores_per_job`` cores (job process + at least one builder) out of ``cpus - 1``, and ``per_job_mb``
     of memory; at most ``cap`` and at most ``pending`` jobs waiting; min 1."""
@@ -254,7 +324,7 @@ def manual_settings(settings: dict, env_override: str | int | None = None, defau
 TRANSIENT_PATTERNS = ("[LIMIT]", "[UNAVAILABLE]", "[INUSE]", "[SERVERBUG]", "[CONTACTADMIN]", "TOO MANY CONNECTIONS",
                       "TOO MANY SIMULTANEOUS", "MAXIMUM NUMBER OF CONNECTIONS", "CONNECTION LIMIT", "BYE",
                       "CONNECTION REFUSED", "CONNECTION RESET", "TRY AGAIN", "TEMPORAR", "THROTTL",
-                      "TIMED OUT", "TIMEOUT", "BROKEN PIPE", "EOF")
+                      "TIMED OUT", "TIMEOUT", "BROKEN PIPE", "EOF", "RATE LIMIT", "BANDWIDTH LIMIT", "HTTP 429")
 
 
 @dataclass(frozen=True)
@@ -336,6 +406,10 @@ class Sample:
     # APPEND latencies by message size bucket (size_bucket()): {bucket: (sum of seconds, count)}. Preferred to
     # append_latency_s: a window holding one large attachment is not compared with the baseline of small mails
     append_buckets: dict | None = None
+    hold: bool = False                    # another job saw this server under pressure: no growth for now
+    conn_limit: int | None = None         # connections this job may use now (shared budget of the server)
+    fair_builders: int | None = None      # this job's share of the cores (None: builder count not movable)
+    mem_ok: bool = True                   # enough free memory for one builder more
 
     def latency_buckets(self) -> dict:
         out = dict(self.append_buckets or {})
@@ -391,28 +465,35 @@ class AutoTuner:
        from its smoothed reference (one window holding a large attachment never backs off).
        The ceiling becomes the highest count that ran error-free and is below the failing count (never
        exceeded again).
+       A first error at a count that already ran clean is taken as transient: the ceiling stays at that count.
+       The ceiling rises by 1 after each ``ceiling_relax_s`` seconds without any error.
     2. Repeated trouble (>= ``fallback_after`` back-offs within ``fallback_windows`` windows, or an error
-       while already at 1 connection) -> fallback mode, latched for the job: min(``fallback_builders``,
-       current) builders, min(``fallback_connections``, ceiling, current) connections (never an increase).
-       In fallback mode nothing grows any more, but errors / latency still back the connections off.
-    3. After a change: ``cooldown_windows`` windows ignored (settling), then the throughput at the new
-       level is compared with the previous level; an increase that brought < ``min_gain`` is reverted
-       and that level becomes a plateau (no further growth).
-    4. Additive increase (+2 if the last gain was >= 15 % or no gain is known yet, else +1, up to
-       min(cap, ceiling, plateau)) when the APPEND side is the bottleneck (``backlog``) for
-       ``streak`` consecutive windows and the last increase paid off.
+       while already at 1 connection) -> fallback mode: min(``fallback_builders``, current) builders,
+       min(``fallback_connections``, ceiling, current) connections (never an increase). In fallback mode
+       nothing grows, but errors / latency still back the connections off. It ends after
+       ``fallback_recover_s`` seconds without any error: growth is allowed again, up to the former ceiling.
+    3. After a change: ``cooldown_windows`` windows ignored (settling), then the mean throughput of
+       ``gain_windows`` windows at the new level is compared with the previous level; an increase that
+       brought < ``min_gain`` is reverted and that level becomes a plateau (no further growth), tried again
+       after ``plateau_retry_s`` seconds: mail sizes vary, one verdict must not bind a job of several days.
+    4. Increase (max(2, connections // 4) if the last gain was >= 15 % or no gain is known yet, else +1, up
+       to min(cap, ceiling, plateau, ``Sample.conn_limit``)) when the APPEND side is the bottleneck
+       (``backlog``) for ``streak`` consecutive windows and the last increase paid off. ``Sample.hold`` blocks it.
     5. Builders +1 (up to ``max_builders``, the probe limit) when builders are the bottleneck
-       (``starved``), busy (util >= ``builder_busy``) and >= 1 core of CPU headroom, for ``streak``
-       consecutive windows.
+       (``starved``), busy (util >= ``builder_busy``), >= 1 core of CPU headroom and enough memory, for
+       ``streak`` consecutive windows. Builders -1 when the machine has no idle core and the job holds more
+       than ``Sample.fair_builders``, for ``streak`` consecutive windows.
+    6. Above ``Sample.conn_limit`` (the server budget shared with other jobs): down to it at once.
     At most one change per window; no change -> no log line.
     """
 
-    def __init__(self, builders: int, max_builders: int, connections: int = 4, cap: int = 16,
+    def __init__(self, builders: int, max_builders: int, connections: int = 4, cap: int = MAX_CONNECTIONS,
                  min_gain: float = 0.05, latency_factor: float = 1.5, min_window_s: float = 5.0,
                  streak: int = 2, cooldown_windows: int = 1, fallback_after: int = 3, fallback_windows: int = 10,
                  builder_busy: float = 0.85, fallback_builders: int = 2, fallback_connections: int = 2,
                  latency_windows: int = 2, latency_drop: float = 0.15, latency_alpha: float = 0.2,
-                 log: Callable[[str], None] | None = None):
+                 gain_windows: int = 2, fallback_recover_s: float = 900.0, plateau_retry_s: float = 900.0,
+                 ceiling_relax_s: float = 1800.0, log: Callable[[str], None] | None = None):
         self.cap = max(1, cap)
         self.max_builders = max(1, max_builders)
         self.builders = max(1, min(builders, self.max_builders))
@@ -424,6 +505,9 @@ class AutoTuner:
         self.fallback_builders, self.fallback_connections = fallback_builders, fallback_connections
         self.latency_windows, self.latency_drop, self.latency_alpha = max(1, latency_windows), latency_drop, \
             latency_alpha
+        self.gain_windows = max(1, gain_windows)
+        self.fallback_recover_s, self.plateau_retry_s, self.ceiling_relax_s = fallback_recover_s, plateau_retry_s, \
+            ceiling_relax_s
         self._log = log
         self.ceiling = self.cap
         self.plateau: int | None = None
@@ -433,6 +517,12 @@ class AutoTuner:
         self._ref_rate: float | None = None   # smoothed bytes/s of windows without latency excess
         self._lat_streak = 0
         self._good: set[int] = set()          # connection counts that ran a window without error
+        self._failed: set[int] = set()        # proven counts that have already had one (transient) error
+        self._clean_s = 0.0                   # seconds since the last error
+        self._ceiling_t = 0.0                 # value of _clean_s at the last rise of the ceiling
+        self._plateau_s = 0.0                 # seconds since the plateau was set
+        self._pre_fallback_ceiling = self.cap
+        self._shrink_streak = 0
         self._backoffs: list[int] = []        # window indices of back-offs
         self._since_change = 0
         self._level_rates: list[float] = []   # post-cooldown rates at the current level
@@ -457,12 +547,26 @@ class AutoTuner:
         errs = [e for e in s.errors if classify_error(e)]
         if errs:
             self._lat_streak = 0
+            self._clean_s = self._ceiling_t = 0.0
             return self._back_off(_reason_of(errs[0]))
         why = self._latency_check(s, rate)
         if why is not None:
             return self._back_off(why)
-        if self.fallback:  # latched: back-offs only, never any growth
-            return self._same()
+        self._clean_s += s.duration_s
+        if s.conn_limit is not None and self.connections > max(1, s.conn_limit):
+            return self._to_shared_limit(max(1, s.conn_limit))
+        if self.fallback:  # back-offs only, no growth, until it has been quiet for long enough
+            if self._clean_s < self.fallback_recover_s:
+                return self._same()
+            return self._leave_fallback()
+        if self._clean_s - self._ceiling_t >= self.ceiling_relax_s:
+            self.ceiling = min(self.cap, self.ceiling + 1)
+            self._ceiling_t = self._clean_s
+            self._failed.clear()  # old news: a next error at these counts is a hiccup again
+        if self.plateau is not None:
+            self._plateau_s += s.duration_s
+            if self._plateau_s >= self.plateau_retry_s:
+                self.plateau = None
         # error-free window
         self._good.add(self.connections)
         self._since_change += 1
@@ -472,10 +576,13 @@ class AutoTuner:
         level_rate = sum(self._level_rates) / len(self._level_rates)
 
         # outcome of the last increase
-        if self._prev_level is not None and self._prev_rate is not None and self._last_gain is None:
+        gain_due = self._prev_level is not None and self._prev_rate is not None and self._last_gain is None
+        if gain_due and len(self._level_rates) >= self.gain_windows:
+            gain_due = False
             gain = level_rate / self._prev_rate - 1 if self._prev_rate > 0 else 1.0
             if gain < self.min_gain:
                 old, self.plateau = self.connections, self._prev_level
+                self._plateau_s = 0.0
                 self._prev_level = self._prev_rate = None
                 return self._change(self.builders, self.plateau,
                                     f"no throughput gain {gain * 100:+.0f}%",
@@ -484,11 +591,13 @@ class AutoTuner:
             self._last_gain = gain
 
         limit = min(self.cap, self.ceiling, self.plateau or self.cap)
-        if s.queue_state == BACKLOG and self.connections < limit:
-            self._build_streak = 0
+        if s.conn_limit is not None:
+            limit = min(limit, max(1, s.conn_limit))
+        if s.queue_state == BACKLOG and self.connections < limit and not s.hold:
+            self._build_streak = self._shrink_streak = 0
             self._conn_streak += 1
-            if self._conn_streak >= self.streak_needed:
-                step = 2 if self._last_gain is None or self._last_gain >= 0.15 else 1
+            if self._conn_streak >= self.streak_needed and not gain_due:
+                step = max(2, self.connections // 4) if self._last_gain is None or self._last_gain >= 0.15 else 1
                 new = min(limit, self.connections + step)
                 reason = (f"throughput {self._last_gain * 100:+.0f}%" if self._last_gain is not None
                           else "APPEND backlog")
@@ -498,7 +607,17 @@ class AutoTuner:
                                     f"Auto-tune: {self.builders} builders, IMAP connections {old}→{new} ({reason})")
             return self._same()
         self._conn_streak = 0
-        if s.queue_state == STARVED and self.builders < self.max_builders \
+        if s.fair_builders is not None and self.builders > max(1, s.fair_builders) \
+                and s.cpu_headroom is not None and s.cpu_headroom < 0.5:
+            self._build_streak = 0
+            self._shrink_streak += 1
+            if self._shrink_streak >= self.streak_needed:
+                old = self.builders
+                reason = f"no idle core, fair share {max(1, s.fair_builders)}"
+                return self._change(old - 1, self.connections, reason, f"Auto-tune: builders {old}→{old - 1} ({reason})")
+            return self._same()
+        self._shrink_streak = 0
+        if s.queue_state == STARVED and self.builders < self.max_builders and s.mem_ok \
                 and (s.builder_util or 0) >= self.builder_busy and (s.cpu_headroom or 0) >= 1.0:
             self._build_streak += 1
             if self._build_streak >= self.streak_needed:
@@ -557,7 +676,9 @@ class AutoTuner:
                        s.builder_util if s.builder_util is not None else p.builder_util,
                        s.cpu_headroom if s.cpu_headroom is not None else p.cpu_headroom,
                        list(p.errors) + list(s.errors),
-                       merge_buckets(p.append_buckets, s.append_buckets) or None)
+                       merge_buckets(p.append_buckets, s.append_buckets) or None,
+                       p.hold or s.hold, s.conn_limit if s.conn_limit is not None else p.conn_limit,
+                       s.fair_builders if s.fair_builders is not None else p.fair_builders, p.mem_ok and s.mem_ok)
         if s.duration_s < self.min_window_s and not any(classify_error(e) for e in s.errors):
             self._pending = s
             return None
@@ -572,7 +693,7 @@ class AutoTuner:
         builders_only = builders != self.builders and conns == self.connections
         self.builders, self.connections = builders, conns
         self._since_change = 0
-        self._conn_streak = self._build_streak = 0
+        self._conn_streak = self._build_streak = self._shrink_streak = 0
         self._level_rates = []
         if builders_only:  # throughput reference no longer comparable
             self._prev_level = self._prev_rate = None
@@ -596,8 +717,14 @@ class AutoTuner:
         if old <= 1 or len(recent) >= self.fallback_after:
             return self._enter_fallback()
         new = max(1, old // 2)
-        good_below = [c for c in self._good if c < old]
-        self.ceiling = max(new, max(good_below) if good_below else new)
+        if old in self._good and old not in self._failed:
+            # this count ran clean before: a hiccup, not a limit of the server. Without this, one network error
+            # at 4 connections would hold a job of several days at 2. A second error at this count is a limit.
+            self._failed.add(old)
+            self.ceiling = max(new, old)
+        else:
+            good_below = [c for c in self._good if c < old]
+            self.ceiling = max(new, max(good_below) if good_below else new)
         self._good = {c for c in self._good if c <= self.ceiling}
         if self.plateau is not None:
             self.plateau = min(self.plateau, self.ceiling)
@@ -605,10 +732,31 @@ class AutoTuner:
         self._last_gain = None
         return self._change(self.builders, new, reason, f"Auto-tune: IMAP connections {old}→{new} ({reason})")
 
+    def _to_shared_limit(self, limit: int) -> Decision:
+        """Other jobs write to the same server: its connection budget is shared. Not an error, the ceiling stays."""
+        old = self.connections
+        self._prev_level = self._prev_rate = None
+        self._last_gain = None
+        reason = "budget of this server shared with other jobs"
+        return self._change(self.builders, limit, reason, f"Auto-tune: IMAP connections {old}→{limit} ({reason})")
+
+    def _leave_fallback(self) -> Decision:
+        self.fallback = False
+        self._backoffs = []
+        self.ceiling = max(self.connections, min(self.cap, self._pre_fallback_ceiling))
+        self._ceiling_t = self._clean_s
+        self._since_change = 0
+        self._level_rates = []
+        line = f"Auto-tune: no error for {self.fallback_recover_s:.0f} s, leaving fallback (up to {self.ceiling} connections)"
+        if self._log:
+            self._log(line)
+        return Decision(self.builders, self.connections, self.builders, self.connections, "recovered", line)
+
     def _enter_fallback(self) -> Decision:
         """Never an increase: an error at 1 connection stays at 1 connection."""
         b = max(1, min(self.fallback_builders, self.max_builders, self.builders))
         c = max(1, min(self.fallback_connections, self.cap, self.ceiling, self.connections))
+        self._pre_fallback_ceiling = max(c, max(self._good, default=c))
         self.fallback = True
         self.ceiling = c
         self._prev_level = self._prev_rate = None

@@ -33,6 +33,26 @@ ITEM_LABEL = {"mail": "mail", "event": "calendar", "contact": "contacts"}
 FALLBACK_KEY_RE = re.compile(r"-x(\d+)$")
 # unresolved cid warnings: aggregated per folder in the log (still recorded per item in items.warnings)
 CID_WARNING_RE = re.compile(r"^(embedded:)*cid-unresolved:")
+ITEM_LOG_LIMIT = 2000      # per-item log lines of a run; beyond, items are still in the report and the errors list
+BULK_RESOLVE_MIN = 16      # items of a folder to check on the server from which one prefix search replaces N searches
+OK_BUFFER_ITEMS = 256      # item results kept in memory at most...
+OK_BUFFER_SECONDS = 0.05   # ... and for this long. Lost in a crash they stay `inflight`, searched on the server on resume
+RECOUNT_MAX_SECONDS = 30.0  # longest time between two recounts of the progress of a huge mailbox
+RECOUNT_SHARE = 50         # a recount taking t seconds is not repeated before 50 t: at most 2 % of the job process
+SERVER_PRESSURE_SECONDS = 60.0  # after a server error seen by any job, no job to that server grows for this long
+# rows of a folder already ok/skipped (never wanted again, whatever the mode): one shared row, a key is all they need
+DONE_ROW = {"id": None, "item_key": None, "status": "ok", "target": None, "hash": None, "error": None}
+
+
+UPSERT_ITEM = (
+    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
+    "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
+    "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
+    "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
+    "job_id=excluded.job_id, updated_at=excluded.updated_at "
+    "RETURNING id")
 
 
 class PauseRequested(Exception):
@@ -184,6 +204,8 @@ class AppendPool:
         self._lat_n = 0
         self._lat_buckets: dict = {}         # size bucket -> (sum of seconds, count): tuner input
         self._errors: list = []              # transient errors seen (tuner.ErrorNote), retried or not
+        self._hold_until = 0.0               # server under pressure: no new task on any connection before this
+        self._err_streak = 0                 # transient errors since the last success
         self.resize(max(1, n))
 
     @property
@@ -238,6 +260,25 @@ class AppendPool:
         if classify_error(err):
             with self.cond:
                 self._errors.append(ErrorNote.of(err))
+                self._note_pressure()
+
+    def _note_pressure(self) -> None:
+        """A transient error: every connection of the pool waits before its next task (growing with the errors in
+        a row, with jitter), so that a server in trouble is not hit again by all of them at once."""
+        with self.cond:
+            self._err_streak += 1
+            delay = min(30.0, self.base_delay * 2 ** min(self._err_streak - 1, 6)) * (1 + random.random() / 4)
+            self._hold_until = max(self._hold_until, time.monotonic() + delay)
+
+    def _wait_hold(self) -> None:
+        while True:
+            with self.cond:
+                left = self._hold_until - time.monotonic()
+                if left <= 0 or self._closing:
+                    return
+            if self._stopping():
+                return
+            time.sleep(min(0.2, left))
 
     def _stopping(self) -> bool:
         if self.abort.is_set():
@@ -280,6 +321,7 @@ class AppendPool:
                 if t is None:
                     return
                 try:
+                    self._wait_hold()
                     if self._stopping():
                         r = AppendResult(t.item_id, False, "cancel", "cancelled before sending (pause/stop)")
                     else:
@@ -292,6 +334,7 @@ class AppendPool:
                             dt = time.monotonic() - t0
                             b = tuner.size_bucket(t.size if t.size else len(t.raw or b""))
                             with self.cond:
+                                self._err_streak = 0
                                 self._lat_sum += dt
                                 self._lat_n += 1
                                 st, sn = self._lat_buckets.get(b, (0.0, 0))
@@ -339,7 +382,7 @@ class AppendPool:
                     attempt += 1
                     check = True
                     conn.close()
-                    end = time.time() + min(60.0, self.base_delay * (2 ** (attempt - 1)))
+                    end = time.time() + min(60.0, self.base_delay * (2 ** (attempt - 1))) * (1 + random.random() / 4)
                     while time.time() < end and not self._stopping():
                         time.sleep(0.1)
                     continue
@@ -392,6 +435,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
 def initial_tuning(srv: dict, running_jobs: int = 1, probe: "tuner.MachineProbe | None" = None) -> dict:
     """Pipeline sizes of a job at its start: {mode, builders, connections, fallback, max_builders, forced}.
 
@@ -413,20 +463,15 @@ def initial_tuning(srv: dict, running_jobs: int = 1, probe: "tuner.MachineProbe 
             "max_builders": max(b, mx), "forced": forced is not None}
 
 
-def _proc_stat() -> tuple[float, float] | None:
-    """(idle jiffies, total jiffies) of the machine (/proc/stat), None if unavailable."""
-    try:
-        with open("/proc/stat", encoding="ascii") as fh:
-            parts = fh.readline().split()
-    except OSError:
-        return None
-    if not parts or parts[0] != "cpu":
-        return None
-    v = [float(x) for x in parts[1:]]
-    return (v[3] + (v[4] if len(v) > 4 else 0.0)), sum(v[:8])
-
-
 class JobRunner:
+    # defaults of the buffers (also for a runner built without __init__ by a unit test)
+    _ok_buf: list = []
+    _ok_buf_t = 0.0
+    _inflight_buf: list = []
+    _defer_inflight = False
+    _ok_items = 0
+    _item_logged = 0
+
     def __init__(self, job_id: int, worker_id: str):
         self.job_id = job_id
         self.worker_id = worker_id
@@ -445,6 +490,15 @@ class JobRunner:
         self.current_folder: str | None = None
         self._last_flush = 0.0
         self._last_check = 0.0
+        self._next_recount = 0.0                 # see flush(): the cost of a recount grows with the mailbox
+        self._flushed_folder: object = self       # current_folder last written (self = nothing written yet)
+        self._avg_base: tuple | None = None       # see _mail_avg_size()
+        self._ok_buf = []                         # (status, error, item id) not written yet, see _handle_results
+        self._ok_buf_t = 0.0
+        self._inflight_buf = []                   # built messages whose row is not committed yet, see _record_built
+        self._mail_targets: dict[str, str] = {}   # target -> folder key of the folders of the mail phase
+        self._mem_low = False
+        self._mem_t = 0.0
         # samples (time, items done, bytes appended by this run)
         self._rate_window: list[tuple[float, int, int]] = []
         # average rate over the import phases of this run (first / last sample): displayed at the end of the job
@@ -571,12 +625,18 @@ class JobRunner:
         return round((b1 - b0) / (t1 - t0), 1) if t1 - t0 > 0 and b1 > b0 else None
 
     def _mail_avg_size(self) -> float | None:
-        """Average size of the mails of this PST already sent (all runs): converts remaining items to bytes."""
-        r = db.q1("SELECT COUNT(size) n, SUM(size) s FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
-                  "AND status='ok'", (self.account_id, self.pst_key))
-        return (r["s"] / r["n"]) if r and r["n"] else None
+        """Average size of the mails of this PST already sent (all runs): converts remaining items to bytes.
+        The table is read once per run (it reads every row), this run's mails are then added from memory."""
+        if self._avg_base is None:
+            r = db.q1("SELECT COUNT(size) n, SUM(size) s FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+                      "AND status='ok'", (self.account_id, self.pst_key))
+            self._avg_base = (r["n"] or 0, r["s"] or 0, self._ok_items, self._bytes_done)
+        n0, s0, k0, b0 = self._avg_base
+        n, total = n0 + self._ok_items - k0, s0 + self._bytes_done - b0
+        return total / n if n else None
 
     def recompute_progress(self) -> None:
+        self._flush_items(force=True)
         for kind, pk in PROGRESS_KEY.items():
             rows = db.q("SELECT status, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? GROUP BY status",
                         (self.account_id, self.pst_key, kind))
@@ -591,8 +651,19 @@ class JobRunner:
         young = bool(self._rate_window) and now - self._rate_window[0][0] < 5.0
         if not force and now - self._last_flush < (0.25 if young else 1.0):
             return
+        # counting the items reads the index of the whole mailbox: on millions of items it must not run every
+        # second (the job process does nothing else meanwhile). Between two recounts only a folder change is written.
+        if not force and now < self._next_recount:
+            if self.current_folder != self._flushed_folder:
+                self._flushed_folder = self.current_folder
+                self._last_flush = now
+                db.ex("UPDATE jobs SET current_folder=?, heartbeat=? WHERE id=?", (self.current_folder, now, self.job_id))
+            return
         self._last_flush = now
+        t0 = time.monotonic()
         self.recompute_progress()
+        self._next_recount = now + min(RECOUNT_MAX_SECONDS, (time.monotonic() - t0) * RECOUNT_SHARE)
+        self._flushed_folder = self.current_folder
         done = sum(p["done"] for p in self.progress.values())
         total = sum(p["total"] for p in self.progress.values())
         self._rate_window.append((now, done, self._bytes_done))
@@ -622,10 +693,16 @@ class JobRunner:
                round(eta) if eta is not None else None, now, self.job_id))
 
     def item_rows(self, kind: str, fkey: str, path: list[str] | None = None) -> dict[str, dict]:
+        """{item key: row} of a folder. Items already ok/skipped share DONE_ROW: a folder of a million mails then
+        costs a million keys, not a million dicts."""
         legacy = legacy_folder_key(path) if path is not None else fkey
-        rows = db.q("SELECT id, item_key, status, target, hash, error FROM items WHERE account_id=? AND pst_key=? AND kind=? "
-                    "AND folder IN (?, ?)", (self.account_id, self.pst_key, kind, fkey, legacy))
-        return {r["item_key"]: dict(r) for r in rows}
+        self._flush_items(force=True)
+        out: dict[str, dict] = {}
+        for r in db.conn().execute(
+                "SELECT id, item_key, status, target, hash, error FROM items WHERE account_id=? AND pst_key=? AND kind=? "
+                "AND folder IN (?, ?)", (self.account_id, self.pst_key, kind, fkey, legacy)):
+            out[r["item_key"]] = DONE_ROW if r["status"] in ("ok", "skipped") else dict(r)
+        return out
 
     @staticmethod
     def fallback_rows(rows: dict[str, dict]) -> dict[int, dict]:
@@ -634,8 +711,10 @@ class JobRunner:
         row is deleted."""
         out = {}
         for k, r in rows.items():
+            if r["status"] != "error":
+                continue
             m = FALLBACK_KEY_RE.search(k)
-            if m and r["status"] == "error":
+            if m:
                 out[int(m.group(1))] = r
         return out
 
@@ -651,27 +730,41 @@ class JobRunner:
         if fb is not None:
             db.ex("DELETE FROM items WHERE id=? AND status='error'", (fb["id"],))
 
+    def _upsert_params(self, kind: str, key: str, fkey: str, status: str, **kw) -> tuple:
+        return (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, kw.get("target"), kw.get("error"),
+                kw.get("warnings"), kw.get("subject"), kw.get("hash"), kw.get("size"), kw.get("source_ref"), self.job_id,
+                time.time())
+
     def upsert_item(self, kind: str, key: str, fkey: str, status: str, **kw) -> int:
-        now = time.time()
-        cols = {"target": kw.get("target"), "error": kw.get("error"), "warnings": kw.get("warnings"),
-                "subject": kw.get("subject"), "hash": kw.get("hash"), "size": kw.get("size"),
-                "source_ref": kw.get("source_ref")}
-        cur = db.ex(
-            "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
-            "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
-            "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
-            "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
-            "job_id=excluded.job_id, updated_at=excluded.updated_at "
-            "RETURNING id",
-            (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, cols["target"], cols["error"], cols["warnings"],
-             cols["subject"], cols["hash"], cols["size"], cols["source_ref"], self.job_id, now))
-        return cur.fetchone()[0]
+        return db.ex(UPSERT_ITEM, self._upsert_params(kind, key, fkey, status, **kw)).fetchone()[0]
 
     def set_item(self, item_id: int, status: str, error: str | None = None) -> None:
         db.ex("UPDATE items SET status=?, error=?, job_id=?, updated_at=? WHERE id=?",
               (status, error, self.job_id, time.time(), item_id))
+
+    def _flush_items(self, force: bool = False) -> None:
+        """Writes the item results kept in memory, in one transaction. A crash before this loses nothing: the
+        items are still `inflight` and searched on the server on resume."""
+        buf = self._ok_buf
+        if not buf:
+            return
+        now = time.monotonic()
+        if not force and len(buf) < OK_BUFFER_ITEMS and now - self._ok_buf_t < OK_BUFFER_SECONDS:
+            return
+        self._ok_buf, self._ok_buf_t = [], now
+        t = time.time()
+        with db.tx() as c:
+            c.executemany("UPDATE items SET status=?, error=NULL, job_id=?, updated_at=? WHERE id=?",
+                          [(st, self.job_id, t, item_id) for st, item_id in buf])
+
+    def _item_log(self, msg: str, level: str) -> None:
+        """Log line about one item. A damaged mailbox would otherwise write millions of them."""
+        self._item_logged += 1
+        if self._item_logged < ITEM_LOG_LIMIT:
+            self.log(msg, level)
+        elif self._item_logged == ITEM_LOG_LIMIT:
+            self.log(f"{ITEM_LOG_LIMIT} log lines about single items in this run: the next ones are only in the "
+                     "report and the errors list", "warning")
 
     def wants(self, r: dict | None) -> bool:
         st = r["status"] if r else None
@@ -798,7 +891,7 @@ class JobRunner:
         the running jobs, then an AutoTuner adjusts both counts during the mail phase."""
         srv = dict(self.srv)
         if tuner.is_auto(srv):
-            secs = _float_env("AUTOTUNE_BENCH_SECONDS", 1.5)
+            secs = _float_env("AUTOTUNE_BENCH_SECONDS", 0.25)
             probe = tuner.probe_machine(benchmark=(lambda: tuner.default_benchmark(secs)) if secs > 0 else None)
             running = db.q1("SELECT COUNT(*) n FROM jobs WHERE status='running'")["n"] or 1
             t = initial_tuning(srv, running, probe)
@@ -808,7 +901,9 @@ class JobRunner:
                      f"bench {bench}, {running} running job(s) → {t['builders']} builders"
                      + (" (BUILD_PROCESSES)" if t["forced"] else "") + f", IMAP connections {t['connections']}")
             self.tuner = tuner.AutoTuner(builders=max(1, t["builders"]), max_builders=max(1, t["max_builders"]),
-                                         connections=t["connections"], min_window_s=self.tune_interval)
+                                         connections=t["connections"], min_window_s=self.tune_interval,
+                                         cap=_int_env("AUTOTUNE_MAX_CONNECTIONS", tuner.MAX_CONNECTIONS))
+            self.byte_budget = builders.byte_budget(probe.mem_available_bytes, running)
             if t["forced"]:  # the builder count never moves: the tuner adjusts the connections only
                 self.tuner.max_builders = self.tuner.fallback_builders = self.tuner.builders
         else:
@@ -830,7 +925,7 @@ class JobRunner:
 
     def _cpu_headroom(self) -> float | None:
         """Idle cores since the previous call (/proc/stat), else from the load average."""
-        cur = _proc_stat()
+        cur = tuner.proc_stat()
         prev, self._tune_cpu = self._tune_cpu, cur
         if cur is not None and prev is not None and cur[1] > prev[1]:
             return max(0.0, self._cpus * (cur[0] - prev[0]) / (cur[1] - prev[1]))
@@ -838,6 +933,41 @@ class JobRunner:
             return max(0.0, self._cpus - os.getloadavg()[0])
         except OSError:  # pragma: no cover
             return None
+
+    def _server_share(self, errors: list) -> tuple[int, bool, int]:
+        """Between jobs, from the DB: (connections this job may use on its server, server under pressure?, running
+        jobs). A job that saw a server error tells the others: it is one server, and they must not grow into it."""
+        sid = self.srv["id"]
+        key = f"server:{sid}:pressure"
+        now = time.time()
+        if errors:
+            db.kv_set(key, str(now))
+            hold = True
+        else:
+            try:
+                hold = now - float(db.kv_get(key) or 0) < SERVER_PRESSURE_SECONDS
+            except ValueError:
+                hold = False
+        rows = db.q("SELECT j.id, j.tuning, a.server_id FROM jobs j JOIN accounts a ON a.id=j.account_id "
+                    "WHERE j.status='running'")
+        others = [r for r in rows if r["server_id"] == sid and r["id"] != self.job_id]
+        used = sum(int((db.jload(r["tuning"], None) or {}).get("connections") or 1) for r in others)
+        budget = max(1, _int_env("AUTOTUNE_MAX_SERVER_CONNECTIONS", tuner.MAX_SERVER_CONNECTIONS))
+        return max(1, budget // (len(others) + 1), budget - used), hold, max(1, len(rows))
+
+    def _memory_is_low(self) -> bool:
+        """Free memory below MEM_GUARD_MB (read at most once per second). Logged when it changes."""
+        now = time.monotonic()
+        if now - self._mem_t < 1.0:
+            return self._mem_low
+        self._mem_t = now
+        free = tuner.mem_available()
+        low = bool(free) and free < _int_env("MEM_GUARD_MB", 512) * 1024 * 1024
+        if low != self._mem_low:
+            self._mem_low = low
+            self.log(f"Memory guard: {free // 2**20} MB free, one build at a time until memory comes back" if low
+                     else f"Memory guard: {free // 2**20} MB free, builds back to normal", "warning" if low else "info")
+        return low
 
     def _tune_tick(self, pool: AppendPool) -> None:
         """Mail phase: one Sample about every `tune_interval` seconds (sooner on a transient IMAP error)
@@ -860,9 +990,13 @@ class JobRunner:
         util = bpool.take_utilisation() if bpool is not None else None
         state = tuner.queue_state(pool.pending, pool.n, sum(self._inflight_bytes.values()), self.byte_budget,
                                   idle_appenders=max(0, pool.alive() - pool.busy()))
+        conn_limit, hold, running = self._server_share([e for e in errs if tuner.classify_error(e)])
+        movable = self.build_procs > 0 and not self._builders_forced
         sample = tuner.Sample(bytes_appended=self._bytes_done - self._tune_b0, duration_s=dur, queue_state=state,
                               append_buckets=lat_buckets or None, builder_util=util,
-                              cpu_headroom=self._cpu_headroom(), errors=errs)
+                              cpu_headroom=self._cpu_headroom(), errors=errs, hold=hold, conn_limit=conn_limit,
+                              fair_builders=max(1, (self._cpus - 1) // running) if movable else None,
+                              mem_ok=not self._memory_is_low())
         self._tune_t0, self._tune_b0 = now, self._bytes_done
         self._apply_decision(self.tuner.feed(sample), pool)
 
@@ -878,7 +1012,7 @@ class JobRunner:
             if bpool is not None:
                 bpool.resize(d.builders)
             self.build_procs = d.builders
-        self.tuning_fallback = self.tuning_fallback or d.fallback
+        self.tuning_fallback = bool(getattr(self.tuner, "fallback", d.fallback))
         if d.log:
             self.log(d.log, "warning" if d.fallback else "info")
         self._save_tuning()
@@ -1011,8 +1145,8 @@ class JobRunner:
                 n = self._cid_msgs.get(fk)
                 if n:
                     self.log(f"{fk}: {n} message(s) reference images missing from the PST (quoted replies) — harmless")
-                # post-folder check: messages bearing our fingerprint >= sent (ok) to this folder
-                self.check_folder_status(conn, fk, targets[self._folder_index(f)])
+                # checked once, by phase_verify: messages bearing our fingerprint >= sent (ok) to this folder
+                self._mail_targets[targets[self._folder_index(f)]] = fk
         finally:
             self._close_builders()  # in-flight builds discarded (pause/stop/failure): nothing recorded for them
             if pool is not None:
@@ -1024,6 +1158,7 @@ class JobRunner:
                         self._handle_results(pool.drain())
                     except JobFailed:
                         pass
+                    self._flush_items(force=True)
             conn.close()
         self.current_folder = None
         self.flush(force=True)  # last sample of the phase (end-of-job average rates)
@@ -1035,18 +1170,20 @@ class JobRunner:
             if r.ok:
                 self.consecutive_temp = 0
                 self._bytes_done += r.size or size
-                self.set_item(r.item_id, "ok")
+                self._ok_items += 1
+                self._ok_buf.append(("ok", r.item_id))
             elif r.kind == "cancel":
-                self.set_item(r.item_id, "pending")  # never sent (pause/stop before the APPEND)
+                self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():
                 continue  # interrupted by pause/stop: stays "inflight", rechecked on resume
             else:
                 self.set_item(r.item_id, "error", f"[{r.kind}] {r.msg}")
-                self.log(f"APPEND failure (item {r.item_id}): {r.msg}", "error")
+                self._item_log(f"APPEND failure (item {r.item_id}): {r.msg}", "error")
                 if r.kind == "fatal":
                     fatal = r.msg
                 elif r.kind in ("temp", "auth"):
                     self.consecutive_temp += 1
+        self._flush_items(force=bool(fatal))
         if fatal:
             raise JobFailed(f"permanent server error: {fatal}")
         if self.consecutive_temp >= max(5, 3 * max(1, self.connections)):  # current connection count
@@ -1062,6 +1199,7 @@ class JobRunner:
             if not pool.abort.is_set():
                 self._tune_tick(pool)
         self._handle_results(pool.drain())
+        self._flush_items(force=True)
 
     def _resolve_on_server(self, conn: ImapConn, rows: dict[str, dict]) -> None:
         """Before any resend: `inflight` items (APPEND possibly succeeded) and `error` items already tried (hash known,
@@ -1073,13 +1211,28 @@ class JobRunner:
             return
         n_infl = sum(r["status"] == "inflight" for r in todo)
         self.log(f"{n_infl} 'inflight' item(s) and {len(todo) - n_infl} in error to check on the server")
+        sha = self.pst_row["pst_sha"]
+        known: dict[str, dict] = {}  # target -> {bare import id: UIDs}, when one search answers for the whole folder
+        by_target = collections.Counter(r["target"] for r in todo)
+        for target, n in by_target.items():
+            if n >= BULK_RESOLVE_MIN:
+                try:
+                    known[target] = with_retry(lambda c: c.import_ids_with_prefix(target, IMPORT_HEADER, f"{sha}-"),
+                                               conn, settings.max_retries, should_stop=self._should_stop)
+                except ImapError as e:
+                    if e.kind == "temp":
+                        raise JobFailed(f"cannot verify items already sent: {e}")
+                    known[target] = {}  # folder missing -> not sent yet
         for r in todo:
             self.check()
-            import_id = import_id_of(self.pst_row["pst_sha"], r["item_key"])
+            import_id = import_id_of(sha, r["item_key"])
             target = r["target"]
             try:
-                uids = with_retry(lambda c: c.find_import_id(target, IMPORT_HEADER, import_id), conn,
-                                  settings.max_retries, should_stop=self._should_stop)
+                if target in known:
+                    uids = known[target].get(import_id[1:-1], [])
+                else:
+                    uids = with_retry(lambda c: c.find_import_id(target, IMPORT_HEADER, import_id), conn,
+                                      settings.max_retries, should_stop=self._should_stop)
             except ImapError as e:
                 if e.kind == "temp":
                     raise JobFailed(f"cannot verify items already sent: {e}")
@@ -1164,7 +1317,7 @@ class JobRunner:
         st = res["status"]
         if st == "error":
             self.upsert_item("mail", key, fkey, "error", target=target, error=res["error"])
-            self.log(f"Cannot build ({fkey} #{idx}): {res['error'].removeprefix('construction: ')}", "error")
+            self._item_log(f"Cannot build ({fkey} #{idx}): {res['error'].removeprefix('construction: ')}", "error")
             return
         if st == "skipped":
             self.upsert_item("mail", key, fkey, "skipped", target=target, error="not a mail")
@@ -1175,7 +1328,7 @@ class JobRunner:
             errs = res["errs"]
             self.upsert_item("mail", key, fkey, "error", target=target, subject=res["subject"],
                              error="; ".join(errs)[:2000], warnings=warnings)
-            self.log(f"Mail rejected '{res['subject']}': {'; '.join(errs)}", "error")
+            self._item_log(f"Mail rejected '{res['subject']}': {'; '.join(errs)}", "error")
             return
         others = [w for w in warns if not CID_WARNING_RE.match(w)]
         if len(others) != len(warns):
@@ -1184,11 +1337,26 @@ class JobRunner:
                 cid = self._cid_msgs = {}
             cid[fkey] = cid.get(fkey, 0) + 1
         if others:
-            self.log(f"Warning '{res['subject']}': {', '.join(others)}", "warning")
+            self._item_log(f"Warning '{res['subject']}': {', '.join(others)}", "warning")
         raw = res["raw"]
-        item_id = self.upsert_item("mail", key, fkey, "inflight", target=target, subject=res["subject"],
-                                   hash=res["hash"], size=len(raw), warnings=warnings)
-        self._submit(pool, AppendTask(item_id, target, raw, res["flags"], res["internaldate"], len(raw), import_id))
+        params = self._upsert_params("mail", key, fkey, "inflight", target=target, subject=res["subject"],
+                                     hash=res["hash"], size=len(raw), warnings=warnings)
+        self._inflight_buf.append((params, AppendTask(0, target, raw, res["flags"], res["internaldate"], len(raw),
+                                                      import_id)))
+        if not self._defer_inflight:
+            self._commit_inflight(pool)
+
+    def _commit_inflight(self, pool: AppendPool) -> None:
+        """Commits the `inflight` rows of the built messages kept by _record_built in one transaction, THEN submits
+        them, in order: no APPEND before its row is committed, as ever."""
+        buf, self._inflight_buf = self._inflight_buf, []
+        if not buf:
+            return
+        with db.tx() as c:
+            for params, task in buf:
+                task.item_id = c.execute(UPSERT_ITEM, params).fetchone()[0]
+        for _params, task in buf:
+            self._submit(pool, task)
 
     def _submit(self, pool: AppendPool, task: AppendTask) -> None:
         """APPEND submission within the byte budget of built messages in flight (memory capped whatever the
@@ -1300,8 +1468,9 @@ class JobRunner:
     def _mail_parallel(self, entries: list, pool: AppendPool, bpool: builders.BuilderPool, targets: dict,
                        pst_sha: str) -> None:
         """Builders build, the job process records and submits. Results are recorded and submitted in the
-        index order (reorder buffer, bounded to 2 x builders results): APPENDs follow the newest-first
-        order, strictly with one IMAP connection."""
+        index order (reorder buffer, bounded by count and by the byte budget): APPENDs follow the newest-first
+        order, strictly with one IMAP connection. One huge message being built must not stop the other builders
+        at once, hence a buffer wider than the pool."""
         entries.reverse()  # pop() = next entry
         seq_next = seq_rec = 0
         ready: dict[int, builders.BuildEvent] = {}
@@ -1314,9 +1483,12 @@ class JobRunner:
             self._tune_tick(pool)
             while retry and bpool.can_dispatch():
                 bpool.dispatch(retry.pop(0))
-            # reorder buffer bounded to 2 x the CURRENT builder count (resized by the auto-tuner)
-            while entries and bpool.can_dispatch() and len(ready) < 2 * bpool.size and \
-                    sum(self._inflight_bytes.values()) + ready_bytes < self.byte_budget:
+            # reorder buffer bounded from the CURRENT builder count (resized by the auto-tuner); low memory: one
+            # build at a time, whatever the budget (a build of a huge message is not known in advance)
+            low = self._memory_is_low()
+            while entries and bpool.can_dispatch() and len(ready) < max(32, 4 * bpool.size) and \
+                    sum(self._inflight_bytes.values()) + ready_bytes < self.byte_budget and \
+                    not (low and bpool.in_flight() > 0):
                 _sv, key, fi, idx = entries.pop()
                 f = self.folders[fi]
                 fb = self._fallbacks.pop((fi, idx), None)
@@ -1331,11 +1503,16 @@ class JobRunner:
                     continue
                 ready[ev.task.meta[0]] = ev
                 ready_bytes += len((ev.result or {}).get("raw") or b"")
-            while seq_rec in ready:
-                ev = ready.pop(seq_rec)
-                seq_rec += 1
-                ready_bytes -= len((ev.result or {}).get("raw") or b"")
-                self._on_built(ev, pool)
+            self._defer_inflight = True  # everything ready now: one transaction
+            try:
+                while seq_rec in ready:
+                    ev = ready.pop(seq_rec)
+                    seq_rec += 1
+                    ready_bytes -= len((ev.result or {}).get("raw") or b"")
+                    self._on_built(ev, pool)
+            finally:
+                self._defer_inflight = False
+            self._commit_inflight(pool)
             if not entries and not bpool.busy() and not ready and not retry:
                 return
 
@@ -1378,6 +1555,8 @@ class JobRunner:
                 raise JobFailed(f"The subprocess crashed {n} times (probable libpff crash)")
             return
         self._record_built(fkey, t.index, t.key, target, pool, t.import_id, ev.result)
+        if fb is not None:
+            self._commit_inflight(pool)  # the real row first: the item is never left without any row
         self._drop_fallback(fb)
 
     def _path_of(self, fkey: str) -> list[str]:
@@ -1386,11 +1565,9 @@ class JobRunner:
                 return list(f.path)
         return [fkey]
 
-    def check_folder_status(self, conn: ImapConn, fkey: str, target: str) -> dict:
+    def check_folder_status(self, conn: ImapConn, fkey: str, target: str, n_ok: int) -> dict:
         """Check of a target folder: number of messages bearing OUR fingerprint (X-PST-Import-Id containing
-        "<sha>-") >= items marked as sent to this folder. Pre-existing content is not counted."""
-        n_ok = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND target=? AND status='ok'",
-                     (self.account_id, self.pst_key, target))["n"]
+        "<sha>-") >= `n_ok` items marked as sent to this folder. Pre-existing content is not counted."""
         try:
             prefix = f"{self.pst_row['pst_sha']}-"
             present = with_retry(lambda c: c.count_import_prefix(target, IMPORT_HEADER, prefix), conn,
@@ -1489,7 +1666,10 @@ class JobRunner:
                     continue
                 if not e.temporary or attempt >= settings.max_retries:
                     return f"[{'temp' if e.temporary else 'perm'}] {e}"
-                self._sleep(min(60.0, 2.0 ** attempt))
+                # the server's own Retry-After (429, 503) when it gives one
+                wait = min(300.0, e.retry_after) if getattr(e, "retry_after", None) else min(60.0, 2.0 ** attempt)
+                self.log(f"{kind.upper()}: {e}, retrying in {wait:.0f} s", "warning")
+                self._sleep(wait * (1 + random.random() / 4))
         return "failure"
 
     # ------------------------------------------------------------ final checks
@@ -1502,17 +1682,20 @@ class JobRunner:
             conn = ImapConn(params)
             try:
                 with_retry(lambda c: c.connect(), conn, settings.max_retries, should_stop=self._should_stop)
-                targets = db.q("SELECT target, MIN(folder) folder FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
-                               "AND status='ok' GROUP BY target", (self.account_id, self.pst_key))
-                for t in targets:
+                self._flush_items(force=True)
+                # one count per folder from one read of the items, and folders of this run with nothing sent
+                rows = db.q("SELECT target, MIN(folder) folder, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? "
+                            "AND kind='mail' AND status='ok' GROUP BY target", (self.account_id, self.pst_key))
+                targets = {r["target"]: (r["folder"], r["n"]) for r in rows}
+                for target, fk in self._mail_targets.items():
+                    targets.setdefault(target, (fk, 0))
+                for target, (fk, n_ok) in targets.items():
                     self.check()
-                    e = self.check_folder_status(conn, t["folder"], t["target"])
+                    e = self.check_folder_status(conn, fk, target, n_ok)
                     if not e["ok"]:
-                        problems.append(f"folder {t['folder']}: {e['present']} present < {e['sent']} sent")
+                        problems.append(f"folder {fk}: {e['present']} present < {e['sent']} sent")
                 # sample re-read by header (exact match) + hash
-                ids = [r["id"] for r in db.q("SELECT id FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND status='ok'",
-                                             (self.account_id, self.pst_key))]
-                sample = random.sample(ids, min(settings.verify_sample, len(ids)))
+                sample = self._sample_ids()
                 checked, good, bad = 0, 0, []
                 for iid in sample:
                     self.check()
@@ -1569,6 +1752,21 @@ class JobRunner:
                     problems.append(f"{phase}: {present} present < {n_ok} sent")
         verify["problems"] = problems
         self.report["verify"] = verify
+
+    def _sample_ids(self) -> list[int]:
+        """VERIFY_SAMPLE random ids among the mails sent (reservoir: no list of every id in memory)."""
+        size = max(0, settings.verify_sample)
+        out: list[int] = []
+        cur = db.conn().execute("SELECT id FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND status='ok'",
+                                (self.account_id, self.pst_key))
+        for n, (iid,) in enumerate(cur):
+            if n < size:
+                out.append(iid)
+            else:
+                j = random.randint(0, n)
+                if j < size:
+                    out[j] = iid
+        return out
 
     # ------------------------------------------------------------ report
     def write_report(self, status: str, error: str | None, finished: float) -> str | None:

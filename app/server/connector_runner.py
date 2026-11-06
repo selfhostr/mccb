@@ -55,6 +55,7 @@ class TargetPool(AppendPool):
         if classify_error(note):
             with self.cond:
                 self._errors.append(note)
+                self._note_pressure()
 
     def _do(self, session, t: TargetTask) -> AppendResult:
         item = OutgoingItem(t.kind, t.raw, t.import_id, t.flags, t.internaldate, t.name)
