@@ -40,6 +40,15 @@ export function fmtDuration(seconds: number | null | undefined): string {
 	return `${unit('hour', Math.floor(min / 60))} ${unit('minute', min % 60)}`;
 }
 
+/** A time left at a glance: hours and minutes, never seconds. Null below one minute. */
+export function fmtLeft(seconds: number): string | null {
+	const min = Math.round(seconds / 60);
+	if (min < 1) return null;
+	const unit = (u: string, v: number) => new Intl.NumberFormat(locale, { style: 'unit', unit: u, unitDisplay: 'short' }).format(v);
+	const hours = Math.floor(min / 60);
+	return hours ? `${unit('hour', hours)} ${unit('minute', min % 60)}` : unit('minute', min);
+}
+
 export function pct(done: number, total: number): number {
 	return total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 }

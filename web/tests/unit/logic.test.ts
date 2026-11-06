@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Account, Job, Pst } from '../../src/lib/api/types.ts';
-import { currentResult, importPlan, matchesFilter, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
+import { currentResult, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
 import { createCoalescer } from '../../src/lib/logic/coalesce.ts';
 import { maskEmail, maskFile, maskHost, maskText } from '../../src/lib/logic/mask.ts';
-import { legacyRedirect, matchRoute } from '../../src/lib/logic/routes.ts';
+import { legacyRedirect, matchRoute, rowHref } from '../../src/lib/logic/routes.ts';
 import { headerState, splitSelection, toggleAllVisible } from '../../src/lib/logic/selection.ts';
 import { createTestRunner } from '../../src/lib/logic/testrun.ts';
 import { VIRTUAL_AT, windowRange } from '../../src/lib/logic/virtual.ts';
@@ -147,6 +147,13 @@ describe('virtual window', () => {
 });
 
 describe('routes', () => {
+	it('a row keeps the filters and opens the job, or the mailbox before there is one', () => {
+		expect(rowHref('', 3, undefined)).toBe('/?account=3');
+		expect(rowHref('?q=al&status=done', 3, null)).toBe('/?q=al&status=done&account=3');
+		expect(rowHref('', 3, 7)).toBe('/jobs/7');
+		expect(rowHref('?q=al&tab=errors&account=2', 3, 7)).toBe('/jobs/7?q=al');
+	});
+
 	it('three pages, the job panel on the first', () => {
 		expect(matchRoute('/')).toEqual({ page: 'migrations', jobId: null });
 		expect(matchRoute('/jobs/12')).toEqual({ page: 'migrations', jobId: 12 });
@@ -219,6 +226,34 @@ describe('accounts', () => {
 		const list = [account({ id: 1 }), account({ id: 2, status: 'auth_failed' }), account({ id: 3 })];
 		const jobs: Record<number, Job> = { 1: job('running'), 3: job('done') };
 		expect(summarize(list, (id) => jobs[id])).toEqual({ total: 3, running: 1, done: 1, attention: 1 });
+	});
+
+	it('orders what needs a person first and finished work last', () => {
+		const a = account({ id: 1 });
+		expect(rowRank(account({ id: 2, status: 'auth_failed' }), undefined)).toBe(0);
+		expect(rowRank(a, job('failed'))).toBe(0);
+		expect(rowRank(a, job('done_with_errors'))).toBe(0);
+		expect(rowRank(a, job('running'))).toBe(1);
+		expect(rowRank(a, job('queued'))).toBe(1);
+		expect(rowRank(a, undefined)).toBe(2);
+		expect(rowRank(a, job('stopped'))).toBe(2);
+		expect(rowRank(a, job('done'))).toBe(3);
+	});
+
+	it('a job percent counts every stream, and a job without progress is at zero', () => {
+		const stream = (done: number, total: number) => ({ done, total, errors: 0 });
+		expect(jobPercent(undefined)).toBe(0);
+		expect(jobPercent({ progress: { mail: stream(1, 4), calendar: stream(1, 1), contacts: stream(0, 0) } })).toBe(40);
+	});
+
+	it('overall progress is the mean of the mailboxes, the time left only while something moves', () => {
+		const stream = (done: number, total: number) => ({ done, total, errors: 0 });
+		const running = { ...job('running'), rate: 10, progress: { mail: stream(50, 100), calendar: stream(0, 0), contacts: stream(0, 0) } };
+		const list = [account({ id: 1 }), account({ id: 2 }), account({ id: 3 }), account({ id: 4 })];
+		const jobs: Record<number, Job> = { 1: running, 2: job('done') };
+		expect(overallProgress(list, (id) => jobs[id])).toEqual({ percent: 38, left: 5 });
+		expect(overallProgress(list, (id) => (id === 2 ? job('done') : undefined))).toEqual({ percent: 25, left: null });
+		expect(overallProgress([], () => undefined)).toEqual({ percent: 0, left: null });
 	});
 
 	it('the import plan says what will not start and why', () => {

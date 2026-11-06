@@ -1,4 +1,5 @@
 import type { Account, Job, Pst, TestResult } from '../api/types.ts';
+import { pct } from '../format.ts';
 import { hasCustomSource, hasOwnTarget } from './connector.ts';
 
 export const ACTIVE_JOB = ['queued', 'running', 'paused', 'stopping'];
@@ -68,6 +69,42 @@ export function summarize(accounts: Iterable<Account>, jobOf: (id: number) => Jo
 		if (needsAttention(account, job)) s.attention++;
 	}
 	return s;
+}
+
+/** Order of the list: what needs a person first, then what runs, then the rest, finished last. */
+export function rowRank(account: Account, job: Job | undefined): number {
+	if (needsAttention(account, job)) return 0;
+	if (isActive(job)) return 1;
+	return job?.status === 'done' ? 3 : 2;
+}
+
+export function jobPercent(job: Pick<Job, 'progress'> | undefined | null): number {
+	if (!job?.progress) return 0;
+	const { mail, calendar, contacts } = job.progress;
+	return pct((mail?.done ?? 0) + (calendar?.done ?? 0) + (contacts?.done ?? 0), (mail?.total ?? 0) + (calendar?.total ?? 0) + (contacts?.total ?? 0));
+}
+
+export interface Overall {
+	/** Mean of the mailboxes: moves while they run, reaches 100 only when all are through. */
+	percent: number;
+	/** Seconds at the present rate of the running jobs. Null when nothing is moving. */
+	left: number | null;
+}
+
+export function overallProgress(accounts: Iterable<Account>, jobOf: (id: number) => Job | undefined): Overall {
+	let count = 0;
+	let sum = 0;
+	let remaining = 0;
+	let rate = 0;
+	for (const account of accounts) {
+		const job = jobOf(account.id);
+		count++;
+		sum += job?.status === 'done' ? 100 : jobPercent(job);
+		if (!job || !isActive(job)) continue;
+		for (const stream of [job.progress?.mail, job.progress?.calendar, job.progress?.contacts]) remaining += Math.max(0, (stream?.total ?? 0) - (stream?.done ?? 0));
+		if (job.status === 'running') rate += job.rate ?? 0;
+	}
+	return { percent: count ? Math.round(sum / count) : 0, left: rate > 0 && remaining > 0 ? remaining / rate : null };
 }
 
 export interface ImportPlan {

@@ -68,11 +68,11 @@
 </script>
 
 {#if batch && look && items}
-	<div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-btn border border-line-strong bg-surface-2 px-3 py-1" role="region" aria-label={m.batch_label({ name: batch.name })} data-testid="batch-bar">
+	<div class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-btn border border-line-strong px-3 py-1" role="region" aria-label={m.batch_label({ name: batch.name })} data-testid="batch-bar">
 		<div class="min-w-0 flex-1 basis-56">
 			<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 				<span class="truncate">{batch.name}</span>
-				<Plate tone={look.tone} icon={look.icon} spin={look.spin} label={look.label} />
+				<Plate tone={look.tone} icon={look.icon} label={look.label} />
 			</p>
 			<p class="m-0 text-xs text-ink-2" data-testid="batch-totals">{m.batch_totals({ jobs: batch.jobs, done: fmtNum(items.done), total: fmtNum(items.total), errors: fmtNum(items.errors) })}</p>
 		</div>

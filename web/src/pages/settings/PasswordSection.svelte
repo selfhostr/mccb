@@ -4,6 +4,7 @@
 	import Button from '../../lib/ui/Button.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
+	import Section from '../../lib/ui/Section.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 
 	let current = $state('');
@@ -35,10 +36,8 @@
 	}
 </script>
 
-<section id="password" class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid="section-password">
-	<h2 class="text-[0.9375rem]">{m.settings_password_title()}</h2>
-	<p class="m-0 mt-1 mb-2 text-ink-2">{m.settings_password_sentence()}</p>
-	<form class="flex max-w-[320px] flex-col gap-3" onsubmit={submit}>
+<Section id="password" title={m.settings_password_title()} sentence={m.settings_password_sentence()}>
+	<form class="flex max-w-[460px] flex-col gap-3" onsubmit={submit}>
 		<Field label={m.settings_password_current()}>
 			<input class="input" type="password" autocomplete="current-password" required bind:value={current} />
 		</Field>
@@ -51,4 +50,4 @@
 		{#if error}<ErrorNotice title={m.settings_password_failed()} message={error} />{/if}
 		<div><Button type="submit" loading={busy}>{m.settings_password_submit()}</Button></div>
 	</form>
-</section>
+</Section>

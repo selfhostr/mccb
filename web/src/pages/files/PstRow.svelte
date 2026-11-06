@@ -8,7 +8,7 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import type { Pst } from '../../lib/api/types.ts';
 	import { fmtBytes, fmtNum } from '../../lib/format.ts';
-	import { canPreview, chainView, fetchPercent, formatOf, isFetching } from '../../lib/logic/pst.ts';
+	import { canPreview, chainView, fetchPercent, formatOf, isFetching, kindOf } from '../../lib/logic/pst.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { pstLook } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
@@ -31,7 +31,7 @@
 	const look = $derived(pstLook(pst.status));
 	const name = $derived(prefs.file(pst.filename));
 	const totals = $derived(pst.scan?.totals);
-	const format = $derived(formatOf(pst.scan));
+	const kind = $derived(formatOf(pst.scan) || kindOf(pst.filename));
 	const linked = $derived(pst.status === 'valid' ? [...data.accounts.values()].filter((a) => a.pst_id === id).length : 0);
 
 	const fetching = $derived(isFetching(pst));
@@ -43,6 +43,7 @@
 	const chainEmail = $derived(chain?.accountEmail ? prefs.email(chain.accountEmail) : chain?.accountId != null ? `#${chain.accountId}` : '');
 
 	const menu = $derived([
+		...(pst.scan?.folders?.length ? [{ label: m.files_list_folders(), icon: FolderTree, onselect: () => ondetails(pst) }] : []),
 		...(canPreview(pst)
 			? [
 					{
@@ -61,30 +62,26 @@
 	]);
 </script>
 
-<li class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line py-2" data-pst={pst.filename}>
-	<div class="min-w-0 flex-1 basis-56">
-		<div class="flex items-center gap-2">
-			<span class="truncate font-mono text-xs font-medium" title={name}>{name}</span>
-			<Plate tone={look.tone} icon={look.icon} label={look.label} class="shrink-0" />
-		</div>
-		<p class="m-0 text-xs text-ink-3">
-			{fmtBytes(pst.size)}
-			{#if pst.created_at}<span> <RelTime value={pst.created_at} /></span>{/if}
-			{#if linked}<span> {m.files_list_linked({ count: linked })}</span>{/if}
-		</p>
-		{#if from}<p class="m-0 text-xs text-ink-3" data-testid="pst-from">{from}</p>{/if}
-		{#if fetching}
-			<div class="my-1"><Progress value={percent ?? 0} label={name} /></div>
-			<p class="m-0 text-xs text-ink-3" data-testid="pst-fetch">
-				{percent == null ? m.files_row_fetch_received({ received }) : m.files_row_fetch_progress({ received, size: fmtBytes(pst.size), percent })}
-			</p>
-		{/if}
+<li class="file-row" data-pst={pst.filename}>
+	<div class="file-name">
+		<p class="m-0 truncate font-semibold" title={name}>{name}</p>
 		{#if totals}
 			<p class="m-0 text-xs text-ink-2" data-testid="pst-totals">
 				{m.files_list_totals({ mail: fmtNum(totals.mail ?? 0), calendar: fmtNum(totals.calendar ?? 0), contacts: fmtNum(totals.contacts ?? 0) })}
 			</p>
 		{/if}
-		{#if format}<p class="m-0 text-xs text-ink-3" data-testid="pst-format">{m.files_row_format({ format })}</p>{/if}
+		{#if pst.created_at || linked}
+			<p class="m-0 text-xs text-ink-3">
+				{#if pst.created_at}<RelTime value={pst.created_at} />{/if}
+				{#if linked}<span> {m.files_list_linked({ count: linked })}</span>{/if}
+			</p>
+		{/if}
+		{#if from}<p class="m-0 text-xs text-ink-3" data-testid="pst-from">{from}</p>{/if}
+		{#if fetching}
+			<p class="m-0 text-xs text-ink-3" data-testid="pst-fetch">
+				{percent == null ? m.files_row_fetch_received({ received }) : m.files_row_fetch_progress({ received, size: fmtBytes(pst.size), percent })}
+			</p>
+		{/if}
 		{#if pst.status === 'uploading'}<p class="m-0 text-xs text-advisory-ink">{m.files_list_incomplete()}</p>{/if}
 		{#if chain}
 			<p class={`m-0 text-xs ${chain.code === 'error' || chain.code === 'ambiguous' ? 'text-advisory-ink' : 'text-ink-2'}`} data-testid="pst-chain">
@@ -99,17 +96,20 @@
 		{/if}
 		{#if pst.error}<p class="m-0 font-mono text-xs text-warning-ink">{pst.error}</p>{/if}
 	</div>
-	<div class="flex shrink-0 items-center">
-		{#if pst.status === 'fetching'}
-			<Button variant="ghost" icon={X} onclick={() => data.cancelFetch(id)} aria-label={m.files_row_cancel({ name })} data-testid="fetch-cancel">{m.common_cancel()}</Button>
+	<span class="file-kind text-xs text-ink-2" title={kind} data-testid="pst-format">{kind}</span>
+	<span class="file-size text-xs text-ink-2">{fmtBytes(pst.size)}</span>
+	<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} /></div>
+	<div class="file-bar flex items-center gap-2.5">
+		{#if fetching}
+			<span class="min-w-0 flex-1"><Progress value={percent ?? 0} label={name} /></span>
+			{#if pst.status === 'fetching'}
+				<Button variant="ghost" icon={X} onclick={() => data.cancelFetch(id)} aria-label={m.files_row_cancel({ name })} data-testid="fetch-cancel">{m.common_cancel()}</Button>
+			{/if}
 		{:else if pst.status === 'fetch_failed'}
 			<Button icon={RotateCw} onclick={() => data.retryFetch(id)} aria-label={m.files_row_retry({ name })} data-testid="fetch-retry">{m.common_retry()}</Button>
 		{/if}
-		{#if pst.scan?.folders?.length}
-			<button type="button" class="inline-flex min-h-10 items-center gap-1 rounded-btn px-2 text-ink-2 hover:text-ink" onclick={() => ondetails(pst)}>
-				<FolderTree size={14} />{m.files_list_folders()}
-			</button>
-		{/if}
+	</div>
+	<div class="file-menu">
 		{#if menu.length}<Menu label={m.files_list_more({ name })} icon={EllipsisVertical} items={menu} />{/if}
 	</div>
 </li>

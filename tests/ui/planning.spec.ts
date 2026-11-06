@@ -1,4 +1,4 @@
-import { expect, mock, noOverflow, pstFile, ready, row, test } from './helpers';
+import { expect, mock, noOverflow, openMailbox, pstFile, ready, row, rows, test } from './helpers';
 import type { Page } from './helpers';
 
 test.use({ viewport: { width: 1280, height: 900 } });
@@ -62,7 +62,7 @@ test.describe('dry run and import options', () => {
 		await page.getByTestId('import-batch').fill('Wave 1');
 		await page.getByTestId('import-confirm').click();
 		await expect(page.getByRole('dialog')).toHaveCount(0);
-		await expect(row(page, 'alice@example.com')).toContainText('Finished');
+		await expect(row(page, 'alice@example.com')).toContainText('Done');
 		expect((await state(page)).runBodies[0]).toEqual({ account_ids: [1], name: 'Wave 1' });
 
 		await openImport(page, ['alice@example.com']);
@@ -92,13 +92,15 @@ test.describe('batches and queue', () => {
 		// Jobs that resume must not finish before the stop below.
 		await mock(page.request, 'reset', { hold: true, jobTick: 60000 });
 		await ready(page);
+		await page.getByTestId('filter-more').click();
+		await expect(page.getByTestId('filter-status')).toBeVisible();
 		await expect(page.getByTestId('filter-batch')).toHaveCount(0);
 		await importNamed(page, ['alice@example.com', 'bob@example.com'], 'Wave 1');
 		await expect(page.getByTestId('filter-batch')).toBeVisible();
 
 		await page.getByTestId('filter-batch').selectOption({ label: 'Wave 1' });
 		await expect(page).toHaveURL(/batch=1/);
-		await expect(page.locator('tr.acct-row')).toHaveCount(2);
+		await expect(rows(page)).toHaveCount(2);
 		const bar = page.getByTestId('batch-bar');
 		await expect(bar).toContainText('Wave 1');
 		await expect(bar).toContainText('Queued');
@@ -106,7 +108,7 @@ test.describe('batches and queue', () => {
 
 		await page.reload();
 		await expect(page.getByTestId('filter-batch')).toHaveValue('1');
-		await expect(page.locator('tr.acct-row')).toHaveCount(2);
+		await expect(rows(page)).toHaveCount(2);
 
 		// Only what would change something is offered.
 		await expect(page.getByTestId('batch-resume')).toHaveCount(0);
@@ -122,7 +124,7 @@ test.describe('batches and queue', () => {
 		await expect(row(page, 'alice@example.com')).toContainText('Stopping');
 
 		await page.getByTestId('filter-batch').selectOption('');
-		await expect(page.locator('tr.acct-row')).toHaveCount(6);
+		await expect(rows(page)).toHaveCount(6);
 	});
 
 	test('retry failed reruns the failed jobs of the batch', async ({ page }) => {
@@ -130,6 +132,7 @@ test.describe('batches and queue', () => {
 		await ready(page);
 		await importNamed(page, ['alice@example.com'], 'Wave 2');
 		await mock(page.request, 'job', { id: 1, patch: { status: 'failed', error: 'connection lost' } });
+		await page.getByTestId('filter-more').click();
 		await page.getByTestId('filter-batch').selectOption({ label: 'Wave 2' });
 		await expect(page.getByTestId('batch-bar')).toContainText('Failed');
 		await page.getByTestId('batch-retry-failed').click();
@@ -186,6 +189,7 @@ test.describe('batches and queue', () => {
 		await mock(page.request, 'reset', { hold: true });
 		await ready(page);
 		await importNamed(page, ['alice@example.com'], 'A fairly long batch name for a small screen');
+		await page.getByTestId('filter-more').click();
 		await page.getByTestId('filter-batch').selectOption({ index: 1 });
 		await expect(page.getByTestId('batch-bar')).toBeVisible();
 		await noOverflow(page);
@@ -200,7 +204,7 @@ test.describe('job panel', () => {
 		await ready(page);
 		await openImport(page, ['alice@example.com']);
 		await page.getByTestId('import-confirm').click();
-		await expect(row(page, 'alice@example.com')).toContainText('Finished');
+		await expect(row(page, 'alice@example.com')).toContainText('Done');
 	}
 
 	test('compare, with its table and CSV, and the items left out', async ({ page }) => {
@@ -390,7 +394,7 @@ test.describe('accounts as CSV and files of every kind', () => {
 
 	test('export sits next to import, and import shows its warnings', async ({ page }) => {
 		await ready(page);
-		await page.getByRole('button', { name: 'Add', exact: true }).click();
+		await page.getByRole('button', { name: 'New migration', exact: true }).click();
 		await page.getByRole('menuitem', { name: 'Import a CSV file' }).click();
 		const dialog = page.getByRole('dialog');
 		await expect(dialog.getByTestId('csv-export')).toHaveAttribute('href', '/api/accounts/export-csv');
@@ -422,7 +426,7 @@ test.describe('accounts as CSV and files of every kind', () => {
 		await mock(page.request, 'pst', { pst: { id: 9, filename: 'archive.zip', size: 5000, scan: { format: 'files', contents: ['mbox', 'eml'], folders: [{ path: ['Inbox'], kind: 'mail', count: 3 }], totals: { mail: 3, calendar: 0, contacts: 0 }, errors: [] } } });
 		await ready(page, '/files');
 		const zip = page.locator('[data-pst="archive.zip"]');
-		await expect(zip.getByTestId('pst-format')).toContainText('Format: mbox, eml');
+		await expect(zip.getByTestId('pst-format')).toHaveText('mbox, eml');
 		await zip.getByRole('button', { name: 'More actions for archive.zip' }).click();
 		await expect(page.getByRole('menuitem', { name: 'Delete' })).toBeVisible();
 		await expect(page.getByRole('menuitem', { name: /Download a sample/ })).toHaveCount(0);
@@ -439,8 +443,10 @@ test.describe('accounts as CSV and files of every kind', () => {
 		const account = await (await page.request.get('/api/accounts/1')).json();
 		await mock(page.request, 'event', { kind: 'account', data: { ...account, pst_id: 9, source: { kind: 'files', config: { pst_id: 9 }, has_secret: false } } });
 		const alice = row(page, 'alice@example.com');
-		await expect(alice.getByRole('combobox', { name: 'PST file for alice@example.com' })).toHaveValue('9');
-		await expect(alice.getByTestId('source-summary')).toHaveCount(0);
+		await expect(alice).toContainText('archive.zip to');
+		const settings = await openMailbox(page, 'alice@example.com');
+		await expect(settings.getByRole('combobox', { name: 'PST file for alice@example.com' })).toHaveValue('9');
+		await expect(settings.getByTestId('source-summary')).toHaveCount(0);
 
 		// Selected for an import, it needs no other source.
 		await alice.getByRole('checkbox').check();

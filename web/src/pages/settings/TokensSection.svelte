@@ -15,7 +15,9 @@
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
+	import Panel from '../../lib/ui/Panel.svelte';
 	import RelTime from '../../lib/ui/RelTime.svelte';
+	import Section from '../../lib/ui/Section.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 
@@ -63,9 +65,7 @@
 	}
 </script>
 
-<section id="tokens" class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid="section-tokens">
-	<h2 class="text-[0.9375rem]">{m.settings_tokens_title()}</h2>
-	<p class="m-0 mt-1 mb-2 text-ink-2">{m.settings_tokens_sentence()}</p>
+<Section id="tokens" title={m.settings_tokens_title()} sentence={m.settings_tokens_sentence()}>
 	<form class="flex max-w-[460px] items-end gap-2" onsubmit={create}>
 		<Field label={m.settings_tokens_name()} class="flex-1">
 			<input class="input" maxlength="100" autocomplete="off" bind:value={name} data-testid="token-name" />
@@ -93,29 +93,31 @@
 		{:else if !tokens.length}
 			<p class="m-0 text-ink-3">{m.settings_tokens_none()}</p>
 		{:else}
-			<ul class="m-0 flex max-w-[640px] list-none flex-col p-0" data-testid="token-list">
-				{#each tokens as token (token.id)}
-					<li class="flex items-center gap-2 border-b border-line py-1" data-token={token.name}>
-						<div class="min-w-0 flex-1">
-							<p class="m-0 flex flex-wrap items-center gap-2">
-								<span class="truncate font-medium">{token.name}</span>
-								{#if token.revoked_at}<Plate tone="ghost" icon={Ban} label={m.settings_tokens_revoked_state()} />{:else}<Plate tone="signal" icon={CircleCheck} label={m.settings_tokens_active()} />{/if}
-							</p>
-							<p class="m-0 text-xs text-ink-3">
-								<span class="font-mono">{token.prefix}</span>
-								<span> {m.settings_tokens_created()} <RelTime value={token.created_at} /></span>
-								<span> {m.settings_tokens_last_used()} {#if token.last_used_at}<RelTime value={token.last_used_at} />{:else}{m.settings_tokens_never()}{/if}</span>
-							</p>
-						</div>
-						{#if !token.revoked_at}
-							<IconButton icon={Ban} tone="danger" label={m.settings_tokens_revoke_named({ name: token.name })} onclick={() => (revoking = token)} />
-						{/if}
-					</li>
-				{/each}
-			</ul>
+			<Panel>
+				<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="token-list">
+					{#each tokens as token (token.id)}
+						<li class="flex min-h-14 items-center gap-2 py-1 pr-2 pl-4" data-token={token.name}>
+							<div class="min-w-0 flex-1">
+								<p class="m-0 flex flex-wrap items-center gap-2">
+									<span class="truncate font-medium">{token.name}</span>
+									{#if token.revoked_at}<Plate tone="ghost" icon={Ban} label={m.settings_tokens_revoked_state()} />{:else}<Plate tone="signal" icon={CircleCheck} label={m.settings_tokens_active()} />{/if}
+								</p>
+								<p class="m-0 text-xs text-ink-3">
+									<span class="font-mono">{token.prefix}</span>
+									<span> {m.settings_tokens_created()} <RelTime value={token.created_at} /></span>
+									<span> {m.settings_tokens_last_used()} {#if token.last_used_at}<RelTime value={token.last_used_at} />{:else}{m.settings_tokens_never()}{/if}</span>
+								</p>
+							</div>
+							{#if !token.revoked_at}
+								<IconButton icon={Ban} tone="danger" label={m.settings_tokens_revoke_named({ name: token.name })} onclick={() => (revoking = token)} />
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			</Panel>
 		{/if}
 	</div>
-</section>
+</Section>
 
 {#if revoking}
 	{@const target = revoking}

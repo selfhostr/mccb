@@ -13,6 +13,7 @@
 	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
+	import Section from '../../lib/ui/Section.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import Toggle from '../../lib/ui/Toggle.svelte';
@@ -49,9 +50,7 @@
 	}
 </script>
 
-<section id="intake" class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid="section-intake">
-	<h2 class="text-[0.9375rem]">{m.settings_intake_title()}</h2>
-	<p class="m-0 mt-1 mb-2 text-ink-2">{m.settings_intake_sentence()}</p>
+<Section id="intake" title={m.settings_intake_title()} sentence={m.settings_intake_sentence()}>
 	{#if settings}
 		<div class="flex flex-col gap-1">
 			<Toggle
@@ -82,7 +81,7 @@
 						<Disclosure title={m.settings_intake_domains()} summary={m.settings_intake_domains_set({ count: Object.keys(settings.auto_chain.default_domains).length })}>
 							<div class="flex flex-col gap-3">
 								<p class="m-0 text-ink-2">{m.settings_intake_domains_hint()}</p>
-								<div class="grid max-w-[560px] grid-cols-1 gap-3 sm:grid-cols-2">
+								<div class="grid max-w-[460px] grid-cols-1 gap-3">
 									{#each data.servers as server (server.id)}
 										<Field label={server.name}>
 											<input
@@ -107,4 +106,4 @@
 	{:else}
 		<Skeleton class="h-24" />
 	{/if}
-</section>
+</Section>

@@ -1,6 +1,6 @@
 <script lang="ts">
 	/** A 40 px square with a named icon. `label` is the accessible name and the tooltip. */
-	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+	import Hourglass from '@lucide/svelte/icons/hourglass';
 	import type { Component } from 'svelte';
 
 	interface Props {
@@ -27,5 +27,5 @@
 	{onclick}
 	{...rest}
 >
-	{#if loading}<LoaderCircle size={16} class="spin" />{:else}<Icon size={16} />{/if}
+	{#if loading}<Hourglass size={16} />{:else}<Icon size={16} />{/if}
 </button>

@@ -40,5 +40,11 @@ export function formatOf(scan: Pst['scan']): string {
 	return scan.format === 'files' ? (scan.contents?.length ? scan.contents.join(', ') : scan.format) : scan.format.toUpperCase();
 }
 
+/** What a file is before the analysis says: its ending, in capitals. */
+export function kindOf(filename: string): string {
+	const dot = filename.lastIndexOf('.');
+	return dot > 0 ? filename.slice(dot + 1).toUpperCase() : '';
+}
+
 /** The preview only exists for a PST: the server answers 409 for the other files. */
 export const canPreview = (p: Pick<Pst, 'status' | 'scan'>): boolean => p.status === 'valid' && p.scan?.format !== 'files';

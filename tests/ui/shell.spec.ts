@@ -1,4 +1,4 @@
-import { expect, noOverflow, ready, row, test } from './helpers';
+import { expect, noOverflow, openMailbox, ready, row, test } from './helpers';
 
 test.describe('at 390 px', () => {
 	test.use({ viewport: { width: 390, height: 844 } });
@@ -54,15 +54,24 @@ test.describe('keyboard', () => {
 		await page.keyboard.press('Space');
 		await expect(page.getByTestId('selection-count')).toContainText('1');
 
-		const button = row(page, 'alice@example.com').getByRole('button', { name: /^Test connection/ });
+		const button = row(page, 'alice@example.com').getByRole('button', { name: 'More actions for alice@example.com' });
 		await button.focus();
 		await page.keyboard.press('Enter');
-		await expect(row(page, 'alice@example.com').getByTestId('test-result')).toBeVisible();
+		await expect(page.getByRole('menuitem', { name: 'Test connection' })).toBeFocused();
+		await page.keyboard.press('Enter');
+		await expect((await openMailbox(page, 'alice@example.com')).getByTestId('test-result')).toBeVisible();
+
+		// The row itself opens by keyboard too, and Esc gives the focus back to it.
+		await page.keyboard.press('Escape');
+		const link = page.locator('[data-account-link="1"]');
+		await expect(link).toBeFocused();
+		await page.keyboard.press('Enter');
+		await expect(page.getByTestId('job-panel')).toBeVisible();
 	});
 
 	test('a visible focus ring, menus by arrow keys, Esc closes', async ({ page }) => {
 		await ready(page);
-		const add = page.getByRole('button', { name: 'Add', exact: true });
+		const add = page.getByRole('button', { name: 'New migration', exact: true });
 		await add.focus();
 		await page.keyboard.press('Enter');
 		await expect(page.getByRole('menuitem').first()).toBeFocused();
@@ -138,6 +147,7 @@ test.describe('settings', () => {
 		await ready(page, '/settings');
 		await page.getByTestId('theme').selectOption('light');
 		await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+		await page.getByTestId('appearance-more').locator('summary').click();
 		await page.getByTestId('density').selectOption('comfortable');
 		await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable');
 		await page.getByRole('checkbox', { name: /Mask addresses/ }).check();

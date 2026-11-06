@@ -1,4 +1,4 @@
-import { expect, mock, ready, row, test } from './helpers';
+import { closePanel, expect, mock, openMailbox, ready, row, test } from './helpers';
 
 test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -16,10 +16,11 @@ test.describe('connectors', () => {
 
 	test('a PST account stays as simple as before', async ({ page }) => {
 		await ready(page);
-		const alice = row(page, 'alice@example.com');
-		await expect(alice.getByRole('combobox', { name: 'PST file for alice@example.com' })).toBeVisible();
-		await expect(alice.getByTestId('source-summary')).toHaveCount(0);
-		await expect(alice.getByTestId('target-summary')).toHaveCount(0);
+		const settings = await openMailbox(page, 'alice@example.com');
+		await expect(settings.getByRole('combobox', { name: 'PST file for alice@example.com' })).toBeVisible();
+		await expect(settings.getByTestId('source-summary')).toHaveCount(0);
+		await expect(settings.getByTestId('target-summary')).toHaveCount(0);
+		await closePanel(page);
 		// The route lives in the row menu, not on the page.
 		const dialog = await openRoute(page, 'alice@example.com');
 		await expect(dialog.getByTestId('route-source-kind')).toHaveValue('');
@@ -66,7 +67,8 @@ test.describe('connectors', () => {
 
 		await page.getByTestId('route-save').click();
 		await expect(page.getByTestId('toast').first()).toContainText('Source and target saved');
-		const alice = row(page, 'alice@example.com');
+		await expect(row(page, 'alice@example.com')).toContainText('IMAP to');
+		const alice = await openMailbox(page, 'alice@example.com');
 		await expect(alice.getByTestId('source-summary')).toContainText('Source: IMAP');
 		await expect(alice.getByTestId('source-summary')).toContainText('mail.old.example.com');
 		await expect(alice.getByRole('combobox', { name: /^PST file for/ })).toHaveCount(0);
@@ -105,7 +107,7 @@ test.describe('connectors', () => {
 		await src.locator('[data-field="api_key"]').fill('k-123');
 		await src.locator('[data-field="mode"]').selectOption('careful');
 		await page.getByTestId('route-save').click();
-		await expect(row(page, 'bob@example.com').getByTestId('source-summary')).toContainText('Source: Future mail service');
+		await expect((await openMailbox(page, 'bob@example.com')).getByTestId('source-summary')).toContainText('Source: Future mail service');
 		expect((await state(page)).routeCalls[0].body).toEqual({ kind: 'future', config: { mailbox: 'bob', mode: 'careful', batch: 50 }, secrets: { api_key: 'k-123' } });
 	});
 
@@ -140,17 +142,19 @@ test.describe('connectors', () => {
 		await dialog.getByTestId('route-target-test').click();
 		await expect(dialog.getByTestId('route-target-result')).toContainText('Connected');
 		await page.getByTestId('route-save').click();
-		await expect(row(page, 'alice@example.com').getByTestId('target-summary')).toHaveText('Target: IMAP');
+		const settings = await openMailbox(page, 'alice@example.com');
+		await expect(settings.getByTestId('target-summary')).toHaveText('Target: IMAP');
 		// The PST stays the source.
-		await expect(row(page, 'alice@example.com').getByRole('combobox', { name: /^PST file for/ })).toBeVisible();
+		await expect(settings.getByRole('combobox', { name: /^PST file for/ })).toBeVisible();
 		expect((await state(page)).routeCalls.map((c: { role: string }) => c.role)).toEqual(['target']);
 
-		// Back to the account's server.
-		const again = await openRoute(page, 'alice@example.com');
+		// Back to the account's server, from the panel this time.
+		await settings.getByTestId('account-route').click();
+		const again = page.getByRole('dialog');
 		await expect(again.getByTestId('route-target-kind')).toHaveValue('imap');
 		await again.getByTestId('route-target-kind').selectOption('');
 		await page.getByTestId('route-save').click();
-		await expect(row(page, 'alice@example.com').getByTestId('target-summary')).toHaveCount(0);
+		await expect(settings.getByTestId('target-summary')).toHaveCount(0);
 		expect((await state(page)).routeCalls.at(-1).body).toEqual({ kind: null });
 	});
 
@@ -163,12 +167,15 @@ test.describe('connectors', () => {
 		await dialog.getByTestId('route-source').locator('[data-field="mailbox"]').fill('alice');
 		await dialog.getByTestId('route-source').locator('[data-field="api_key"]').fill('k');
 		await page.getByTestId('route-save').click();
-		await expect(row(page, 'alice@example.com').getByTestId('source-summary')).toBeVisible();
+		const settings = await openMailbox(page, 'alice@example.com');
+		await expect(settings.getByTestId('source-summary')).toBeVisible();
+		await closePanel(page);
 
 		dialog = await openRoute(page, 'alice@example.com');
 		await dialog.getByTestId('route-source-kind').selectOption('');
 		await page.getByTestId('route-save').click();
-		await expect(row(page, 'alice@example.com').getByRole('combobox', { name: /^PST file for/ })).toBeVisible();
+		await expect((await openMailbox(page, 'alice@example.com')).getByRole('combobox', { name: /^PST file for/ })).toBeVisible();
+		await closePanel(page);
 		expect((await state(page)).routeCalls.at(-1).body).toEqual({ kind: 'pst' });
 
 		// A running import blocks the change; the server says so.
@@ -207,7 +214,7 @@ test.describe('layout fixes', () => {
 
 		test('"Select all shown" is a normal row, not a letter-by-letter column', async ({ page }) => {
 			await ready(page);
-			const label = page.locator('th.sel label.check');
+			const label = page.getByTestId('accounts-head').locator('label.check');
 			await expect(label).toContainText('Select all shown');
 			const box = await label.boundingBox();
 			expect(box?.width ?? 0).toBeGreaterThan(100);

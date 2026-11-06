@@ -1,10 +1,9 @@
 <script lang="ts">
+	/** The uploads: the first rows of the Files panel, under a line that speaks for all of them. */
 	import Pause from '@lucide/svelte/icons/pause';
 	import Play from '@lucide/svelte/icons/play';
-	import { flip } from 'svelte/animate';
 	import { m } from '#lib/paraglide/messages.js';
 	import Button from '../../lib/ui/Button.svelte';
-	import { reducedMotion, rowFade } from '../../lib/ui/motion.ts';
 	import { uploads } from '../../lib/upload/store.svelte.ts';
 	import QueueRow from './QueueRow.svelte';
 
@@ -15,13 +14,15 @@
 	const paused = $derived(uploads.items.filter((i) => i.status === 'paused').length);
 	const done = $derived(uploads.items.filter((i) => i.status === 'done').length);
 	const missing = $derived(uploads.items.filter((i) => i.status === 'needs_file').length);
+
+	const movable = (status: string) => status === 'queued' || status === 'paused' || status === 'error' || status === 'needs_file';
 </script>
 
 {#if uploads.items.length}
-	<section class="rounded-card border border-line-strong bg-surface" aria-label={m.files_queue_label()} data-testid="queue">
-		<div class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
-			<p class="m-0 font-medium" data-testid="queue-sentence">{m.files_queue_sentence({ sending, waiting })}</p>
-			<div class="flex flex-wrap gap-2">
+	<section aria-label={m.files_queue_label()} data-testid="queue">
+		<div class="row-head pl-4">
+			<p class="m-0" data-testid="queue-sentence">{m.files_queue_sentence({ sending, waiting })}</p>
+			<div class="flex flex-wrap gap-1">
 				{#if sending || waiting > paused + missing}
 					<Button variant="ghost" icon={Pause} onclick={uploads.pauseAll}>{m.files_queue_pause_all()}</Button>
 				{/if}
@@ -34,14 +35,19 @@
 			</div>
 		</div>
 		{#if missing}
-			<p class="m-0 border-b border-line px-3 py-2 text-advisory-ink">{m.files_queue_reselect()}</p>
+			<p class="m-0 border-t border-line px-4 py-2 text-advisory-ink">{m.files_queue_reselect()}</p>
 		{/if}
-		<ol class="m-0 list-none p-0">
-			{#each uploads.items as item, index (item.key)}
+		<ol class="row-list">
+			{#each uploads.items as item (item.key)}
+				<!-- Dragging is the quick way to reorder; the row menu does the same by keyboard and on phones. -->
 				<li
-					class={`border-b border-line last:border-b-0 ${dragged === item.key ? 'opacity-50' : ''}`}
-					animate:flip={{ duration: reducedMotion() ? 0 : 180 }}
-					transition:rowFade
+					class={`file-row ${movable(item.status) ? 'cursor-grab' : ''} ${dragged === item.key ? 'opacity-50' : ''}`}
+					draggable={movable(item.status)}
+					ondragstart={(e) => {
+						e.dataTransfer?.setData('text/plain', item.filename);
+						dragged = item.key;
+					}}
+					ondragend={() => (dragged = null)}
 					ondragover={(e) => {
 						if (dragged) e.preventDefault();
 					}}
@@ -52,7 +58,7 @@
 					}}
 					data-upload={item.filename}
 				>
-					<QueueRow {item} position={index + 1} ondragstart={() => (dragged = item.key)} ondragend={() => (dragged = null)} />
+					<QueueRow {item} />
 				</li>
 			{/each}
 		</ol>

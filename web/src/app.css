@@ -16,23 +16,18 @@
 	--color-ink-2: var(--c-ink-2);
 	--color-ink-3: var(--c-ink-3);
 	--color-ghost: var(--c-ghost);
-	--color-signal: var(--c-signal);
 	--color-signal-ink: var(--c-signal-ink);
-	--color-signal-soft: var(--c-signal-soft);
 	--color-advisory: var(--c-advisory);
 	--color-advisory-ink: var(--c-advisory-ink);
 	--color-advisory-soft: var(--c-advisory-soft);
 	--color-warning: var(--c-warning);
 	--color-warning-ink: var(--c-warning-ink);
 	--color-warning-soft: var(--c-warning-soft);
-	--color-info: var(--c-info);
 	--color-info-ink: var(--c-info-ink);
-	--color-info-soft: var(--c-info-soft);
 	--color-primary: var(--c-primary);
 	--color-on-primary: var(--c-on-primary);
 	--font-sans: var(--font-ui);
 	--font-mono: var(--font-code);
-	--shadow-lift: var(--c-shadow-lift);
 	--shadow-float: var(--c-shadow-float);
 }
 
@@ -149,118 +144,144 @@
 	[dir='rtl'] .bar-fill {
 		transform-origin: 100% 50%;
 	}
-	.spin {
-		animation: spin 1s linear infinite;
+	/*
+	 * One panel of rows, on the migrations and files pages. A row is a grid, and the link in it
+	 * stretches over the whole row: the checkbox and the menu stay above it, everything else clicks through.
+	 */
+	.row-list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
 	}
-	.shimmer {
-		animation: shimmer 1.6s ease-in-out infinite;
-	}
-
-	/* Accounts table: real table from 1100 px, stacked rows below. */
-	.acct-table {
-		width: 100%;
-		table-layout: fixed;
-		border-collapse: separate;
-		border-spacing: 0;
-	}
-	.acct-table th {
-		position: sticky;
-		top: var(--bar-h);
-		z-index: 10;
-		height: 36px;
+	.row-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 4px 12px;
+		min-height: 40px;
 		padding: 0 8px;
-		background: var(--c-canvas);
-		border-bottom: 1px solid var(--c-line-strong);
 		color: var(--c-ink-2);
-		font-weight: 500;
-		text-align: left;
 	}
-	.acct-table td {
-		height: var(--row-h);
-		padding: 0 8px;
-		border-bottom: 1px solid var(--c-line);
-		overflow: hidden;
-		vertical-align: middle;
+	.acct-row,
+	.file-row {
+		display: grid;
+		align-items: center;
+		min-height: var(--row-h);
+		border-top: 1px solid var(--c-line);
+		transition: background-color 200ms var(--ease);
 	}
-	.acct-table td.has-menu {
-		overflow: visible;
+	.acct-row:hover,
+	.file-row:hover {
+		background: var(--c-surface-2);
 	}
-	.acct-row:hover td {
-		background: var(--c-surface);
+	/* A row's hover colour keeps to the panel's corners. */
+	.row-list:last-child > li:last-child {
+		border-radius: 0 0 calc(var(--radius-card) - 1px) calc(var(--radius-card) - 1px);
 	}
-	.acct-row.is-selected td {
+	/* The first row of a panel has the panel's own edge above it. */
+	.row-panel .row-list:first-child > .file-row:first-child {
+		border-top: 0;
+	}
+	.acct-row {
+		position: relative;
+		grid-template: 'sel who status bar menu' auto / 40px minmax(0, 2fr) minmax(0, 160px) minmax(140px, 2fr) 40px;
+		column-gap: 16px;
+		padding: 4px 8px;
+	}
+	.acct-row.is-selected {
 		background: var(--c-ghost);
 	}
-	.acct-table td::before {
-		display: none;
+	.acct-sel {
+		grid-area: sel;
+		position: relative;
+		z-index: 1;
+	}
+	.acct-who {
+		grid-area: who;
+		min-width: 0;
+	}
+	.acct-link {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		min-height: 40px;
+		text-decoration: none;
+	}
+	.acct-link::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+	}
+	.acct-link:focus-visible {
+		outline: none;
+	}
+	.acct-link:focus-visible::after {
+		outline: 2px solid var(--c-ink);
+		outline-offset: -2px;
+	}
+	.acct-status {
+		grid-area: status;
+		min-width: 0;
+		pointer-events: none;
+	}
+	.acct-bar {
+		grid-area: bar;
+		min-width: 0;
+		pointer-events: none;
+	}
+	.acct-menu {
+		grid-area: menu;
+		position: relative;
+	}
+	.file-row {
+		grid-template: 'name kind size status bar menu' auto / minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
+		column-gap: 16px;
+		padding: 8px 8px 8px 16px;
+	}
+	.file-name {
+		grid-area: name;
+		min-width: 0;
+	}
+	.file-kind {
+		grid-area: kind;
+		min-width: 0;
+	}
+	.file-size {
+		grid-area: size;
+		min-width: 0;
+	}
+	.file-status {
+		grid-area: status;
+		min-width: 0;
+	}
+	.file-bar {
+		grid-area: bar;
+		min-width: 0;
+	}
+	.file-menu {
+		grid-area: menu;
 	}
 
-	@media (max-width: 1099px) {
-		.acct-table,
-		.acct-table tbody {
-			display: block;
+	/* Rows wrap on phones: every account row keeps the same two lines, the window depends on it. */
+	@media (max-width: 47.99rem) {
+		.acct-row {
+			grid-template:
+				'sel who who menu' auto
+				'. status bar .' auto / 40px minmax(0, 1fr) minmax(0, 1fr) 40px;
+			column-gap: 8px;
+			row-gap: 2px;
+			padding: 6px 4px 10px;
 		}
-		.acct-table thead {
-			display: block;
+		.file-row {
+			grid-template:
+				'name name name menu' auto
+				'kind size status menu' auto
+				'bar bar bar bar' auto / auto auto minmax(0, 1fr) 40px;
+			column-gap: 12px;
+			row-gap: 4px;
 		}
-		.acct-table thead tr {
-			display: block;
-		}
-		.acct-table th {
-			display: none;
-			position: static;
-		}
-		.acct-table th.sel {
-			display: block;
-			height: auto;
-			width: auto;
-			padding: 0;
-		}
-		.acct-table .acct-row {
-			display: grid;
-			grid-template-columns: 40px minmax(0, 1fr) auto;
-			gap: 6px 8px;
-			padding: 10px 4px;
-			border-bottom: 1px solid var(--c-line-strong);
-		}
-		.acct-table td {
-			display: block;
-			height: auto;
-			padding: 0;
-			border: 0;
-			overflow: visible;
-		}
-		.acct-table td.has-menu {
-			grid-column: 3;
-			grid-row: 1;
-		}
-		.acct-table td.cell-wide {
-			grid-column: 1 / -1;
-		}
-		.acct-table td.cell-wide::before {
-			display: block;
-			content: attr(data-label);
-			margin-bottom: 2px;
-			color: var(--c-ink-2);
-		}
-		.acct-table .acct-spacer {
-			display: block;
-		}
-		.acct-table .acct-spacer td {
-			display: none;
-		}
-	}
-}
-
-@keyframes spin {
-	to {
-		transform: rotate(360deg);
-	}
-}
-
-@keyframes shimmer {
-	50% {
-		opacity: 0.5;
 	}
 }
 

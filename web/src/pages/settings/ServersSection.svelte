@@ -7,7 +7,7 @@
 	import ServerIcon from '@lucide/svelte/icons/server';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import X from '@lucide/svelte/icons/x';
-		import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { m } from '#lib/paraglide/messages.js';
 	import { del, errorText, post } from '../../lib/api/client.ts';
 	import type { Server, TestResult } from '../../lib/api/types.ts';
@@ -16,10 +16,13 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
+	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
+	import Panel from '../../lib/ui/Panel.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
+	import Section from '../../lib/ui/Section.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import ServerDialog from './ServerDialog.svelte';
 
@@ -62,68 +65,65 @@
 	}
 </script>
 
-<section id="servers" class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid="section-servers">
-	<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-		<div>
-			<h2 class="text-[0.9375rem]">{m.settings_servers_title()}</h2>
-			<p class="m-0 text-ink-2">{m.settings_servers_sentence()}</p>
-		</div>
+<Section id="servers" title={m.settings_servers_title()} sentence={m.settings_servers_sentence()}>
+	{#snippet actions()}
 		<Button icon={Plus} onclick={() => (editing = 'new')}>{m.settings_servers_add()}</Button>
-	</div>
+	{/snippet}
 
 	{#if !data.loading && !data.servers.length}
 		<EmptyState icon={ServerIcon} title={m.settings_servers_empty_title()} description={m.settings_servers_empty_text()} />
 	{:else}
-		<ul class="m-0 flex list-none flex-col p-0" data-testid="server-list">
-			{#each data.servers as server (server.id)}
-				{@const result = results.get(server.id)}
-				<li class="border-b border-line py-2" data-server={server.name}>
-					<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-						<div class="min-w-0 flex-1 basis-56">
-							<p class="m-0 font-medium">{server.name}</p>
-							<p class="m-0 font-mono text-xs text-ink-2">
-								{prefs.host(server.imap_host)}:{server.imap_port}
-							</p>
-							<p class="m-0 text-xs text-ink-3">
-								{securityLabel(server.imap_security)}
-								{server.dav_enabled ? m.settings_server_dav_on() : m.settings_server_dav_off()}
-							</p>
+		<Panel>
+			<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="server-list">
+				{#each data.servers as server (server.id)}
+					{@const result = results.get(server.id)}
+					<li class="py-2 pr-2 pl-4" data-server={server.name}>
+						<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+							<div class="min-w-0 flex-1 basis-56">
+								<p class="m-0 font-medium">{server.name}</p>
+								<p class="m-0 font-mono text-xs text-ink-2">
+									{prefs.host(server.imap_host)}:{server.imap_port}
+								</p>
+								<p class="m-0 text-xs text-ink-3">
+									{securityLabel(server.imap_security)}
+									{server.dav_enabled ? m.settings_server_dav_on() : m.settings_server_dav_off()}
+								</p>
+							</div>
+							<div class="flex shrink-0 items-center">
+								<IconButton icon={FlaskConical} label={m.settings_server_test({ name: server.name })} loading={testing.has(server.id)} onclick={() => test(server)} />
+								<Menu
+									label={m.settings_server_more({ name: server.name })}
+									icon={EllipsisVertical}
+									items={[
+										{ label: m.settings_server_edit(), icon: Pencil, onselect: () => (editing = server) },
+										{ label: m.settings_server_delete(), icon: Trash2, danger: true, onselect: () => (removing = server) }
+									]}
+								/>
+							</div>
 						</div>
-						<div class="flex shrink-0 items-center">
-							<IconButton icon={FlaskConical} label={m.settings_server_test({ name: server.name })} loading={testing.has(server.id)} onclick={() => test(server)} />
-							<Menu
-								label={m.settings_server_more({ name: server.name })}
-								icon={EllipsisVertical}
-								items={[
-									{ label: m.settings_server_edit(), icon: Pencil, onselect: () => (editing = server) },
-									{ label: m.settings_server_delete(), icon: Trash2, danger: true, onselect: () => (removing = server) }
-								]}
-							/>
-						</div>
-					</div>
-					{#if result}
-						<ul class="m-0 mt-1 flex list-none flex-col gap-1 p-0" data-testid="server-test">
-							{#each PROTOCOLS as protocol (protocol.key)}
-								{@const probe = result[protocol.key]}
-								{#if probe}
-									<li class="flex items-start gap-2">
-										<span class="w-24 shrink-0"><Plate tone={probe.ok ? 'signal' : 'warning'} icon={probe.ok ? Check : X} label={protocol.name} /></span>
-										<span class="min-w-0 font-mono text-xs text-ink-2">{prefs.text(probe.msg)}</span>
-									</li>
-								{/if}
-							{/each}
-						</ul>
-						<p class="m-0 mt-1 text-xs text-ink-3">{m.settings_server_test_not_saved()}</p>
-					{/if}
-				</li>
-			{/each}
-		</ul>
+						{#if result}
+							<ul class="m-0 mt-1 flex list-none flex-col gap-1 p-0" data-testid="server-test">
+								{#each PROTOCOLS as protocol (protocol.key)}
+									{@const probe = result[protocol.key]}
+									{#if probe}
+										<li class="flex items-start gap-2">
+											<span class="w-24 shrink-0"><Plate tone={probe.ok ? 'signal' : 'warning'} icon={probe.ok ? Check : X} label={protocol.name} /></span>
+											<span class="min-w-0 font-mono text-xs text-ink-2">{prefs.text(probe.msg)}</span>
+										</li>
+									{/if}
+								{/each}
+							</ul>
+							<p class="m-0 mt-1 text-xs text-ink-3">{m.settings_server_test_not_saved()}</p>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		</Panel>
 	{/if}
 
 	{#if connectors.list.length}
-		<div class="mt-3" data-testid="connectors">
-			<h3 class="text-sm">{m.settings_connectors_title()}</h3>
-			<ul class="m-0 mt-1 flex list-none flex-col gap-1 p-0">
+		<Disclosure title={m.settings_connectors_title()} class="mt-2" data-testid="connectors">
+			<ul class="m-0 flex list-none flex-col gap-1 p-0">
 				{#each connectors.list as connector (connector.kind)}
 					<li>
 						<span class="font-medium">{connector.label || connector.kind}</span>
@@ -131,9 +131,9 @@
 					</li>
 				{/each}
 			</ul>
-		</div>
+		</Disclosure>
 	{/if}
-</section>
+</Section>
 
 {#if editing}
 	<ServerDialog server={editing === 'new' ? null : editing} onclose={() => (editing = null)} />

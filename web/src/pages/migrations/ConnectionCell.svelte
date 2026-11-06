@@ -2,13 +2,12 @@
 	/** The last test as the server stored it: one word per protocol, never just IMAP. */
 	import Check from '@lucide/svelte/icons/check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
-	import Clock from '@lucide/svelte/icons/clock';
-	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import Minus from '@lucide/svelte/icons/minus';
 	import X from '@lucide/svelte/icons/x';
 	import { m } from '#lib/paraglide/messages.js';
 	import type { AccountStatus, TestResult } from '../../lib/api/types.ts';
 	import type { TestPhase } from '../../lib/logic/testrun.ts';
+	import { testLook } from '../../lib/status.ts';
 	import Plate from '../../lib/ui/Plate.svelte';
 
 	interface Props {
@@ -21,6 +20,8 @@
 
 	let { email, phase, result, status, onclick }: Props = $props();
 
+	const look = $derived(phase ? testLook(phase) : null);
+
 	const PROTOCOLS = [
 		{ key: 'imap', name: 'IMAP' },
 		{ key: 'caldav', name: 'CalDAV' },
@@ -28,9 +29,9 @@
 	] as const;
 </script>
 
-{#if phase}
+{#if look}
 	<span data-testid="test-state">
-		<Plate tone="info" icon={phase === 'running' ? LoaderCircle : Clock} spin={phase === 'running'} label={phase === 'running' ? m.migrations_test_running() : m.migrations_test_waiting()} />
+		<Plate tone={look.tone} icon={look.icon} label={look.label} />
 	</span>
 {:else if result}
 	<button type="button" class="flex min-h-10 flex-wrap items-center gap-x-2 rounded-plate text-left" aria-label={m.migrations_row_test_details({ email })} data-testid="test-result" {onclick}>

@@ -140,17 +140,17 @@ test.describe('settings: drop folder and automatic import', () => {
 	});
 });
 
-test.describe('settings: columns disclosure', () => {
+test.describe('settings: secondary options', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
-	test('shows a chevron and the options when opened', async ({ page }) => {
+	test('a disclosure shows a chevron and the options when opened', async ({ page }) => {
 		await ready(page, '/settings');
-		const disclosure = page.getByTestId('columns-disclosure');
+		const disclosure = page.getByTestId('appearance-more');
 		await expect(disclosure.locator('summary svg')).toBeVisible();
-		await expect(disclosure.getByRole('checkbox', { name: 'Progress' })).toBeHidden();
+		await expect(disclosure.getByRole('checkbox', { name: /Mask addresses/ })).toBeHidden();
 		await disclosure.locator('summary').click();
-		await expect(disclosure.getByRole('checkbox', { name: 'Progress' })).toBeVisible();
-		await expect(disclosure.getByRole('checkbox')).toHaveCount(5);
+		await expect(disclosure.getByRole('checkbox', { name: /Mask addresses/ })).toBeVisible();
+		await expect(disclosure.getByTestId('density')).toBeVisible();
 	});
 });
 

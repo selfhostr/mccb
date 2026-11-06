@@ -14,6 +14,22 @@ export function matchRoute(path: string): Route {
 	return { page: 'migrations', jobId: null };
 }
 
+/**
+ * Where a row of the list leads, keeping the filters: the job panel once there is a job, else the
+ * same panel with only the mailbox settings. The panel's own view does not follow to the next row.
+ */
+export function rowHref(search: string, accountId: number, jobId: number | null | undefined): string {
+	const params = new URLSearchParams(search);
+	params.delete('tab');
+	params.delete('account');
+	if (jobId == null) {
+		params.set('account', String(accountId));
+		return `/?${params}`;
+	}
+	const text = params.toString();
+	return `/jobs/${jobId}${text ? `?${text}` : ''}`;
+}
+
 /** Links of the previous UI (`#/accounts?server=2`) and their path forms. Returns the new URL or null. */
 export function legacyRedirect(path: string, hash: string): string | null {
 	const old = hash.startsWith('#/') ? hash.slice(1) : path;

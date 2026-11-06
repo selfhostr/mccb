@@ -14,6 +14,7 @@
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
+	import Panel from '../../lib/ui/Panel.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import type { FileLike } from '../../lib/upload/queue.ts';
@@ -66,59 +67,64 @@
 	sentence={data.loading ? m.common_loading() : psts.length ? m.files_page_summary({ total: psts.length, valid, size: fmtBytes(totalSize) }) : m.files_page_empty()}
 />
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-	class={`mb-4 flex flex-col items-center gap-2 rounded-card border border-dashed px-4 py-6 text-center transition-colors duration-200 ${over ? 'border-ink bg-ghost' : 'border-line-strong'}`}
-	ondragover={(e) => {
-		e.preventDefault();
-		over = true;
-	}}
-	ondragleave={() => (over = false)}
-	ondrop={onDrop}
-	data-testid="dropzone"
->
-	<span class="text-ink-3"><Upload size={20} /></span>
-	<p class="m-0 text-ink-2">{m.files_drop_sentence()}</p>
-	<div class="flex flex-wrap justify-center gap-2">
-		<Button variant="primary" icon={Upload} onclick={() => picker?.click()}>{m.files_drop_choose()}</Button>
-		<Button icon={Server} onclick={() => (fetching = true)} data-testid="fetch-open">{m.files_fetch_open()}</Button>
-	</div>
-	<input
-		bind:this={picker}
-		class="sr-only"
-		type="file"
-		multiple
-		accept={FILE_ACCEPT}
-		tabindex="-1"
-		aria-label={m.files_drop_choose()}
-		onchange={(e) => {
-			take(e.currentTarget.files);
-			e.currentTarget.value = '';
+<div class="flex flex-col gap-4">
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class={`flex flex-wrap items-center justify-between gap-3 rounded-card border border-dashed px-4 py-4 transition-colors duration-200 ${over ? 'border-ink bg-ghost' : 'border-line-strong'}`}
+		ondragover={(e) => {
+			e.preventDefault();
+			over = true;
 		}}
-		data-testid="file-input"
-	/>
-</div>
-
-<InboxPanel />
-
-<QueuePanel />
-
-<h2 class="mt-6 mb-2 text-[0.9375rem]">{m.files_list_title()}</h2>
-{#if data.error && !psts.length}
-	<ErrorNotice title={m.files_list_load_failed()} message={data.error} onretry={() => data.load()} />
-{:else if data.loading}
-	<div class="flex flex-col gap-2">
-		{#each [0, 1, 2] as i (i)}<Skeleton class="h-14" />{/each}
+		ondragleave={() => (over = false)}
+		ondrop={onDrop}
+		data-testid="dropzone"
+	>
+		<p class="m-0 min-w-0 flex-1 basis-64 text-ink-2">{m.files_drop_sentence()}</p>
+		<div class="flex flex-wrap gap-2">
+			<Button variant="primary" icon={Upload} onclick={() => picker?.click()}>{m.files_drop_choose()}</Button>
+			<Button icon={Server} onclick={() => (fetching = true)} data-testid="fetch-open">{m.files_fetch_open()}</Button>
+		</div>
+		<input
+			bind:this={picker}
+			class="sr-only"
+			type="file"
+			multiple
+			accept={FILE_ACCEPT}
+			tabindex="-1"
+			aria-label={m.files_drop_choose()}
+			onchange={(e) => {
+				take(e.currentTarget.files);
+				e.currentTarget.value = '';
+			}}
+			data-testid="file-input"
+		/>
 	</div>
-{:else if !psts.length}
-	<EmptyState icon={FileArchive} title={m.files_list_empty_title()} description={m.files_list_empty_text()} />
-{:else}
-	<ul class="m-0 flex list-none flex-col p-0" data-testid="pst-list">
-		{#each psts as pst (pst.id)}
-			<PstRow id={pst.id} ondetails={(p) => (details = p)} onremove={(p) => (removing = p)} />
-		{/each}
-	</ul>
-{/if}
+
+	<InboxPanel />
+
+	{#if data.error && !psts.length}
+		<ErrorNotice title={m.files_list_load_failed()} message={data.error} onretry={() => data.load()} />
+	{/if}
+
+	{#if data.loading}
+		<div class="flex flex-col gap-2">
+			{#each [0, 1, 2] as i (i)}<Skeleton class="h-14" />{/each}
+		</div>
+	{:else if uploads.items.length || psts.length}
+		<Panel class="row-panel">
+			<QueuePanel />
+			{#if psts.length}
+				<ul class="row-list" aria-label={m.files_list_title()} data-testid="pst-list">
+					{#each psts as pst (pst.id)}
+						<PstRow id={pst.id} ondetails={(p) => (details = p)} onremove={(p) => (removing = p)} />
+					{/each}
+				</ul>
+			{/if}
+		</Panel>
+	{:else if !data.error}
+		<EmptyState icon={FileArchive} title={m.files_list_empty_title()} description={m.files_list_empty_text()} />
+	{/if}
+</div>
 
 {#if fetching}
 	<FetchDialog onclose={() => (fetching = false)} />

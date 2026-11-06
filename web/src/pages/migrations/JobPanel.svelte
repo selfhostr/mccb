@@ -5,7 +5,7 @@
 	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 	import RotateCw from '@lucide/svelte/icons/rotate-cw';
 	import X from '@lucide/svelte/icons/x';
-	import { onMount } from 'svelte';
+	import { onMount, type Snippet } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, get, post } from '../../lib/api/client.ts';
 	import type { Job, JobPhase } from '../../lib/api/types.ts';
@@ -17,6 +17,7 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
+	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
@@ -29,7 +30,7 @@
 	import JobLog from './JobLog.svelte';
 	import JobReport from './JobReport.svelte';
 
-	let { id, onclose }: { id: number; onclose: () => void } = $props();
+	let { id, onclose, settings }: { id: number; onclose: () => void; settings: Snippet<[number]> } = $props();
 
 	let fetched = $state.raw<Job | null>(null);
 	let loadError = $state<string | null>(null);
@@ -105,12 +106,12 @@
 
 <div class="flex items-start justify-between gap-2 border-b border-line py-2 pr-2 pl-4">
 	<div class="min-w-0 pt-1">
-		<h2 bind:this={heading} tabindex="-1" class="truncate font-mono text-sm outline-none" data-testid="job-title">
+		<h2 bind:this={heading} tabindex="-1" class="truncate text-sm outline-none" data-testid="job-title">
 			{account ? prefs.email(account.email) : m.jobs_panel_title({ id })}
 		</h2>
 		{#if job && look}
 			<p class="m-0 mt-1 flex flex-wrap items-center gap-2 text-ink-2">
-				<Plate tone={look.tone} icon={look.icon} spin={look.spin} label={look.label} />
+				<Plate tone={look.tone} icon={look.icon} label={look.label} />
 				{#if job.phase && isActive(job)}<span>{PHASE_LABEL[job.phase] ?? job.phase}</span>{/if}
 			</p>
 		{/if}
@@ -168,7 +169,7 @@
 								{#if stream.errors}<span class="text-advisory-ink">{m.jobs_stream_errors({ count: fmtNum(stream.errors) })}</span>{/if}
 							</span>
 						</div>
-						<Progress value={pct(stream.done, stream.total)} tone={stream.errors ? 'advisory' : job.status === 'done' ? 'signal' : 'ink'} label={stream.label} height="h-1.5" />
+						<Progress value={pct(stream.done, stream.total)} tone={stream.errors ? 'advisory' : 'ink'} label={stream.label} />
 					</div>
 				{/each}
 			</div>
@@ -185,6 +186,12 @@
 					<div class="col-span-full"><dt class="text-ink-3">{m.jobs_stat_folder()}</dt><dd class="m-0 font-mono break-words">{job.current_folder}</dd></div>
 				{/if}
 			</dl>
+
+			{#if account}
+				<Disclosure title={m.migrations_row_settings()} data-testid="account-settings">
+					{@render settings(account.id)}
+				</Disclosure>
+			{/if}
 
 			<Tabs
 				label={m.jobs_tabs_label()}

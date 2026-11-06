@@ -3,6 +3,11 @@ import { expect, mock, pstFile, ready, test } from './helpers';
 
 const names = (page: import('./helpers').Page) => page.getByTestId('queue-name').allTextContents();
 
+async function queueAction(page: import('./helpers').Page, name: string, action: string) {
+	await page.locator(`li[data-upload="${name}"]`).getByRole('button', { name: `More actions for ${name}` }).click();
+	await page.getByRole('menuitem', { name: action, exact: true }).click();
+}
+
 test.describe('upload queue', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
@@ -35,7 +40,7 @@ test.describe('upload queue', () => {
 		await page.getByTestId('order-start').click();
 		await expect.poll(() => names(page)).toEqual(['a.pst', 'b.pst', 'c.pst']);
 
-		await page.getByRole('button', { name: 'Move c.pst up' }).click();
+		await queueAction(page, 'c.pst', 'Sooner in the queue');
 		await expect.poll(() => names(page)).toEqual(['a.pst', 'c.pst', 'b.pst']);
 		expect((await mock(page.request, 'state')).uploadOrder).toEqual(['a.pst']);
 
@@ -56,8 +61,11 @@ test.describe('upload queue', () => {
 		await page.getByRole('link', { name: 'Files' }).first().click();
 		await expect.poll(() => names(page)).toEqual(['stay.pst', 'go.pst']);
 
-		await page.getByRole('button', { name: 'Cancel go.pst' }).click();
+		await queueAction(page, 'go.pst', 'Cancel');
 		await expect.poll(() => names(page)).toEqual(['stay.pst']);
+
+		// The queue is rows of the same panel as the files.
+		await expect(page.getByTestId('queue').locator('xpath=..').getByTestId('pst-list')).toBeVisible();
 	});
 
 	test('after a reload the same file resumes', async ({ page }) => {
@@ -82,7 +90,11 @@ test.describe('upload queue', () => {
 		const list = page.getByTestId('pst-list');
 		await expect(list).toContainText('alice.pst');
 		await expect(page.getByTestId('pst-totals').first()).toContainText('900');
-		await list.getByRole('button', { name: 'Folders' }).first().click();
+		// One panel of rows: file, kind, size, status.
+		await expect(page.locator('li[data-pst="alice.pst"]').getByTestId('pst-format')).not.toBeEmpty();
+		await expect(page.locator('li[data-pst="alice.pst"]')).toContainText('Valid');
+		await list.getByRole('button', { name: 'More actions for alice.pst' }).click();
+		await page.getByRole('menuitem', { name: 'Folders' }).click();
 		await expect(page.getByRole('dialog')).toContainText('Inbox');
 	});
 });

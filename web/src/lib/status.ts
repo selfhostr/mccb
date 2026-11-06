@@ -4,14 +4,19 @@ import CircleCheck from '@lucide/svelte/icons/circle-check';
 import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 import CircleSlash from '@lucide/svelte/icons/circle-slash';
 import Clock from '@lucide/svelte/icons/clock';
-import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 import Download from '@lucide/svelte/icons/download';
+import FileX from '@lucide/svelte/icons/file-x';
+import FlaskConical from '@lucide/svelte/icons/flask-conical';
+import Hourglass from '@lucide/svelte/icons/hourglass';
+import Circle from '@lucide/svelte/icons/circle';
 import Pause from '@lucide/svelte/icons/pause';
+import Play from '@lucide/svelte/icons/play';
 import ScanSearch from '@lucide/svelte/icons/scan-search';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 import Upload from '@lucide/svelte/icons/upload';
 import { m } from '#lib/paraglide/messages.js';
-import type { Job, JobStatus, Pst } from './api/types.ts';
+import type { AccountStatus, Job, JobStatus, Pst } from './api/types.ts';
+import type { TestPhase } from './logic/testrun.ts';
 import type { UploadStatus } from './upload/queue.ts';
 import type { Tone } from './ui/Plate.svelte';
 
@@ -19,7 +24,6 @@ export interface StatusLook {
 	tone: Tone;
 	icon: typeof CircleCheck;
 	label: string;
-	spin?: boolean;
 }
 
 export function jobLook(status: JobStatus): StatusLook {
@@ -27,11 +31,11 @@ export function jobLook(status: JobStatus): StatusLook {
 		case 'queued':
 			return { tone: 'ghost', icon: Clock, label: m.status_job_queued() };
 		case 'running':
-			return { tone: 'info', icon: LoaderCircle, label: m.status_job_running(), spin: true };
+			return { tone: 'info', icon: Play, label: m.status_job_running() };
 		case 'paused':
 			return { tone: 'advisory', icon: Pause, label: m.status_job_paused() };
 		case 'stopping':
-			return { tone: 'advisory', icon: LoaderCircle, label: m.status_job_stopping(), spin: true };
+			return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
 		case 'stopped':
 			return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
 		case 'done':
@@ -51,20 +55,34 @@ export function jobLookOf(job: Pick<Job, 'status' | 'pause_reason'>): StatusLook
 	return jobLook(job.status);
 }
 
+/** A running connection test, in words. */
+export function testLook(phase: TestPhase): StatusLook {
+	return phase === 'running' ? { tone: 'info', icon: FlaskConical, label: m.migrations_test_running() } : { tone: 'info', icon: Clock, label: m.migrations_test_waiting() };
+}
+
+/** A mailbox without a job: what stands between it and an import. */
+export function accountLook(status: AccountStatus, hasSource: boolean): StatusLook {
+	if (status === 'auth_failed') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_row_login_refused() };
+	if (status === 'error') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_test_status_failed() };
+	if (!hasSource) return { tone: 'ghost', icon: FileX, label: m.migrations_filter_no_pst() };
+	if (status === 'new') return { tone: 'ghost', icon: CircleDashed, label: m.migrations_test_never() };
+	return { tone: 'ghost', icon: Circle, label: m.migrations_row_ready() };
+}
+
 export function pstLook(status: Pst['status']): StatusLook {
 	switch (status) {
 		case 'uploading':
 			return { tone: 'advisory', icon: Upload, label: m.status_pst_uploading() };
 		case 'validating':
-			return { tone: 'info', icon: ScanSearch, label: m.status_pst_validating(), spin: false };
+			return { tone: 'info', icon: ScanSearch, label: m.status_pst_validating() };
 		case 'valid':
 			return { tone: 'signal', icon: CircleCheck, label: m.status_pst_valid() };
 		case 'invalid':
 			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_invalid() };
 		case 'fetching':
-			return { tone: 'info', icon: Download, label: m.status_pst_fetching(), spin: false };
+			return { tone: 'info', icon: Download, label: m.status_pst_fetching() };
 		case 'cancelling':
-			return { tone: 'advisory', icon: LoaderCircle, label: m.status_pst_cancelling(), spin: true };
+			return { tone: 'advisory', icon: Hourglass, label: m.status_pst_cancelling() };
 		case 'fetch_failed':
 			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_fetch_failed() };
 		default:
@@ -80,9 +98,9 @@ export function uploadLook(status: UploadStatus): StatusLook {
 			return { tone: 'ghost', icon: Clock, label: m.status_upload_queued() };
 		case 'starting':
 		case 'uploading':
-			return { tone: 'info', icon: LoaderCircle, label: m.status_upload_uploading(), spin: true };
+			return { tone: 'info', icon: Upload, label: m.status_upload_uploading() };
 		case 'completing':
-			return { tone: 'info', icon: LoaderCircle, label: m.status_upload_completing(), spin: true };
+			return { tone: 'info', icon: Hourglass, label: m.status_upload_completing() };
 		case 'paused':
 			return { tone: 'advisory', icon: Pause, label: m.status_upload_paused() };
 		case 'error':

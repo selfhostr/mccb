@@ -29,7 +29,7 @@
 </script>
 
 {#if listing?.enabled}
-	<div class="mb-4" data-testid="inbox">
+	<div data-testid="inbox">
 		<Disclosure title={m.files_inbox_title()} summary={m.files_inbox_waiting({ count: listing.files.length })}>
 			<div class="flex flex-col gap-2">
 				<p class="m-0 text-ink-2">{m.files_inbox_sentence({ seconds: listing.settle_seconds })}</p>

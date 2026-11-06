@@ -3,7 +3,7 @@
 	 * The one button. `primary` is neutral: one per view, the next thing to do.
 	 * `loading` keeps the width and disables the button; a link when `href` is given.
 	 */
-	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+	import Hourglass from '@lucide/svelte/icons/hourglass';
 	import type { Component, Snippet } from 'svelte';
 
 	interface Props {
@@ -39,7 +39,7 @@
 	</a>
 {:else}
 	<button {type} class={classes} disabled={disabled || loading} aria-busy={loading} {onclick} {...rest}>
-		{#if loading}<LoaderCircle size={16} class="spin" />{:else if Icon}<Icon size={16} />{/if}
+		{#if loading}<Hourglass size={16} />{:else if Icon}<Icon size={16} />{/if}
 		{@render children()}
 	</button>
 {/if}

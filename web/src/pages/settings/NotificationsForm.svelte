@@ -111,7 +111,7 @@
 
 	<div class="flex flex-col gap-3" data-testid="notify-ntfy">
 		<Toggle checked={draft.ntfy.enabled} label={m.settings_notifications_ntfy_use()} onchange={(v) => (draft.ntfy.enabled = v)} />
-		<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+		<div class="grid max-w-[460px] grid-cols-1 gap-3">
 			<Field label={m.settings_notifications_url()}>
 				<input class="input font-mono" type="url" autocomplete="off" bind:value={draft.ntfy.url} data-testid="ntfy-url" />
 			</Field>
@@ -134,7 +134,7 @@
 		<div class="flex flex-col gap-4">
 			<div class="flex flex-col gap-3">
 				<Toggle checked={draft.webhook.enabled} label={m.settings_notifications_webhook_use()} onchange={(v) => (draft.webhook.enabled = v)} />
-				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				<div class="grid max-w-[460px] grid-cols-1 gap-3">
 					<Field label={m.settings_notifications_url()}>
 						<input class="input font-mono" type="url" autocomplete="off" bind:value={draft.webhook.url} data-testid="webhook-url" />
 					</Field>
@@ -143,7 +143,7 @@
 			</div>
 			<div class="flex flex-col gap-3">
 				<Toggle checked={draft.email.enabled} label={m.settings_notifications_email_use()} onchange={(v) => (draft.email.enabled = v)} />
-				<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				<div class="grid max-w-[460px] grid-cols-1 gap-3">
 					<Field label={m.settings_notifications_email_host()}><input class="input font-mono" autocomplete="off" bind:value={draft.email.host} data-testid="email-host" /></Field>
 					<div class="grid grid-cols-2 gap-3">
 						<Field label={m.settings_notifications_email_port()}><input class="input font-mono" type="number" min="1" max="65535" bind:value={draft.email.port} /></Field>

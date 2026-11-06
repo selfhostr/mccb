@@ -1,12 +1,8 @@
 import { maskEmail, maskFile, maskHost, maskText } from './logic/mask.ts';
 
-export type ColumnKey = 'server' | 'connection' | 'pst' | 'content' | 'progress';
-export const COLUMN_KEYS: ColumnKey[] = ['server', 'connection', 'pst', 'content', 'progress'];
-
 export interface Prefs {
 	theme: 'dark' | 'light';
 	density: 'compact' | 'comfortable';
-	columns: Record<ColumnKey, boolean>;
 	maskAddresses: boolean;
 	uploadConcurrency: number;
 }
@@ -15,7 +11,6 @@ const KEY = 'mccb.prefs.v1';
 const DEFAULTS: Prefs = {
 	theme: 'dark',
 	density: 'compact',
-	columns: { server: false, connection: true, pst: true, content: true, progress: true },
 	maskAddresses: false,
 	uploadConcurrency: 1
 };
@@ -23,7 +18,7 @@ const DEFAULTS: Prefs = {
 function load(): Prefs {
 	try {
 		const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-		return { ...DEFAULTS, ...saved, columns: { ...DEFAULTS.columns, ...saved.columns } };
+		return { ...DEFAULTS, ...saved };
 	} catch {
 		return { ...DEFAULTS };
 	}

@@ -21,7 +21,7 @@
 
 <details class={`group ${className}`} bind:open {...rest}>
 	<summary class="flex min-h-10 cursor-pointer list-none items-center gap-2 font-medium text-ink-2 hover:text-ink [&::-webkit-details-marker]:hidden">
-		<ChevronRight size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90 rtl:rotate-180 rtl:group-open:rotate-90" />
+		<ChevronRight size={16} class="shrink-0 group-open:rotate-90 rtl:rotate-180 rtl:group-open:rotate-90" />
 		<span>{title}</span>
 		{#if summary}<span class="text-xs font-normal text-ink-3">{summary}</span>{/if}
 	</summary>

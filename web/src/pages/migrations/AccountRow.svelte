@@ -2,96 +2,77 @@
 	/**
 	 * One row. It receives an id and reads only its own map entries, and every value used by
 	 * the markup is a $derived primitive: a live event for another account runs nothing here,
-	 * and an event for this one touches only the text that changed. An open select stays open.
+	 * and a progress event for this one only reaches ProgressCell.
 	 */
-	import Calendar from '@lucide/svelte/icons/calendar';
-	import Contact from '@lucide/svelte/icons/contact';
 	import ArrowDown from '@lucide/svelte/icons/arrow-down';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import KeyRound from '@lucide/svelte/icons/key-round';
-	import Mail from '@lucide/svelte/icons/mail';
 	import Route from '@lucide/svelte/icons/route';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { m } from '#lib/paraglide/messages.js';
-	import type { Account, Pst } from '../../lib/api/types.ts';
-	import { fmtBytes } from '../../lib/format.ts';
-	import { currentResult } from '../../lib/logic/accounts.ts';
-	import { endpointSummary } from '../../lib/logic/connector.ts';
+	import type { Account } from '../../lib/api/types.ts';
+	import { endpointSummary, hasCustomSource } from '../../lib/logic/connector.ts';
+	import { rowHref } from '../../lib/logic/routes.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
+	import { router } from '../../lib/router.svelte.ts';
+	import { accountLook, jobLookOf, testLook } from '../../lib/status.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
-	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
+	import Plate from '../../lib/ui/Plate.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
-	import ConnectionCell from './ConnectionCell.svelte';
 	import ProgressCell from './ProgressCell.svelte';
-
-	const UPLOAD_VALUE = '__upload';
 
 	interface Props {
 		id: number;
-		psts: Pst[];
 		onedit: (account: Account) => void;
 		ondelete: (account: Account) => void;
-		ondetails: (account: Account) => void;
-		onupload: (id: number) => void;
 		onroute: (account: Account) => void;
 	}
 
-	let { id, psts, onedit, ondelete, ondetails, onupload, onroute }: Props = $props();
+	let { id, onedit, ondelete, onroute }: Props = $props();
 
-	// A deleted row may still be fading out: it keeps showing what it last knew.
+	// A deleted row may still run once before it goes: it keeps showing what it last knew.
 	let last: Account | undefined;
 	const account = $derived.by(() => (last = data.accounts.get(id) ?? last) as Account);
 	const email = $derived(prefs.email(account.email));
-	const login = $derived(account.login && account.login !== account.email ? prefs.email(account.login) : '');
-	const pstId = $derived(account.pst_id);
-	const serverName = $derived(data.servers.find((s) => s.id === account.server_id)?.name ?? '');
 	const selected = $derived(data.selected.has(id));
 	const phase = $derived(data.testing.get(id));
-	const mail = $derived(account.options.mail);
-	const calendar = $derived(account.options.calendar);
-	const contacts = $derived(account.options.contacts);
-	const columns = $derived(prefs.value.columns);
-	// Another source than the PST, or an own target: said in words, edited in the route dialog.
-	const customSource = $derived(endpointSummary(connectors.list, account.source, 'source'));
-	const sourceLabel = $derived(customSource ? customSource.label : '');
-	const sourceDetail = $derived(customSource ? prefs.text(customSource.detail) : '');
-	const targetLabel = $derived(endpointSummary(connectors.list, account.target, 'target')?.label ?? '');
-	const canRoute = $derived(connectors.list.some((c) => c.source && c.kind !== 'pst') || connectors.list.some((c) => c.target));
-	const options = $derived(psts.filter((p) => p.status === 'valid' || p.id === pstId));
 
-	function onPstChange(e: Event & { currentTarget: HTMLSelectElement }) {
-		const value = e.currentTarget.value;
-		if (value === UPLOAD_VALUE) {
-			e.currentTarget.value = String(pstId ?? '');
-			onupload(id);
-			return;
-		}
-		void data.setPst(id, value ? Number(value) : null);
-	}
+	// Primitives: a progress event for this job changes none of these.
+	const jobId = $derived(data.jobs.get(id)?.id);
+	const jobStatus = $derived(data.jobs.get(id)?.status);
+	const pauseReason = $derived(data.jobs.get(id)?.pause_reason);
+	const custom = $derived(hasCustomSource(account));
+	const look = $derived.by(() => {
+		if (phase) return testLook(phase);
+		if (jobStatus) return jobLookOf({ status: jobStatus, pause_reason: pauseReason });
+		return accountLook(account.status, custom || account.pst_id != null);
+	});
+
+	// The route in words: where the mail comes from and where it goes.
+	const fileName = $derived(account.pst_id != null ? prefs.file(data.psts.get(account.pst_id)?.filename) : '');
+	const sourceLabel = $derived(endpointSummary(connectors.list, account.source, 'source')?.label ?? '');
+	const targetLabel = $derived(endpointSummary(connectors.list, account.target, 'target')?.label ?? '');
+	const serverName = $derived(data.servers.find((s) => s.id === account.server_id)?.name ?? '');
+	const route = $derived(m.migrations_row_route_line({ source: sourceLabel || fileName || m.migrations_row_pst_none(), target: targetLabel || serverName }));
+	const canRoute = $derived(connectors.list.some((c) => c.source && c.kind !== 'pst') || connectors.list.some((c) => c.target));
+	const href = $derived(rowHref(router.search, id, jobId));
 
 	function toggleSelected(e: Event & { currentTarget: HTMLInputElement }) {
 		if (e.currentTarget.checked) data.selected.add(id);
 		else data.selected.delete(id);
 	}
 
-	const CONTENT = $derived([
-		{ key: 'mail' as const, on: mail, icon: Mail, label: m.migrations_row_content_mail() },
-		{ key: 'calendar' as const, on: calendar, icon: Calendar, label: m.migrations_row_content_calendar() },
-		{ key: 'contacts' as const, on: contacts, icon: Contact, label: m.migrations_row_content_contacts() }
-	]);
-
-	// A primitive: a progress event for this row does not rebuild the menu, a change of status does.
-	const queued = $derived(data.jobs.get(id)?.status === 'queued');
 	async function move(step: -1 | 1) {
 		if (await data.moveQueued(id, step)) toast(step < 0 ? m.migrations_row_moved_up() : m.migrations_row_moved_down(), 'signal');
 	}
 
 	const menu = $derived([
-		...(queued
+		{ label: phase ? m.migrations_test_running() : m.migrations_row_test(), icon: FlaskConical, disabled: !!phase, onselect: () => data.test([id]) },
+		...(jobStatus === 'queued'
 			? [
 					{ label: m.migrations_row_queue_up(), icon: ArrowUp, onselect: () => move(-1) },
 					{ label: m.migrations_row_queue_down(), icon: ArrowDown, onselect: () => move(1) }
@@ -103,74 +84,21 @@
 	]);
 </script>
 
-<td class="sel">
-	<label class="check">
-		<input type="checkbox" checked={selected} aria-label={m.migrations_row_select({ email })} onchange={toggleSelected} />
-	</label>
-</td>
-<td>
-	<div class="truncate font-mono text-xs font-medium" title={email} data-testid="account-email">{email}</div>
-	{#if login}<div class="truncate text-xs text-ink-3" title={login}>{m.migrations_row_login({ login })}</div>{/if}
-</td>
-{#if columns.server}
-	<td class="cell-wide" data-label={m.migrations_col_server()}><div class="truncate" title={serverName}>{serverName}</div></td>
-{/if}
-{#if columns.connection}
-	<td class="cell-wide" data-label={m.migrations_col_connection()}>
-		<ConnectionCell {email} {phase} result={currentResult(account)} status={account.status} onclick={() => ondetails(account)} />
-	</td>
-{/if}
-{#if columns.pst}
-	<td class="cell-wide" data-label={m.migrations_col_pst()}>
-		{#if sourceLabel}
-			<button type="button" class="flex min-h-10 w-full min-w-0 flex-col justify-center rounded-btn text-left hover:bg-ghost" onclick={() => onroute(account)} aria-label={m.migrations_row_source_edit({ email })} data-testid="source-summary">
-				<span class="truncate font-medium">{m.migrations_row_source({ label: sourceLabel })}</span>
-				{#if sourceDetail}<span class="truncate font-mono text-xs text-ink-3">{sourceDetail}</span>{/if}
-			</button>
-		{:else}
-			<select class="input" value={pstId == null ? '' : String(pstId)} aria-label={m.migrations_row_pst({ email })} onchange={onPstChange}>
-				<option value="">{m.migrations_row_pst_none()}</option>
-				{#each options as pst (pst.id)}
-					<option value={String(pst.id)}>{prefs.file(pst.filename)} ({fmtBytes(pst.size)})</option>
-				{/each}
-				<option value={UPLOAD_VALUE}>{m.migrations_row_pst_upload()}</option>
-			</select>
-		{/if}
-		{#if targetLabel}<p class="m-0 mt-0.5 truncate text-xs text-ink-3" data-testid="target-summary">{m.migrations_row_target({ label: targetLabel })}</p>{/if}
-	</td>
-{/if}
-{#if columns.content}
-	<td class="cell-wide" data-label={m.migrations_col_content()}>
-		<div class="flex gap-1">
-			{#each CONTENT as item (item.key)}
-				{@const Icon = item.icon}
-				<button
-					type="button"
-					class={`inline-flex size-10 items-center justify-center rounded-btn border transition-colors duration-200 ${item.on ? 'border-line-strong bg-surface-2 text-ink' : 'border-dashed border-line text-ink-3 hover:text-ink-2'}`}
-					aria-pressed={item.on}
-					aria-label={m.migrations_row_content_toggle({ email, content: item.label })}
-					title={item.label}
-					onclick={() => data.setOption(id, item.key, !item.on)}
-				>
-					<Icon size={15} />
-				</button>
-			{/each}
-		</div>
-	</td>
-{/if}
-{#if columns.progress}
-	<td class="cell-wide" data-label={m.migrations_col_progress()}>
-		<ProgressCell accountId={id} />
-	</td>
-{/if}
-<td class="has-menu">
-	<div class="flex items-center justify-end">
-		<IconButton
-			icon={FlaskConical}
-			label={phase ? m.migrations_row_testing({ email }) : m.migrations_row_test({ email })}
-			loading={!!phase}
-			onclick={() => data.test([id])}
-		/>
-		<Menu label={m.migrations_row_more({ email })} icon={EllipsisVertical} items={menu} />
-	</div>
-</td>
+<label class="check acct-sel">
+	<input type="checkbox" checked={selected} aria-label={m.migrations_row_select({ email })} onchange={toggleSelected} />
+</label>
+<div class="acct-who">
+	<a class="acct-link" {href} data-account-link={id} data-job-link={jobId}>
+		<span class="truncate font-semibold" title={email} data-testid="account-email">{email}</span>
+		<span class="truncate text-xs text-ink-2">{route}</span>
+	</a>
+</div>
+<div class="acct-status" data-testid={phase ? 'test-state' : 'row-status'}>
+	<Plate tone={look.tone} icon={look.icon} label={look.label} />
+</div>
+<div class="acct-bar">
+	<ProgressCell accountId={id} />
+</div>
+<div class="acct-menu">
+	<Menu label={m.migrations_row_more({ email })} icon={EllipsisVertical} items={menu} />
+</div>
