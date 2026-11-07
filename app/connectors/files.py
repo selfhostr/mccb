@@ -645,7 +645,7 @@ class FilesSource(Source):
         from ..server import db
         row = db.q1("SELECT * FROM psts WHERE id=?", (self.pst_id,)) if self.pst_id else None
         if row is None:
-            raise ConnectorError("no file linked to the account", ConnectorError.CONFIG)
+            raise ConnectorError("no file linked to the mailbox", ConnectorError.CONFIG)
         if row["status"] != "valid":
             raise ConnectorError(f"file not valid (status {row['status']})", ConnectorError.CONFIG)
         self.close()

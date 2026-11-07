@@ -17,8 +17,8 @@
   - Items are read one at a time in the job process, over one source connection: only the writes are parallel, so a slow source
     is the limit whatever the tuning. A PST sent to another target has no builder processes either.
   - One whole message is held in memory while it is sent; `BUILD_MAX_INFLIGHT_MB` bounds the total, not a single message.
-  - An account still needs a server, even with its own target: the tuning settings come from it.
-  - Tasks go where the target can hold them: Exchange to Exchange, CalDAV `VTODO`, in either direction. They follow the calendar option of the account. A PST source does not read them, an IMAP target cannot hold them.
+  - A mailbox still needs a server, even with its own target: the tuning settings come from it.
+  - Tasks go where the target can hold them: Exchange to Exchange, CalDAV `VTODO`, in either direction. They follow the calendar option of the mailbox. A PST source does not read them, an IMAP target cannot hold them.
   - Every calendar or address book of a source goes to one DAV collection.
 - **IMAP as a source**:
   - One pass, not a sync: a flag changed or a message deleted at the source after its copy is not carried over. A rerun lists every

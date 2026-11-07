@@ -122,7 +122,7 @@ test.describe('settings: drop folder and automatic import', () => {
 		await ready(page, '/settings');
 		const section = page.getByTestId('section-intake');
 		await expect(section.getByTestId('intake-chain-options')).toHaveCount(0);
-		await section.getByRole('checkbox', { name: /^Assign files to accounts automatically/ }).check();
+		await section.getByRole('checkbox', { name: /^Assign files to mailboxes automatically/ }).check();
 		await expect(section.getByTestId('intake-chain-options')).toBeVisible();
 		await section.getByRole('checkbox', { name: /^Start the import too/ }).check();
 		await expect.poll(async () => (await state(page)).intake.auto_chain).toMatchObject({ enabled: true, start_import: true });
@@ -214,8 +214,8 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		const li = (name: string) => page.locator(`li[data-pst="${name}"]`);
 		await expect(li('a.pst').getByTestId('pst-from')).toHaveText('Taken from the drop folder');
 		await expect(li('a.pst').getByTestId('pst-chain')).toHaveText('Automatically assigned to alice@example.com, import started.');
-		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No account matches this file name.');
-		await expect(li('c.pst').getByTestId('pst-chain')).toContainText('Several accounts match');
+		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No mailbox matches this file name.');
+		await expect(li('c.pst').getByTestId('pst-chain')).toContainText('Several mailboxes match');
 		await expect(li('d.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment failed: queue full');
 		await expect(li('e.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment: brand_new_result');
 		await expect(li('f.pst').getByTestId('pst-from')).toHaveCount(0);

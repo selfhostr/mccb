@@ -28,7 +28,7 @@ def create_plan(body: PlanIn):
     known = {r["id"] for r in db.q(f"SELECT id FROM accounts WHERE id IN ({','.join('?' * len(ids))})", ids)}
     unknown = [i for i in ids if i not in known]
     if unknown:
-        raise HTTPException(422, {"msg": "unknown account(s)", "account_ids": unknown})
+        raise HTTPException(422, {"msg": "unknown mailbox(es)", "account_ids": unknown})
     now = time.time()
     cur = db.ex("INSERT INTO plans(status, request, created_at, updated_at) VALUES ('queued', ?, ?, ?)",
                 (db.jdump({"account_ids": ids}), now, now))
@@ -81,7 +81,7 @@ def put_server_policy(sid: int, body: dict[str, Any] | None = Body(None)):
 def get_account_policy(aid: int):
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "unknown account")
+        raise HTTPException(404, "unknown mailbox")
     srv = db.q1("SELECT * FROM servers WHERE id=?", (r["server_id"],))
     return {**_policy_get(r), "effective": policy.effective(r, srv).summary()}
 
@@ -93,7 +93,7 @@ def put_account_policy(aid: int, body: dict[str, Any] | None = Body(None)):
     docs/planning.md."""
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "unknown account")
+        raise HTTPException(404, "unknown mailbox")
     try:
         doc = policy.normalize(body, server=False)
     except ValueError as e:
@@ -163,7 +163,7 @@ def delta_job(jid: int):
     if r["status"] not in repo.JOB_FINAL:
         raise HTTPException(409, f"job still active ('{r['status']}')")
     if db.q1(f"SELECT id FROM jobs WHERE account_id=? AND id<>? AND status IN {ACTIVE}", (r["account_id"], jid)):
-        raise HTTPException(409, "another job is active for this account")
+        raise HTTPException(409, "another job is active for this mailbox")
     db.ex("UPDATE jobs SET status='queued', mode='delta', error=NULL, finished_at=NULL, phase='precheck', "
           "pause_reason=NULL WHERE id=?", (jid,))
     crash.reset_crashes(jid)
@@ -263,4 +263,4 @@ def export_accounts_csv(server_id: int | None = None):
     settings. Never a password or any secret."""
     body = csvaccounts.export(server_id)
     return Response(body.encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": 'attachment; filename="accounts-export.csv"'})
+                    headers={"Content-Disposition": 'attachment; filename="mailboxes-export.csv"'})

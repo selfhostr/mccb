@@ -21,11 +21,11 @@ The Exchange connectors have been tested against simulated servers, not real Exc
 
 `GET /api/connectors` returns this catalogue with the capabilities and the fields of each role. The UI renders its forms from it, so a new kind needs no UI code.
 
-## How an account picks its route
+## How a mailbox picks its route
 
-- `source_kind` empty: the PST linked to the account. `target_kind` empty: the server of the account (IMAP and DAV, with the account's password).
-- Both empty is the historical path of `JobRunner`, with its builder processes. Accounts created before connectors existed stay on it, unchanged.
-- Anything else runs in `app/server/connector_runner.py`, one path for every kind. This path also carries tasks, to a target that declares them: they follow the calendar option of the account.
+- `source_kind` empty: the PST linked to the mailbox. `target_kind` empty: the server of the mailbox (IMAP and DAV, with the mailbox's password).
+- Both empty is the historical path of `JobRunner`, with its builder processes. Mailboxes created before connectors existed stay on it, unchanged.
+- Anything else runs in `app/server/connector_runner.py`, one path for every kind. This path also carries tasks, to a target that declares them: they follow the calendar option of the mailbox.
 
 ## Add a connector
 
@@ -53,7 +53,7 @@ A target is a `Target` (settings, thread-safe) that makes one `TargetSession` pe
 
 ## What a connector must get right
 
-- **`SourceItem.key` is stable across runs.** It is ASCII, at most 200 characters, unique within the account and the item kind, so include the folder when the protocol's ids are per folder. It decides what is already migrated.
+- **`SourceItem.key` is stable across runs.** It is ASCII, at most 200 characters, unique within the mailbox and the item kind, so include the folder when the protocol's ids are per folder. It decides what is already migrated.
 - **`changed_since` is used by the final resync.** A source that declares `CAP_INCREMENTAL` answers with the items new since an opaque cursor; the runner stores the cursor per folder once the items are recorded. `Changes.reset=True` means the list is complete.
 - **`SourceItem.alt_key` is optional and survives a key change.** After a change of UIDVALIDITY, for instance, the runner matches it against the rows whose key the source no longer lists.
 - **`identity` names the mailbox, from the config alone.** No secret, no network. The same text keeps the migration state; another text starts afresh.

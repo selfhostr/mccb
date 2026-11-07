@@ -174,7 +174,7 @@ def cmd_run(api: Api, a) -> int:
         body["name"] = a.name
     jobs = api.call("POST", "/api/runs", body)
     for j in jobs:
-        print(f"job {j['id']} for account {j['account_id']}: {j['status']}")
+        print(f"job {j['id']} for mailbox {j['account_id']}: {j['status']}")
     if not a.watch:
         return 0
     worst = 0
@@ -261,7 +261,7 @@ def cmd_upload(api: Api, a) -> int:
             return 4
     if a.account:
         api.call("PUT", f"/api/accounts/{a.account}/pst", {"pst_id": pid})
-        print(f"PST {pid} linked to account {a.account}")
+        print(f"PST {pid} linked to mailbox {a.account}")
     return 0
 
 
@@ -279,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     j.add_argument("--limit", type=int, default=50)
     j.add_argument("--json", action="store_true")
     j.set_defaults(fn=cmd_jobs)
-    ac = sub.add_parser("accounts", help="list accounts")
+    ac = sub.add_parser("accounts", help="list mailboxes")
     ac.add_argument("--server", type=int)
     ac.set_defaults(fn=cmd_accounts)
     r = sub.add_parser("run", help="start migrations")
@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(fn=cmd_plan)
     u = sub.add_parser("upload", help="send a PST file (resumable); run it again to continue")
     u.add_argument("file")
-    u.add_argument("--account", type=int, help="link the PST to this account once it is valid")
+    u.add_argument("--account", type=int, help="link the PST to this mailbox once it is valid")
     u.add_argument("--wait", action="store_true", help="wait for the analysis")
     u.set_defaults(fn=cmd_upload)
     return p

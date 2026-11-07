@@ -267,7 +267,7 @@ def _probe_dav(r, kind: str, template: str | None) -> dict:
     if not r["dav_enabled"]:
         return {"ok": True, "msg": "DAV disabled for this server"}
     if template and "{" in template:
-        return {"ok": True, "msg": "template URL: checked when each account is tested"}
+        return {"ok": True, "msg": "template URL: checked when each mailbox is tested"}
     urls = [template] if template else [f"https://{r['imap_host']}/.well-known/{kind}"]
     for url in urls:
         try:
@@ -303,7 +303,7 @@ class AccountUpdate(BaseModel):
 def _account_or_404(aid: int):
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "unknown account")
+        raise HTTPException(404, "unknown mailbox")
     return r
 
 
@@ -323,7 +323,7 @@ def create_account(a: AccountIn):
     if not csvimport.EMAIL_RE.match(email):
         raise HTTPException(422, "invalid email address")
     if db.q1("SELECT id FROM accounts WHERE server_id=? AND email=?", (a.server_id, email)):
-        raise HTTPException(409, "this account already exists on this server")
+        raise HTTPException(409, "this mailbox already exists on this server")
     o = a.options or {}
     cur = db.ex("INSERT INTO accounts(server_id,email,login,password_enc,opt_mail,opt_calendar,opt_contacts,pst_id,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -378,7 +378,7 @@ def update_account(aid: int, a: AccountUpdate):
                 sync_files_source(aid)
         except Exception as e:
             if "UNIQUE" in str(e):
-                raise HTTPException(409, "this account already exists on this server")
+                raise HTTPException(409, "this mailbox already exists on this server")
             raise
     return repo.get_account(r["id"])
 
@@ -387,7 +387,7 @@ def update_account(aid: int, a: AccountUpdate):
 def delete_account(aid: int):
     _account_or_404(aid)
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping')", (aid,)):
-        raise HTTPException(409, "a job is running for this account")
+        raise HTTPException(409, "a job is running for this mailbox")
     db.ex("DELETE FROM accounts WHERE id=?", (aid,))
     return {"ok": True}
 
@@ -466,7 +466,7 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
 @app.get("/api/accounts/csv-template")
 def csv_template():
     return Response(csvimport.TEMPLATE.encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": 'attachment; filename="accounts.csv"'})
+                    headers={"Content-Disposition": 'attachment; filename="mailboxes.csv"'})
 
 
 # ======================================================================= uploads / PST
@@ -562,7 +562,7 @@ def create_runs(body: RunIn):
     for aid in body.account_ids:
         a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
         if a is None:
-            errors.append({"account_id": aid, "msg": "unknown account"})
+            errors.append({"account_id": aid, "msg": "unknown mailbox"})
             continue
         if not a["password_enc"] and not a["target_kind"]:
             errors.append({"account_id": aid, "msg": "password missing"})
@@ -661,7 +661,7 @@ def _requeue(jid: int, mode: str) -> dict:
         raise HTTPException(409, f"job still active ('{r['status']}')")
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND id<>? AND status IN ('queued','running','paused','stopping')",
              (r["account_id"], jid)):
-        raise HTTPException(409, "another job is active for this account")
+        raise HTTPException(409, "another job is active for this mailbox")
     db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck', pause_reason=NULL "
           "WHERE id=?", (mode, jid))
     crash.reset_crashes(jid)  # new rerun: "retry errors" retries the "libpff crash" items once

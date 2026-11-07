@@ -15,4 +15,4 @@ The first VEVENT calendar or address book found is used. If there is none, an
 
 Tasks need a calendar that accepts `VTODO`: the first one found, or a new `PST Import` collection with this component.
 
-As a source, the `caldav` and `carddav` connectors read every collection of the account, each object as it is on the server.
+As a source, the `caldav` and `carddav` connectors read every collection of the mailbox, each object as it is on the server.
