@@ -11,6 +11,9 @@
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import PolicyFields from './PolicyFields.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
+	import KindIcon from '../../lib/ui/KindIcon.svelte';
+	import Notice from '../../lib/ui/Notice.svelte';
+	import { PROVIDERS, providerOf, type Provider } from '../../lib/logic/providers.ts';
 
 	let { server = null, onclose, onsaved }: { server?: Server | null; onclose: () => void; onsaved?: (saved: Server) => void } = $props();
 
@@ -24,6 +27,12 @@
 	let error = $state<string | null>(null);
 	let policyError = $state<string | null>(null);
 	let policy = $state<PolicyFields>();
+	// Adding starts from a provider: the preset fills host, port, security and the address book URLs.
+	let provider = $state<Provider>(untrack(() => providerOf(server?.imap_host)));
+	function pick(next: Provider) {
+		provider = next;
+		Object.assign(form, { caldav_url: '', carddav_url: '' }, next.preset, { name: form.name && !PROVIDERS.some((p) => p.preset.name === form.name) ? form.name : (next.preset.name ?? '') });
+	}
 
 	function onSecurity() {
 		if (form.imap_port === 993 || form.imap_port === 143) form.imap_port = form.imap_security === 'ssl' ? 993 : 143;
@@ -62,6 +71,29 @@
 
 <Dialog title={server ? m.settings_server_edit_title({ name: server.name }) : m.settings_server_add_title()} {onclose} wide>
 	<form id="server-form" class="flex flex-col gap-3" onsubmit={submit}>
+		{#if !server}
+			<fieldset class="m-0 border-0 p-0">
+				<legend class="mb-2 p-0 font-medium text-ink-2">{m.settings_server_provider()}</legend>
+				<div class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" data-testid="server-providers">
+					{#each PROVIDERS as item (item.id)}
+						<button
+							type="button"
+							role="radio"
+							aria-checked={provider.id === item.id}
+							class={`flex min-h-12 items-center gap-2 rounded-btn border px-2 text-left font-medium transition-colors duration-200 ${provider.id === item.id ? 'border-ink-3 bg-surface-2 text-ink' : 'border-line-strong text-ink-2 hover:text-ink'}`}
+							onclick={() => pick(item)}
+							data-provider={item.id}
+						>
+							<KindIcon icon={item.icon} size={28} />
+							<span class="min-w-0 truncate">{item.id === 'imap' ? m.settings_server_provider_other() : item.name}</span>
+						</button>
+					{/each}
+				</div>
+				{#if provider.note}
+					<div class="mt-2"><Notice><p class="m-0">{provider.note === 'oauth' ? m.settings_server_provider_oauth() : m.settings_server_provider_app_password({ name: provider.name })}</p></Notice></div>
+				{/if}
+			</fieldset>
+		{/if}
 		<Field label={m.settings_server_name()}>
 			<input class="input" required bind:value={form.name} data-testid="server-name" />
 		</Field>

@@ -4,7 +4,7 @@ test.describe('at 390 px', () => {
 	test.use({ viewport: { width: 390, height: 844 } });
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
-	for (const url of ['/', '/files', '/settings']) {
+	for (const url of ['/', '/files', '/servers', '/settings']) {
 		test(`no horizontal overflow on ${url}`, async ({ page }) => {
 			await ready(page, url);
 			await noOverflow(page);
@@ -159,7 +159,7 @@ test.describe('settings', () => {
 	});
 
 	test('server test: every protocol, and the verdict stays after a reload', async ({ page }) => {
-		await ready(page, '/settings');
+		await ready(page, '/servers');
 		const row = page.locator('[data-server="Production"]');
 		await expect(row.getByTestId('server-verdict')).toContainText('Not verified');
 		await page.getByRole('button', { name: 'Test Production' }).click();
@@ -172,8 +172,8 @@ test.describe('settings', () => {
 	});
 
 	test('lists the connector catalogue, and tolerates a server without the route', async ({ page }) => {
-		await ready(page, '/settings');
-		await expect(page.getByTestId('section-notifications')).toBeVisible();
+		await ready(page, '/servers');
+		await expect(page.getByTestId('section-servers')).toBeVisible();
 		await expect(page.getByTestId('connectors')).toContainText('Future mail service');
 		await expect(page.getByTestId('connectors')).toContainText('Any IMAP mailbox.');
 

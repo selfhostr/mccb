@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Prêt. Les éléments déjà copiés sont ignorés : démarrer deux fois ne crée pas de doublons.",
 	"migrations_start_unchecked": "L'identifiant n'a pas encore été vérifié. Il est vérifié à nouveau juste avant le démarrage.",
 	"migrations_new_source": "Source",
-	"migrations_new_source_hint": "Un PST ou un autre fichier de messagerie. Exchange, IMAP, Google et les autres serveurs se choisissent après l'enregistrement, avec Source et cible.",
+	"migrations_new_source_hint": "Un fichier déjà sur le serveur, un fichier à envoyer maintenant, ou choisir plus tard.",
 	"migrations_new_source_later": "Choisir plus tard",
 	"migrations_new_source_file": "{name}, envoyé après l'enregistrement",
 	"migrations_new_email_hint": "La boîte sur {server} qui reçoit le courrier.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "En échec : {count}",
 	"migrations_conn_untested": "Non testés : {count}",
 	"migrations_conn_group": "Vérification des connexions",
-	"migrations_filter_tested_ok": "Connexion validée"
+	"migrations_filter_tested_ok": "Connexion validée",
+	"settings_server_provider": "Fournisseur",
+	"settings_server_provider_other": "Autre serveur IMAP",
+	"settings_server_provider_oauth": "Microsoft refuse les mots de passe simples en IMAP. Pour écrire dans Microsoft 365, choisissez Exchange Online dans Source et cible de chaque boîte.",
+	"settings_server_provider_app_password": "{name} demande un mot de passe d'application : créez-en un dans les réglages de sécurité du compte et utilisez-le comme mot de passe de la boîte.",
+	"migrations_new_source_files": "Fichier : PST, mbox, EML",
+	"migrations_new_add_server": "Ajouter un autre serveur",
+	"migrations_steps_server": "Ajouter le serveur de destination",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak ou tout serveur IMAP. Il est vérifié juste après l'enregistrement.",
+	"migrations_steps_new": "Créer une migration",
+	"migrations_steps_new_hint": "D'où vient le courrier (un PST ou un autre fichier, Exchange, Microsoft 365, Google, IMAP) et la boîte où il va. Plusieurs boîtes d'un coup : importez un fichier CSV.",
+	"migrations_steps_start": "La démarrer",
+	"migrations_steps_start_hint": "Le panneau de la boîte dit ce qui manque encore, puis Démarrer la migration copie tout. La progression s'affiche dans la liste."
 }

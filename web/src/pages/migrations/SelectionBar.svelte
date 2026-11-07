@@ -25,7 +25,7 @@
 	let { targets, hidden, testing, ontest, onimport, onclear, ondropHidden, besidePanel }: Props = $props();
 </script>
 
-<div class={`fixed inset-x-0 bottom-0 z-30 border-t border-line-strong bg-surface ${besidePanel ? 'min-[1100px]:right-[600px]' : ''}`} data-testid="selection-bar" role="region" aria-label={m.migrations_bar_label()}>
+<div class={`fixed right-0 bottom-0 left-[var(--side-w)] z-30 border-t border-line-strong bg-surface ${besidePanel ? 'min-[1100px]:right-[600px]' : ''}`} data-testid="selection-bar" role="region" aria-label={m.migrations_bar_label()}>
 	<div class="mx-auto flex max-w-[1160px] flex-wrap items-center gap-x-3 gap-y-1 px-[var(--gutter)] py-2">
 		<div class="min-w-0 flex-1 basis-56" aria-live="polite">
 			<p class="m-0 font-medium" data-testid="selection-count">{m.migrations_bar_selected({ count: targets })}</p>

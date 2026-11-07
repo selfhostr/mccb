@@ -59,6 +59,7 @@ html[data-theme='light'] {
 	--ease: cubic-bezier(0.16, 1, 0.3, 1);
 	--row-h: 56px;
 	--bar-h: 96px;
+	--side-w: 0px;
 }
 
 html[data-density='comfortable'] {
@@ -77,3 +78,12 @@ html[data-density='comfortable'] {
 		--bar-h: 56px;
 	}
 }
+
+/* Wide screens: the navigation is a column on the left and the top bar goes away. */
+@media (min-width: 64rem) {
+	:root {
+		--bar-h: 0px;
+		--side-w: 232px;
+	}
+}
+

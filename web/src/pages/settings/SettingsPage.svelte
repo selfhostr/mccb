@@ -6,15 +6,13 @@
 	import IntakeSection from './IntakeSection.svelte';
 	import NotificationsSection from './NotificationsSection.svelte';
 	import PasswordSection from './PasswordSection.svelte';
-	import ServersSection from './ServersSection.svelte';
 	import TokensSection from './TokensSection.svelte';
 	import TuningSection from './TuningSection.svelte';
 </script>
 
 <PageHeader title={m.settings_page_title()} sentence={m.settings_page_sentence({ servers: data.servers.length })} />
 
-<div class="flex max-w-[720px] flex-col gap-10">
-	<ServersSection />
+<div class="flex max-w-[960px] flex-col gap-10">
 	<IntakeSection />
 	<NotificationsSection />
 	<TuningSection />

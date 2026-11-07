@@ -165,7 +165,7 @@ describe('routes', () => {
 	it.each([
 		['/', '#/dashboard', '/'],
 		['/', '#/accounts?server=2', '/?server=2'],
-		['/', '#/servers', '/settings#servers'],
+		['/', '#/servers', '/servers'],
 		['/', '#/uploads', '/files'],
 		['/', '#/settings', '/settings'],
 		['/', '#/jobs/12', '/jobs/12'],

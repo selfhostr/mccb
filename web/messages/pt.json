@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Pronto. Os itens já copiados são ignorados, por isso iniciar duas vezes não cria duplicados.",
 	"migrations_start_unchecked": "O início de sessão ainda não foi verificado. É verificado de novo mesmo antes do início.",
 	"migrations_new_source": "Origem",
-	"migrations_new_source_hint": "Um PST ou outro ficheiro de correio. Exchange, IMAP, Google e outros servidores escolhem-se depois de guardar, em Origem e destino.",
+	"migrations_new_source_hint": "Um ficheiro já no servidor, um para enviar agora, ou escolher depois.",
 	"migrations_new_source_later": "Escolher depois",
 	"migrations_new_source_file": "{name}, enviado depois de guardar",
 	"migrations_new_email_hint": "A caixa de correio em {server} que recebe o correio.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Com falha: {count}",
 	"migrations_conn_untested": "Não testadas: {count}",
 	"migrations_conn_group": "Verificação das ligações",
-	"migrations_filter_tested_ok": "Ligação verificada"
+	"migrations_filter_tested_ok": "Ligação verificada",
+	"settings_server_provider": "Fornecedor",
+	"settings_server_provider_other": "Outro servidor IMAP",
+	"settings_server_provider_oauth": "A Microsoft recusa palavras-passe simples por IMAP. Para escrever no Microsoft 365, escolha Exchange Online em Origem e destino de cada caixa de correio.",
+	"settings_server_provider_app_password": "{name} pede uma palavra-passe de aplicação: crie uma nas definições de segurança da conta e use-a como palavra-passe da caixa de correio.",
+	"migrations_new_source_files": "Ficheiro: PST, mbox, EML",
+	"migrations_new_add_server": "Adicionar outro servidor",
+	"migrations_steps_server": "Adicionar o servidor de destino",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak ou qualquer servidor IMAP. É verificado logo depois de guardar.",
+	"migrations_steps_new": "Criar uma migração",
+	"migrations_steps_new_hint": "De onde vem o correio (um PST ou outro ficheiro, Exchange, Microsoft 365, Google, IMAP) e a caixa de correio para onde vai. Muitas caixas de uma vez: importe um ficheiro CSV.",
+	"migrations_steps_start": "Iniciá-la",
+	"migrations_steps_start_hint": "O painel da caixa de correio diz o que ainda falta e depois Iniciar a migração copia tudo. O progresso aparece na lista."
 }

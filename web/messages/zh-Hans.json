@@ -584,7 +584,7 @@
 	"migrations_start_ready": "已就绪。已复制的项目会被跳过，因此启动两次不会产生重复。",
 	"migrations_start_unchecked": "登录尚未检查。开始前会再次检查。",
 	"migrations_new_source": "来源",
-	"migrations_new_source_hint": "PST 或其他邮件文件。Exchange、IMAP、Google 等服务器在保存后通过“来源与目标”选择。",
+	"migrations_new_source_hint": "服务器上已有的文件、现在要发送的文件，或稍后选择。",
 	"migrations_new_source_later": "稍后选择",
 	"migrations_new_source_file": "{name}，保存后发送",
 	"migrations_new_email_hint": "{server} 上接收邮件的邮箱。",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "失败：{count}",
 	"migrations_conn_untested": "未测试：{count}",
 	"migrations_conn_group": "连接检查",
-	"migrations_filter_tested_ok": "连接已验证"
+	"migrations_filter_tested_ok": "连接已验证",
+	"settings_server_provider": "服务商",
+	"settings_server_provider_other": "其他 IMAP 服务器",
+	"settings_server_provider_oauth": "Microsoft 不接受通过 IMAP 使用普通密码。要写入 Microsoft 365，请在每个邮箱的“来源与目标”中选择 Exchange Online。",
+	"settings_server_provider_app_password": "{name} 需要应用专用密码：请在账户的安全设置中创建一个，并将其用作邮箱密码。",
+	"migrations_new_source_files": "文件：PST、mbox、EML",
+	"migrations_new_add_server": "添加其他服务器",
+	"migrations_steps_server": "添加目标服务器",
+	"migrations_steps_server_hint": "Gmail、Microsoft 365、iCloud、Fastmail、Infomaniak 或任意 IMAP 服务器。保存后会立即检查。",
+	"migrations_steps_new": "创建迁移",
+	"migrations_steps_new_hint": "邮件来自哪里（PST 或其他文件、Exchange、Microsoft 365、Google、IMAP）以及要迁入的邮箱。一次处理多个邮箱：导入 CSV 文件。",
+	"migrations_steps_start": "开始迁移",
+	"migrations_steps_start_hint": "邮箱面板会说明还缺什么，然后“开始迁移”会复制全部内容。进度显示在列表中。"
 }

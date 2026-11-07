@@ -37,9 +37,11 @@
 		account: Account;
 		/** Called on every edit, so the parent can show what saving will do. */
 		onedit?: () => void;
+		/** A kind picked elsewhere (the new migration's tiles): the select is not shown. */
+		fixedKind?: string;
 	}
 
-	let { role, account, onedit }: Props = $props();
+	let { role, account, onedit, fixedKind }: Props = $props();
 
 	// What is stored when the dialog opens. The editor is mounted per role and per opening, so props do not change under it.
 	const stored = untrack(() => account[role]);
@@ -68,7 +70,7 @@
 		probeError = null;
 		problem = null;
 	}
-	applyKind(storedKind);
+	applyKind(untrack(() => fixedKind) ?? storedKind);
 
 	function edited() {
 		dirty = true;
@@ -110,7 +112,7 @@
 				role,
 				config: buildConfig(def, values),
 				...(secrets ? { secrets } : {}),
-				account_id: account.id
+				...(account.id > 0 ? { account_id: account.id } : {})
 			});
 		} catch (error) {
 			probeError = errorText(error);
@@ -133,6 +135,7 @@
 <!-- Edits bubble up from the inputs: one place marks the side as touched. -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="flex flex-col gap-3" data-testid={`route-${role}`} oninput={edited} onchange={edited} role="group" aria-label={role === 'source' ? m.migrations_route_source() : m.migrations_route_target()}>
+	{#if !fixedKind}
 	<label class="flex min-w-0 flex-col gap-1">
 		<span class="font-medium text-ink-2">{role === 'source' ? m.migrations_route_source() : m.migrations_route_target()}</span>
 		<select
@@ -149,6 +152,7 @@
 		</select>
 		<small class="text-xs text-ink-3">{kind ? (findKind(connectors.list, kind)?.description ?? '') : role === 'source' ? m.migrations_route_source_pst_hint() : m.migrations_route_target_server_hint()}</small>
 	</label>
+	{/if}
 
 	{#if kind && def}
 		<ConnectorForm role={def} bind:values bind:drafts {hasSecret} />
