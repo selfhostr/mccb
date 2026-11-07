@@ -33,6 +33,9 @@
 		try {
 			result = await post<CsvResult>('/accounts/import-csv', body);
 			await data.load();
+			// Every new or changed password is checked at once: the list shows which mailboxes answer.
+			const fresh = [...data.accounts.values()].filter((a) => a.server_id === serverId && a.status === 'new' && a.has_password).map((a) => a.id);
+			if (fresh.length) data.test(fresh);
 		} catch (err) {
 			error = errorText(err);
 		} finally {

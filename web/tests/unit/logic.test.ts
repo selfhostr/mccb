@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Account, Job, Pst } from '../../src/lib/api/types.ts';
-import { currentResult, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
+import { connectionCounts, connectionOf, currentResult, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
 import { createCoalescer } from '../../src/lib/logic/coalesce.ts';
 import { maskEmail, maskFile, maskHost, maskText } from '../../src/lib/logic/mask.ts';
 import { legacyRedirect, matchRoute, rowHref } from '../../src/lib/logic/routes.ts';
@@ -290,5 +290,16 @@ describe('mask', () => {
 		expect(out).not.toContain('dav.example');
 		expect(out).not.toContain('192.0.2.5');
 		expect(out).toContain('failed');
+	});
+});
+
+describe('connection at a glance', () => {
+	it('reads the last test as verified, failed or untested, and counts them', () => {
+		expect(connectionOf({ status: 'ok' })).toBe('ok');
+		expect(connectionOf({ status: 'new' })).toBe('untested');
+		expect(connectionOf({ status: 'auth_failed' })).toBe('failed');
+		expect(connectionOf({ status: 'error' })).toBe('failed');
+		const list = [{ status: 'ok' }, { status: 'ok' }, { status: 'auth_failed' }, { status: 'new' }] as const;
+		expect(connectionCounts(list)).toEqual({ ok: 2, failed: 1, untested: 1 });
 	});
 });

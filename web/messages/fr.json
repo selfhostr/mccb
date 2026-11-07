@@ -416,7 +416,6 @@
 	"settings_servers_sentence": "Là où les boîtes sont migrées.",
 	"settings_servers_title": "Serveurs",
 	"settings_server_test": "Tester {name}",
-	"settings_server_test_not_saved": "Le serveur ne stocke pas ce résultat. Il disparaît quand vous quittez la page. Les tests de comptes sont stockés.",
 	"settings_server_tuning": "Réglage et notes",
 	"settings_server_tuning_auto": "Automatique",
 	"settings_server_tuning_manual": "Manuel",
@@ -572,5 +571,13 @@
 	"migrations_row_server": "Serveur : {name}",
 	"migrations_row_open_details": "Ouvrir le détail de la migration",
 	"files_queue_remove": "Retirer de la liste",
-	"settings_appearance_more": "Densité et masquage"
+	"settings_appearance_more": "Densité et masquage",
+	"settings_server_check_ok": "Vérifié",
+	"settings_server_check_failed": "Échec de la vérification",
+	"settings_server_check_never": "Non vérifié",
+	"migrations_conn_ok": "Validés : {count}",
+	"migrations_conn_failed": "En échec : {count}",
+	"migrations_conn_untested": "Non testés : {count}",
+	"migrations_conn_group": "Vérification des connexions",
+	"migrations_filter_tested_ok": "Connexion validée"
 }

@@ -1,4 +1,7 @@
 <script lang="ts">
+	import CircleCheck from '@lucide/svelte/icons/circle-check';
+	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
+	import CircleX from '@lucide/svelte/icons/circle-x';
 	import FileUp from '@lucide/svelte/icons/file-up';
 	import Plus from '@lucide/svelte/icons/plus';
 	import Search from '@lucide/svelte/icons/search';
@@ -11,7 +14,7 @@
 	import { errorText, del } from '../../lib/api/client.ts';
 	import type { Account } from '../../lib/api/types.ts';
 	import { fmtLeft } from '../../lib/format.ts';
-	import { importPlan, type ImportPlan, matchesFilter, overallProgress, rowRank, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
+	import { connectionCounts, importPlan, type ImportPlan, matchesFilter, overallProgress, rowRank, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
 	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { headerState, splitSelection, toggleAllVisible } from '../../lib/logic/selection.ts';
 	import { VIRTUAL_AT, windowRange } from '../../lib/logic/virtual.ts';
@@ -79,6 +82,12 @@
 		void shape;
 		return summarize(scoped, jobOf);
 	});
+	const conn = $derived(connectionCounts(scoped));
+	const CONN_CHIPS = $derived([
+		{ value: 'tested_ok' as const, label: m.migrations_conn_ok({ count: conn.ok }), icon: CircleCheck, tone: 'text-signal-ink' },
+		{ value: 'test_failed' as const, label: m.migrations_conn_failed({ count: conn.failed }), icon: CircleX, tone: 'text-warning-ink' },
+		{ value: 'untested' as const, label: m.migrations_conn_untested({ count: conn.untested }), icon: CircleDashed, tone: 'text-ink-3' }
+	]);
 	const summary = $derived.by(() => {
 		void shape;
 		return summarize(all, jobOf);
@@ -116,7 +125,7 @@
 	]);
 
 	// Everything the chips do not cover waits behind one quiet button, and shows by itself when in use.
-	const hiddenFilter = $derived(!!(server || batch || status === 'untested' || status === 'test_failed' || status === 'no_pst'));
+	const hiddenFilter = $derived(!!(server || batch || status === 'no_pst'));
 	let moreOpen = $state(false);
 	$effect(() => {
 		if (hiddenFilter) moreOpen = true;
@@ -292,6 +301,20 @@
 						</button>
 					{/each}
 				</div>
+				<div class="flex flex-wrap items-center gap-1" role="group" aria-label={m.migrations_conn_group()} data-testid="conn-chips">
+					{#each CONN_CHIPS as chip (chip.value)}
+						{@const Icon = chip.icon}
+						<button
+							type="button"
+							class={`inline-flex min-h-10 items-center gap-1 rounded-btn px-2 text-sm transition-colors duration-200 ${status === chip.value ? 'bg-surface-2 text-ink' : 'text-ink-2 hover:text-ink'}`}
+							aria-pressed={status === chip.value}
+							onclick={() => router.setParams({ status: status === chip.value ? null : chip.value })}
+							data-testid={`conn-${chip.value}`}
+						>
+							<Icon size={14} class={chip.tone} />{chip.label}
+						</button>
+					{/each}
+				</div>
 				<Button variant="ghost" icon={SlidersHorizontal} aria-expanded={moreOpen} onclick={() => (moreOpen = !moreOpen)} data-testid="filter-more">{m.migrations_filter_more()}</Button>
 				<label class="relative ml-auto min-w-40 flex-1 basis-40 sm:max-w-[260px]">
 					<span class="sr-only">{m.migrations_filter_search()}</span>
@@ -311,6 +334,7 @@
 					<select class="input w-auto max-w-48" aria-label={m.migrations_filter_status()} value={status} onchange={(e) => router.setParams({ status: e.currentTarget.value || null })} data-testid="filter-status">
 						<option value="">{m.migrations_filter_all_status()}</option>
 						<option value="untested">{m.migrations_filter_untested()}</option>
+						<option value="tested_ok">{m.migrations_filter_tested_ok()}</option>
 						<option value="test_failed">{m.migrations_filter_test_failed()}</option>
 						<option value="no_pst">{m.migrations_filter_no_pst()}</option>
 						<option value="active">{m.migrations_filter_active()}</option>

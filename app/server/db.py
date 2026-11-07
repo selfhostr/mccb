@@ -276,6 +276,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     planning columns: servers.policy / accounts.policy (JSON: folder mapping, filters, allowed hours, bandwidth),
     jobs.batch_id / jobs.priority / jobs.pause_reason (see docs/planning.md)."""
     _add_column(conn, "servers", "policy TEXT")
+    _add_column(conn, "servers", "last_test REAL")         # time of the last connection test (NULL: never)
+    _add_column(conn, "servers", "last_test_result TEXT")  # JSON {imap, caldav, carddav: {ok, msg}}
     _add_column(conn, "accounts", "policy TEXT")
     _add_column(conn, "jobs", "batch_id INTEGER")
     _add_column(conn, "jobs", "priority INTEGER NOT NULL DEFAULT 0")

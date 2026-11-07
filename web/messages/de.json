@@ -416,7 +416,6 @@
 	"settings_servers_sentence": "Wohin die Postfächer migriert werden.",
 	"settings_servers_title": "Server",
 	"settings_server_test": "{name} testen",
-	"settings_server_test_not_saved": "Der Server speichert dieses Ergebnis nicht. Es verschwindet, wenn Sie die Seite verlassen. Kontotests werden gespeichert.",
 	"settings_server_tuning": "Abstimmung und Notizen",
 	"settings_server_tuning_auto": "Automatisch",
 	"settings_server_tuning_manual": "Manuell",
@@ -572,5 +571,13 @@
 	"migrations_row_server": "Server: {name}",
 	"migrations_row_open_details": "Migrationsdetails öffnen",
 	"files_queue_remove": "Aus der Liste entfernen",
-	"settings_appearance_more": "Dichte und Maskierung"
+	"settings_appearance_more": "Dichte und Maskierung",
+	"settings_server_check_ok": "Geprüft",
+	"settings_server_check_failed": "Prüfung fehlgeschlagen",
+	"settings_server_check_never": "Nicht geprüft",
+	"migrations_conn_ok": "Geprüft: {count}",
+	"migrations_conn_failed": "Fehlgeschlagen: {count}",
+	"migrations_conn_untested": "Nicht getestet: {count}",
+	"migrations_conn_group": "Verbindungsprüfung",
+	"migrations_filter_tested_ok": "Verbindung geprüft"
 }

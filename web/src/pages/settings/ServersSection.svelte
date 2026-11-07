@@ -1,5 +1,8 @@
 <script lang="ts">
 	import Check from '@lucide/svelte/icons/check';
+	import CircleCheck from '@lucide/svelte/icons/circle-check';
+	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
+	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import Pencil from '@lucide/svelte/icons/pencil';
@@ -34,9 +37,21 @@
 
 	let editing = $state.raw<Server | 'new' | null>(null);
 	let removing = $state.raw<Server | null>(null);
-	/** Server tests are not stored by the server: these last until the page closes, and the page says so. */
+	/** Tests run from this page: their details stay open until the page closes. The verdict itself is stored. */
 	const results = new SvelteMap<number, TestResult>();
 	const testing = new SvelteSet<number>();
+
+	const passed = (result: TestResult) => [result.imap, result.caldav, result.carddav].every((r) => !r || r.ok);
+
+	/** The verdict next to the name: verified, failed, never checked, or checking now. */
+	function verdict(server: Server) {
+		if (testing.has(server.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running() };
+		const result = results.get(server.id) ?? server.last_test_result;
+		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.settings_server_check_never() };
+		return passed(result)
+			? { tone: 'signal' as const, icon: CircleCheck, label: m.settings_server_check_ok() }
+			: { tone: 'warning' as const, icon: TriangleAlert, label: m.settings_server_check_failed() };
+	}
 
 	function securityLabel(value: Server['imap_security']) {
 		return value === 'ssl' ? m.settings_server_security_ssl() : value === 'starttls' ? m.settings_server_security_starttls() : m.settings_server_security_none();
@@ -47,6 +62,7 @@
 		testing.add(server.id);
 		try {
 			results.set(server.id, await post<TestResult>(`/servers/${server.id}/test`));
+			await data.reloadServers();
 		} catch (error) {
 			toast(errorText(error), 'warning');
 		} finally {
@@ -76,11 +92,16 @@
 		<Panel>
 			<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="server-list">
 				{#each data.servers as server (server.id)}
-					{@const result = results.get(server.id)}
+					{@const stored = server.last_test_result}
+					{@const result = results.get(server.id) ?? (stored && !passed(stored) ? stored : undefined)}
+					{@const look = verdict(server)}
 					<li class="py-2 pr-2 pl-4" data-server={server.name}>
 						<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
 							<div class="min-w-0 flex-1 basis-56">
-								<p class="m-0 font-medium">{server.name}</p>
+								<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
+									<span>{server.name}</span>
+									<span data-testid="server-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
+								</p>
 								<p class="m-0 font-mono text-xs text-ink-2">
 									{prefs.host(server.imap_host)}:{server.imap_port}
 								</p>
@@ -113,7 +134,6 @@
 									{/if}
 								{/each}
 							</ul>
-							<p class="m-0 mt-1 text-xs text-ink-3">{m.settings_server_test_not_saved()}</p>
 						{/if}
 					</li>
 				{/each}
@@ -136,7 +156,7 @@
 </Section>
 
 {#if editing}
-	<ServerDialog server={editing === 'new' ? null : editing} onclose={() => (editing = null)} />
+	<ServerDialog server={editing === 'new' ? null : editing} onclose={() => (editing = null)} onsaved={(saved) => test(saved)} />
 {/if}
 {#if removing}
 	{@const target = removing}
