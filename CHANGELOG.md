@@ -29,7 +29,7 @@
 - README and documentation describe every source and target, not only PST files.
 
 ## 1.1.2
-- The product is now MCCB (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.
+- The product is now mccb (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.
 - The session cookie is renamed: everyone signs in again once after the upgrade.
 - README and documentation restructured per the yety guidelines (docs/ pages, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, issue templates).
 

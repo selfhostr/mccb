@@ -51,7 +51,7 @@ def _admin_startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_app):
-    log.info("MCCB v%s starting (web)", get_version())
+    log.info("mccb v%s starting (web)", get_version())
     settings.ensure_dirs()
     db.conn()
     _admin_startup()

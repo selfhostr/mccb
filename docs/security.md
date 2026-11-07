@@ -1,6 +1,6 @@
 # Security
 
-This page lists what MCCB protects, and what it does not.
+This page lists what mccb protects, and what it does not.
 
 ## What it does
 
@@ -14,7 +14,7 @@ This page lists what MCCB protects, and what it does not.
 - **Server-side fetch.** The server refuses link-local addresses (169.254.0.0/16, fe80::/10, so the cloud metadata
   service), well-known metadata addresses, unspecified, multicast and reserved ranges. Names are resolved once, every
   address is checked, the connection goes to the checked address, and every redirect is checked again. Credentials are
-  not sent to another host after a redirect. Private ranges and loopback are allowed because MCCB is self-hosted and sources
+  not sent to another host after a redirect. Private ranges and loopback are allowed because mccb is self-hosted and sources
   are often on the LAN; set `FETCH_BLOCK_PRIVATE=1` to refuse them too. Fetch credentials and notification secrets are
   encrypted like mailbox passwords and never returned by the API.
 - **Notification targets** follow the same address policy (metadata and link-local refused).

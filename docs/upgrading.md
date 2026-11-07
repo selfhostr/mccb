@@ -1,6 +1,6 @@
-# Upgrade MCCB
+# Upgrade mccb
 
-By the end of this page MCCB will run a newer image with your data intact.
+By the end of this page mccb will run a newer image with your data intact.
 
 ```bash
 docker compose pull && docker compose up -d

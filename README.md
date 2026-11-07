@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://mccb.open.yety.ch"><img src=".github/assets/banner.svg" alt="MCCB: migrate mail, calendars and contacts between servers" width="100%"></a>
+<a href="https://mccb.open.yety.ch"><img src=".github/assets/banner.svg" alt="mccb: migrate mail, calendars and contacts between servers" width="100%"></a>
 
 <h3>Migrate mailboxes with their calendars and contacts between servers, in bulk, from a web dashboard.</h3>
 
@@ -14,7 +14,7 @@ Screenshots: [screenshots/](screenshots/)
 
 ## Overview
 
-MCCB (Mail Contact Calendrier Bridge) moves mail, calendars, contacts and tasks from a source to a target, one mailbox at a time, and runs as many mailboxes in parallel as the machine and the servers allow. It started as a PST importer and now reads and writes the usual protocols.
+mccb (Mail Contact Calendrier Bridge) moves mail, calendars, contacts and tasks from a source to a target, one mailbox at a time, and runs as many mailboxes in parallel as the machine and the servers allow. It started as a PST importer and now reads and writes the usual protocols.
 
 - **Built for batches.** Add servers, add mailboxes one by one or by CSV, choose a source and a target for each, run them all and read one report per mailbox.
 - **Built for big sources.** Resumable uploads, a drop folder and server-side fetch for large files, a preview and a dry run before anything is written.
@@ -89,10 +89,10 @@ Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md
 
 ## License
 
-MIT, see [LICENSE](LICENSE). MCCB is provided "as is", without warranty of any kind. Validate a migration on a test mailbox before running it on production data.
+MIT, see [LICENSE](LICENSE). mccb is provided "as is", without warranty of any kind. Validate a migration on a test mailbox before running it on production data.
 
-## Support MCCB
+## Support mccb
 
-MCCB is free. If it saves you time, you can support its development:
+mccb is free. If it saves you time, you can support its development:
 
 [Sponsor us on GitHub](https://github.com/sponsors/yetysw), recurring or one-off.
