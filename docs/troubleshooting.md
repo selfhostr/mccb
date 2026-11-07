@@ -24,7 +24,7 @@ The proxy must not buffer request bodies, must allow bodies of at least `UPLOAD_
 
 ## A PST is `invalid`
 
-The reason is shown on the Uploads page. A file without the `!BDN` signature is refused, and a crash of the native library during the scan gives "libpff crash during analysis". Encrypted or password-protected PSTs have no dedicated handling.
+The reason is shown on the Files page. A file without the `!BDN` signature is refused, and a crash of the native library during the scan gives "libpff crash during analysis". Encrypted or password-protected PSTs have no dedicated handling.
 
 ## A job fails with "The subprocess crashed N times"
 

@@ -36,7 +36,7 @@ docker compose logs web | grep -A2 "Admin password"
 ```
 
 1. Open `http://<host>:22362` and sign in with the printed password (shown once).
-2. Add a server, then mailboxes. Give each a source (a PST or another file, or a live server) and run.
+2. On **Servers**, add the destination server. Then **New migration**: pick the source (a PST or another file, or a live server such as IMAP or Microsoft 365) and the mailbox it goes to, and start it from its panel.
 3. Put it behind a reverse proxy with HTTPS: port 22362 speaks plain HTTP.
 
 Back up `./data`, including `secret.key`: without it the stored mailbox passwords cannot be decrypted. Details: [install](docs/install.md), [backup](docs/backup.md), [upgrading](docs/upgrading.md).
