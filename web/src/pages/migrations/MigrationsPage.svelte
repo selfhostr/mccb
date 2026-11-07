@@ -22,7 +22,6 @@
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
-	import Menu from '../../lib/ui/Menu.svelte';
 	import { slide } from '../../lib/ui/motion.ts';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
@@ -229,22 +228,22 @@
 		setTimeout(() => document.querySelector<HTMLElement>(selector)?.focus());
 	}
 
-	const addItems = $derived([
-		{ label: m.migrations_add_account(), icon: Plus, onselect: () => (dialog = { kind: 'add' }) },
-		{ label: m.migrations_add_csv(), icon: FileUp, onselect: () => (dialog = { kind: 'csv' }) }
-	]);
+	/** The start button of one mailbox's panel: the same dialog as for a selection, with one mailbox. */
+	function startOne(account: Account) {
+		dialog = { kind: 'import', plan: importPlan([account], (id) => data.jobs.get(id), (id) => data.psts.get(id)) };
+	}
 </script>
 
 <svelte:window onscroll={onScroll} onresize={measure} />
 
 {#snippet settings(id: number)}
-	<AccountSettings {id} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} />
+	<AccountSettings {id} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
 {/snippet}
 
 <PageHeader title={m.migrations_page_title()} {sentence}>
 	{#snippet actions()}
 		{#if data.servers.length}
-			<Menu label={m.migrations_add_label()} text={m.migrations_add_label()} items={addItems} primary />
+			<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration">{m.migrations_add_label()}</Button>
 		{/if}
 	{/snippet}
 </PageHeader>
@@ -269,7 +268,7 @@
 	{:else if !data.accounts.size}
 		<EmptyState icon={Users} title={m.migrations_empty_no_account_title()} description={m.migrations_empty_no_account_text()}>
 			{#snippet action()}
-				<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })}>{m.migrations_add_account()}</Button>
+				<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })}>{m.migrations_add_label()}</Button>
 				<Button icon={FileUp} onclick={() => (dialog = { kind: 'csv' })}>{m.migrations_add_csv()}</Button>
 			{/snippet}
 		</EmptyState>
@@ -417,7 +416,7 @@
 {/if}
 
 {#if dialog?.kind === 'add'}
-	<AccountDialog defaultServer={server} onclose={closeDialog} />
+	<AccountDialog defaultServer={server} onclose={closeDialog} oncsv={() => (dialog = { kind: 'csv' })} />
 {:else if dialog?.kind === 'edit'}
 	<AccountDialog account={dialog.account} onclose={closeDialog} />
 {:else if dialog?.kind === 'csv'}
