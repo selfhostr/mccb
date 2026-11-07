@@ -257,7 +257,7 @@ test.describe('policies', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
 	test('a server: rules, hours and bandwidth, with the reason when the server refuses', async ({ page }) => {
-		await ready(page, '/settings');
+		await ready(page, '/servers');
 		await page.getByRole('button', { name: 'More actions for Production' }).click();
 		await page.getByRole('menuitem', { name: 'Edit' }).click();
 		const dialog = page.getByRole('dialog');
@@ -337,7 +337,7 @@ test.describe('policies', () => {
 
 	test('the server dialog fits a phone', async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
-		await ready(page, '/settings');
+		await ready(page, '/servers');
 		await page.getByRole('button', { name: 'More actions for Production' }).click();
 		await page.getByRole('menuitem', { name: 'Edit' }).click();
 		await page.getByRole('dialog').getByTestId('policy').locator('summary').click();

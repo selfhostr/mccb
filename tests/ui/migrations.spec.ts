@@ -347,6 +347,6 @@ test.describe('migrations', () => {
 		await page.goto('/#/uploads');
 		await expect(page).toHaveURL(/\/files$/);
 		await page.goto('/#/servers');
-		await expect(page).toHaveURL(/\/settings#servers$/);
+		await expect(page).toHaveURL(/\/servers$/);
 	});
 });
