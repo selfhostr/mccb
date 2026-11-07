@@ -1,4 +1,4 @@
-export type Page = 'migrations' | 'files' | 'settings';
+export type Page = 'migrations' | 'files' | 'servers' | 'settings';
 
 export interface Route {
 	page: Page;
@@ -10,6 +10,7 @@ export function matchRoute(path: string): Route {
 	const job = /^\/jobs\/(\d+)$/.exec(clean);
 	if (job) return { page: 'migrations', jobId: Number(job[1]) };
 	if (clean === '/files') return { page: 'files', jobId: null };
+	if (clean === '/servers') return { page: 'servers', jobId: null };
 	if (clean === '/settings') return { page: 'settings', jobId: null };
 	return { page: 'migrations', jobId: null };
 }
@@ -45,7 +46,8 @@ export function legacyRedirect(path: string, hash: string): string | null {
 		case '/uploads':
 			return '/files';
 		case '/servers':
-			return '/settings#servers';
+			// Now a page of its own: only the old hash form needs to move.
+			return hash.startsWith('#/') ? '/servers' : null;
 		default:
 			break;
 	}

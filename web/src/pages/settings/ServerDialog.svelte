@@ -11,7 +11,7 @@
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import PolicyFields from './PolicyFields.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
-	import Mark from '../../lib/ui/Mark.svelte';
+	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import { PROVIDERS, providerOf, type Provider } from '../../lib/logic/providers.ts';
 
@@ -84,7 +84,7 @@
 							onclick={() => pick(item)}
 							data-provider={item.id}
 						>
-							<Mark mono={item.mono} tone={item.tone} size={28} />
+							<KindIcon icon={item.icon} size={28} />
 							<span class="min-w-0 truncate">{item.id === 'imap' ? m.settings_server_provider_other() : item.name}</span>
 						</button>
 					{/each}

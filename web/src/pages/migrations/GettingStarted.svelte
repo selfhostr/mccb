@@ -4,9 +4,7 @@
 	import FileUp from '@lucide/svelte/icons/file-up';
 	import Plus from '@lucide/svelte/icons/plus';
 	import { m } from '#lib/paraglide/messages.js';
-	import { PROVIDERS } from '../../lib/logic/providers.ts';
 	import Button from '../../lib/ui/Button.svelte';
-	import Mark from '../../lib/ui/Mark.svelte';
 
 	interface Props {
 		hasServer: boolean;
@@ -40,12 +38,7 @@
 					<p class={`m-0 font-semibold ${i > current ? 'text-ink-2' : ''}`}>{step.title}</p>
 					<p class="m-0 text-ink-2">{step.hint}</p>
 					{#if i === 0 && i === current}
-						<div class="flex flex-wrap items-center gap-2">
-							<Button variant="primary" icon={Plus} onclick={onserver}>{m.migrations_empty_no_server_action()}</Button>
-							<span class="flex gap-1" aria-hidden="true">
-								{#each PROVIDERS as p (p.id)}<Mark mono={p.mono} tone={p.tone} size={24} />{/each}
-							</span>
-						</div>
+						<div><Button variant="primary" icon={Plus} onclick={onserver}>{m.migrations_empty_no_server_action()}</Button></div>
 					{:else if i === 1 && i === current}
 						<div class="flex flex-wrap gap-2">
 							<Button variant="primary" icon={Plus} onclick={onnew}>{m.migrations_add_label()}</Button>

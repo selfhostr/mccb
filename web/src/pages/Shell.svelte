@@ -3,6 +3,7 @@
 	import FolderOpen from '@lucide/svelte/icons/folder-open';
 	import FolderUp from '@lucide/svelte/icons/folder-up';
 	import LogOut from '@lucide/svelte/icons/log-out';
+	import Server from '@lucide/svelte/icons/server';
 	import Settings from '@lucide/svelte/icons/settings';
 	import Unplug from '@lucide/svelte/icons/unplug';
 	import Wifi from '@lucide/svelte/icons/wifi';
@@ -20,6 +21,7 @@
 	import { uploads } from '../lib/upload/store.svelte.ts';
 	import FilesPage from './files/FilesPage.svelte';
 	import MigrationsPage from './migrations/MigrationsPage.svelte';
+	import ServersPage from './settings/ServersPage.svelte';
 	import SettingsPage from './settings/SettingsPage.svelte';
 
 	/** extra: only the static demo passes one (its badge); the product never does. */
@@ -33,17 +35,8 @@
 	const NAV = $derived([
 		{ page: 'migrations', href: '/', label: m.shell_nav_migrations(), icon: ArrowRightLeft, count: attention, alert: attention > 0 },
 		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: FolderOpen, count: data.psts.size, alert: false },
+		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length, alert: false },
 		{ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false }
-	]);
-	// Settings is one long page: its parts are reachable from the side.
-	const SETTINGS = $derived([
-		{ id: 'servers', label: m.settings_servers_title() },
-		{ id: 'intake', label: m.settings_intake_title() },
-		{ id: 'notifications', label: m.settings_notifications_title() },
-		{ id: 'tuning', label: m.settings_tuning_title() },
-		{ id: 'password', label: m.settings_password_title() },
-		{ id: 'tokens', label: m.settings_tokens_title() },
-		{ id: 'appearance', label: m.settings_appearance_title() }
 	]);
 
 	const sending = $derived(uploads.items.filter((i) => i.status === 'starting' || i.status === 'uploading' || i.status === 'completing'));
@@ -102,13 +95,6 @@
 						<span class={`rounded-plate px-1.5 font-mono text-xs ${item.alert ? 'bg-warning-soft text-warning-ink' : 'text-ink-3'}`}>{item.count}</span>
 					{/if}
 				</a>
-				{#if item.page === 'settings' && current}
-					<ul class="m-0 mb-1 ml-5 flex list-none flex-col border-l border-line p-0 pl-2">
-						{#each SETTINGS as part (part.id)}
-							<li><a class="flex min-h-9 items-center rounded-btn px-3 text-ink-2 no-underline hover:bg-ghost hover:text-ink" href={`/settings#${part.id}`}>{part.label}</a></li>
-						{/each}
-					</ul>
-				{/if}
 			{/each}
 		</nav>
 		<div class="mt-auto flex flex-col gap-1 border-t border-line p-3">
@@ -149,6 +135,8 @@
 		<MigrationsPage />
 	{:else if router.route.page === 'files'}
 		<FilesPage />
+	{:else if router.route.page === 'servers'}
+		<ServersPage />
 	{:else}
 		<SettingsPage />
 	{/if}

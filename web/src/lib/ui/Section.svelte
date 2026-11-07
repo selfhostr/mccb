@@ -8,14 +8,16 @@
 		sentence: string;
 		actions?: Snippet;
 		children: Snippet;
+		/** The page header already names it: only the actions show. */
+		bare?: boolean;
 	}
 
-	let { id, title, sentence, actions, children }: Props = $props();
+	let { id, title, sentence, actions, children, bare = false }: Props = $props();
 </script>
 
 <section {id} class="scroll-mt-[calc(var(--bar-h)+12px)]" data-testid={`section-${id}`}>
 	<div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-		<div class="min-w-0 flex-1 basis-56">
+		<div class={`min-w-0 flex-1 basis-56 ${bare ? 'sr-only' : ''}`}>
 			<h2 class="text-base">{title}</h2>
 			<p class="m-0 mt-1 text-ink-2">{sentence}</p>
 		</div>

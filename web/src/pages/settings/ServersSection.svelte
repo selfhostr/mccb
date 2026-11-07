@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Mark from '../../lib/ui/Mark.svelte';
+	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import { providerOf } from '../../lib/logic/providers.ts';
 	import Check from '@lucide/svelte/icons/check';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
@@ -83,7 +83,7 @@
 	}
 </script>
 
-<Section id="servers" title={m.settings_servers_title()} sentence={m.settings_servers_sentence()}>
+<Section id="servers" title={m.settings_servers_title()} sentence={m.settings_servers_sentence()} bare>
 	{#snippet actions()}
 		<Button icon={Plus} onclick={() => (editing = 'new')}>{m.settings_servers_add()}</Button>
 	{/snippet}
@@ -100,7 +100,7 @@
 					{@const brand = providerOf(server.imap_host)}
 					<li class="py-2 pr-2 pl-4" data-server={server.name}>
 						<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-							<Mark mono={brand.mono} tone={brand.tone} />
+							<KindIcon icon={brand.icon} />
 							<div class="min-w-0 flex-1 basis-56">
 								<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 									<span>{server.name}</span>

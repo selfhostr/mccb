@@ -87,16 +87,3 @@ html[data-density='comfortable'] {
 	}
 }
 
-/* Marks of mail systems and file kinds (Mark.svelte): fixed colours, the same in both themes. */
-:root {
-	--c-mark-fastmail: #0067b9;
-	--c-mark-infomaniak: #0098ff;
-	--c-mark-microsoft: #0f6cbd;
-	--c-mark-jmap: #2f7d5b;
-	--c-mark-icloud: #3478f6;
-	--c-mark-neutral: #5b6472;
-	--c-mark-dav: #6b4fbb;
-	--c-mark-file: #7a5c2e;
-	--c-mark-pst: #b7472a;
-	--c-mark-google: #c5221f;
-}

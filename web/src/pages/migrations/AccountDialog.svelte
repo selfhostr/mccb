@@ -13,9 +13,9 @@
 	import { fmtBytes } from '../../lib/format.ts';
 	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { kindsFor } from '../../lib/logic/connector.ts';
-	import { kindMark, providerOf } from '../../lib/logic/providers.ts';
+	import { kindIcon, providerOf } from '../../lib/logic/providers.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
-	import Mark from '../../lib/ui/Mark.svelte';
+	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import EndpointEditor from './EndpointEditor.svelte';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { router } from '../../lib/router.svelte.ts';
@@ -133,7 +133,6 @@
 				<legend class="mb-2 p-0 text-sm font-semibold">{m.migrations_step_from()}</legend>
 				<div class="grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label={m.migrations_step_from()} data-testid="source-kinds">
 					{#each [{ kind: FILE_TILE, label: m.migrations_new_source_files() }, ...sourceKinds.map((c) => ({ kind: c.kind, label: c.label || c.kind }))] as tile (tile.kind)}
-						{@const mark = kindMark(tile.kind === FILE_TILE ? 'pst' : tile.kind, tile.label)}
 						<button
 							type="button"
 							role="radio"
@@ -142,7 +141,7 @@
 							onclick={() => (sourceKind = tile.kind)}
 							data-kind={tile.kind}
 						>
-							<Mark mono={mark.mono} tone={mark.tone} size={28} />
+							<KindIcon icon={kindIcon(tile.kind === FILE_TILE ? 'pst' : tile.kind)} size={28} />
 							<span class="min-w-0 text-xs leading-tight">{tile.label}</span>
 						</button>
 					{/each}
@@ -178,12 +177,12 @@
 								class={`flex min-h-12 items-center gap-2 rounded-btn border px-2 text-left transition-colors duration-200 ${Number(serverId) === item.id ? 'border-ink-3 bg-surface-2 text-ink' : 'border-line-strong text-ink-2 hover:text-ink'}`}
 								onclick={() => (serverId = item.id)}
 							>
-								<Mark mono={brand.mono} tone={brand.tone} size={28} />
+								<KindIcon icon={brand.icon} size={28} />
 								<span class="flex min-w-0 flex-col"><span class="truncate font-medium">{item.name}</span><span class="truncate font-mono text-xs text-ink-3">{prefs.host(item.imap_host)}</span></span>
 							</button>
 						{/each}
 					</div>
-					<a class="self-start text-xs" href="/settings#servers" onclick={onclose}>{m.migrations_new_add_server()}</a>
+					<a class="self-start text-xs" href="/servers" onclick={onclose}>{m.migrations_new_add_server()}</a>
 				</div>
 				<Field label={m.migrations_account_email()} hint={serverName ? m.migrations_new_email_hint({ server: serverName }) : undefined}>
 					<input class="input font-mono" type="email" required autocomplete="off" bind:value={email} />
