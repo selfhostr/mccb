@@ -26,8 +26,8 @@ This page describes the details of one import: authentication, uploads, folders,
 - **Sending.** Parallel APPEND over N connections (server `workers`), reconnect and exponential
   backoff on temporary errors (`IMAP_MAX_RETRIES`). Permanent errors are recorded per
   item. Exceeding the quota fails the job.
-- **Checks.** After the mail phase, for each folder, `STATUS MESSAGES` must be at least equal to the number of mails
-  sent. At the end of the job, `VERIFY_SAMPLE` mails are re-read by header and compared by hash. DAV
+- **Checks.** At the end of the job, for each folder, the messages bearing the import id of this PST must be at least
+  as many as the mails sent, and `VERIFY_SAMPLE` mails are re-read by header and compared by hash. DAV
   resources are counted.
 - **Real time.** `GET /api/events` (SSE) relays changes, detected by SQLite triggers
   (the worker is another process).

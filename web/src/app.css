@@ -1,0 +1,296 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter/wght.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+@import './tokens.css';
+
+/* The default palette is gone: a colour that is not a token does not compile into anything. */
+@theme inline {
+	--color-*: initial;
+	--color-canvas: var(--c-canvas);
+	--color-canvas-deep: var(--c-canvas-deep);
+	--color-surface: var(--c-surface);
+	--color-surface-2: var(--c-surface-2);
+	--color-line: var(--c-line);
+	--color-line-strong: var(--c-line-strong);
+	--color-ink: var(--c-ink);
+	--color-ink-2: var(--c-ink-2);
+	--color-ink-3: var(--c-ink-3);
+	--color-ghost: var(--c-ghost);
+	--color-signal-ink: var(--c-signal-ink);
+	--color-advisory: var(--c-advisory);
+	--color-advisory-ink: var(--c-advisory-ink);
+	--color-advisory-soft: var(--c-advisory-soft);
+	--color-warning: var(--c-warning);
+	--color-warning-ink: var(--c-warning-ink);
+	--color-warning-soft: var(--c-warning-soft);
+	--color-info-ink: var(--c-info-ink);
+	--color-primary: var(--c-primary);
+	--color-on-primary: var(--c-on-primary);
+	--font-sans: var(--font-ui);
+	--font-mono: var(--font-code);
+	--shadow-float: var(--c-shadow-float);
+}
+
+@theme {
+	--radius-plate: 6px;
+	--radius-btn: 8px;
+	--radius-card: 12px;
+}
+
+@layer base {
+	html {
+		font-size: 16px;
+		-webkit-text-size-adjust: 100%;
+	}
+	body {
+		margin: 0;
+		background: var(--c-canvas);
+		color: var(--c-ink);
+		font-family: var(--font-ui);
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		font-variant-numeric: tabular-nums;
+		overflow-x: hidden;
+		overflow-wrap: anywhere;
+	}
+	h1,
+	h2,
+	h3 {
+		font-weight: 600;
+		letter-spacing: -0.02em;
+		line-height: 1.2;
+		text-wrap: balance;
+		margin: 0;
+	}
+	:focus-visible {
+		outline: 2px solid var(--c-ink);
+		outline-offset: 2px;
+		border-radius: 2px;
+	}
+	svg.lucide {
+		stroke-width: 1.8;
+		flex-shrink: 0;
+	}
+	dialog {
+		color: inherit;
+	}
+	dialog::backdrop {
+		background: var(--c-scrim);
+	}
+	a {
+		color: inherit;
+	}
+}
+
+@layer components {
+	.input {
+		min-height: 40px;
+		width: 100%;
+		min-width: 0;
+		padding: 0 10px;
+		border: 1px solid var(--c-line-strong);
+		border-radius: var(--radius-btn);
+		background: var(--c-surface);
+		color: var(--c-ink);
+		font: inherit;
+		transition: border-color 200ms var(--ease);
+	}
+	.input:hover {
+		border-color: var(--c-ink-3);
+	}
+	textarea.input {
+		padding: 8px 10px;
+	}
+	select.input {
+		text-overflow: ellipsis;
+	}
+	/* A 40 px target around an ordinary checkbox. */
+	.check {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 40px;
+		min-height: 40px;
+		gap: 8px;
+		cursor: pointer;
+	}
+	.check input {
+		width: 16px;
+		height: 16px;
+		margin: 0;
+		accent-color: var(--c-ink);
+		cursor: inherit;
+	}
+	.skip {
+		position: absolute;
+		left: 8px;
+		top: -64px;
+		z-index: 60;
+		padding: 8px 12px;
+		border-radius: var(--radius-btn);
+		background: var(--c-primary);
+		color: var(--c-on-primary);
+	}
+	.skip:focus {
+		top: 8px;
+	}
+	.bar-fill {
+		width: 100%;
+		height: 100%;
+		transform-origin: 0 50%;
+		transition: transform 400ms var(--ease);
+		will-change: transform;
+	}
+	[dir='rtl'] .bar-fill {
+		transform-origin: 100% 50%;
+	}
+	/*
+	 * One panel of rows, on the migrations and files pages. A row is a grid, and the link in it
+	 * stretches over the whole row: the checkbox and the menu stay above it, everything else clicks through.
+	 */
+	.row-list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.row-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 4px 12px;
+		min-height: 40px;
+		padding: 0 8px;
+		color: var(--c-ink-2);
+	}
+	.acct-row,
+	.file-row {
+		display: grid;
+		align-items: center;
+		min-height: var(--row-h);
+		border-top: 1px solid var(--c-line);
+		transition: background-color 200ms var(--ease);
+	}
+	.acct-row:hover,
+	.file-row:hover {
+		background: var(--c-surface-2);
+	}
+	/* A row's hover colour keeps to the panel's corners. */
+	.row-list:last-child > li:last-child {
+		border-radius: 0 0 calc(var(--radius-card) - 1px) calc(var(--radius-card) - 1px);
+	}
+	/* The first row of a panel has the panel's own edge above it. */
+	.row-panel .row-list:first-child > .file-row:first-child {
+		border-top: 0;
+	}
+	.acct-row {
+		position: relative;
+		grid-template: 'sel who status bar menu' auto / 40px minmax(0, 2fr) minmax(0, 160px) minmax(140px, 2fr) 40px;
+		column-gap: 16px;
+		padding: 4px 8px;
+	}
+	.acct-row.is-selected {
+		background: var(--c-ghost);
+	}
+	.acct-sel {
+		grid-area: sel;
+		position: relative;
+		z-index: 1;
+	}
+	.acct-who {
+		grid-area: who;
+		min-width: 0;
+	}
+	.acct-link {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		min-height: 40px;
+		text-decoration: none;
+	}
+	.acct-link::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+	}
+	.acct-link:focus-visible {
+		outline: none;
+	}
+	.acct-link:focus-visible::after {
+		outline: 2px solid var(--c-ink);
+		outline-offset: -2px;
+	}
+	.acct-status {
+		grid-area: status;
+		min-width: 0;
+		pointer-events: none;
+	}
+	.acct-bar {
+		grid-area: bar;
+		min-width: 0;
+		pointer-events: none;
+	}
+	.acct-menu {
+		grid-area: menu;
+		position: relative;
+	}
+	.file-row {
+		grid-template: 'name kind size status bar menu' auto / minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
+		column-gap: 16px;
+		padding: 8px 8px 8px 16px;
+	}
+	.file-name {
+		grid-area: name;
+		min-width: 0;
+	}
+	.file-kind {
+		grid-area: kind;
+		min-width: 0;
+	}
+	.file-size {
+		grid-area: size;
+		min-width: 0;
+	}
+	.file-status {
+		grid-area: status;
+		min-width: 0;
+	}
+	.file-bar {
+		grid-area: bar;
+		min-width: 0;
+	}
+	.file-menu {
+		grid-area: menu;
+	}
+
+	/* Rows wrap on phones: every account row keeps the same two lines, the window depends on it. */
+	@media (max-width: 47.99rem) {
+		.acct-row {
+			grid-template:
+				'sel who who menu' auto
+				'. status bar .' auto / 40px minmax(0, 1fr) minmax(0, 1fr) 40px;
+			column-gap: 8px;
+			row-gap: 2px;
+			padding: 6px 4px 10px;
+		}
+		.file-row {
+			grid-template:
+				'name name name menu' auto
+				'kind size status menu' auto
+				'bar bar bar bar' auto / auto auto minmax(0, 1fr) 40px;
+			column-gap: 12px;
+			row-gap: 4px;
+		}
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0.01ms !important;
+		animation: none !important;
+		scroll-behavior: auto !important;
+	}
+}

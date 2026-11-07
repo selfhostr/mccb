@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from . import crash, db, repo, tuner
+from . import crash, db, intake, notify, planning, repo, tuner
 from .config import settings
 
 log = logging.getLogger("worker")
@@ -34,11 +34,19 @@ class Worker:
         self.concurrency = concurrency or settings.worker_concurrency or 1
         self._probe: tuner.MachineProbe | None = None
         self._probe_t = 0.0
+        self._disk_busy = False
+        self._disk_prev: tuple[float, int] | None = None
+        self._extra = 0                                 # jobs above the static choice, while the machine stays idle
+        self._extra_t = 0.0
+        self._extra_cpu: tuple[float, float] | None = None
         self.threads: dict[int, threading.Thread] = {}
         self.stop_event = threading.Event()
         self.validating: dict[int, threading.Thread] = {}
         self.procs: dict[tuple[str, int], subprocess.Popen] = {}
         self.lock = threading.Lock()
+        self.intake = intake.Intake(self.stop_event)   # drop folder, remote fetch, auto chain
+        self.notifier = notify.Notifier()               # polls the DB; delivery on its own thread
+        self.planner = planning.Jobs()                  # dry runs and comparisons asked through the API
 
     # -------------------------------------------------- crash recovery
     def recover(self, startup: bool = False) -> None:
@@ -69,7 +77,7 @@ class Worker:
             r = c.execute(
                 "SELECT j.id FROM jobs j WHERE j.status='queued' AND NOT EXISTS ("
                 " SELECT 1 FROM jobs k WHERE k.account_id=j.account_id AND k.id<>j.id AND k.status IN ('running','stopping'))"
-                " ORDER BY j.id LIMIT 1").fetchone()
+                " ORDER BY j.priority DESC, j.id LIMIT 1").fetchone()
             if not r:
                 return None
             c.execute("UPDATE jobs SET status='running', worker_id=?, heartbeat=?, started_at=COALESCE(started_at, ?), "
@@ -148,17 +156,78 @@ class Worker:
         for t in list(self.threads.values()) + list(self.validating.values()):
             t.join(5)
 
+    def _server_pressure(self, now: float) -> bool:
+        """A target server reported a limit or an error recently (see JobRunner._server_share)."""
+        for r in db.q("SELECT value FROM kv WHERE key LIKE 'server:%:pressure'"):
+            try:
+                if now - float(r["value"]) < 60:
+                    return True
+            except ValueError:
+                pass
+        return False
+
+    def _check_disk(self, now: float) -> None:
+        """Is the disk the limit? More mailboxes would then only add seeks. PSI when the kernel has it (tasks waiting
+        for I/O more than half of the time), else the busy time of the device holding the PSTs (> 95 %)."""
+        busy = False
+        pressure = tuner.io_pressure()
+        if pressure is not None:
+            busy = pressure > 50
+        else:
+            ticks = tuner.disk_io_ticks(str(settings.pst_dir))
+            prev, self._disk_prev = self._disk_prev, (now, ticks) if ticks is not None else None
+            if prev is not None and ticks is not None and now > prev[0]:
+                busy = (ticks - prev[1]) / 1000 / (now - prev[0]) > 0.95
+        if busy != self._disk_busy:
+            self._disk_busy = busy
+            log.info("concurrency (auto): disk %s", "saturated, no new job for now" if busy else "no longer saturated")
+
+    def _tune_extra(self, now: float, base: int, running: int, queued: int) -> None:
+        """Jobs often wait for their target, not for the CPU: the static choice then leaves the machine idle while
+        mailboxes queue. Every 30 s: one job more if 2 cores stayed idle, memory and disk are fine and no target
+        complained; one less (for the next admissions, nothing is stopped) if no core is idle any more."""
+        if now - self._extra_t < 30:
+            return
+        self._extra_t = now
+        cur = tuner.proc_stat()
+        prev, self._extra_cpu = self._extra_cpu, cur
+        if cur is None or prev is None or cur[1] <= prev[1] or self._probe is None:
+            return
+        idle = self._probe.cpus * (cur[0] - prev[0]) / (cur[1] - prev[1])
+        if idle < 0.5:
+            if self._extra:
+                self._extra -= 1
+                log.info("concurrency (auto): no idle core, %d job(s) above the static choice", self._extra)
+            return
+        if (idle >= 2.0 and queued > 0 and running >= base + self._extra
+                and self._probe.mem_available_bytes >= tuner.JOB_ADMIT_MEM_BYTES
+                and not self._disk_busy and not self._server_pressure(now)):
+            self._extra += 1
+            log.info("concurrency (auto): %.1f idle cores with jobs waiting, %d job(s) above the static choice",
+                     idle, self._extra)
+
     def auto_limit(self) -> int:
-        """Jobs to run in parallel in auto mode (no benchmark: cores + available memory, refreshed every 30 s)."""
+        """Jobs to run in parallel in auto mode (no benchmark: cores, available memory, queue; refreshed every 10 s),
+        plus the jobs that the idle cores allow (_tune_extra), none more while disk or memory are the limit."""
         now = time.time()
-        if self._probe is None or now - self._probe_t > 30:
+        if self._probe is None or now - self._probe_t > 10:
             self._probe, self._probe_t = tuner.probe_machine(), now
+            self._check_disk(now)
         queued = db.q1("SELECT COUNT(*) n FROM jobs WHERE status='queued'")["n"]
         running = len(self.threads)
+        free = self._probe.mem_available_bytes
         # memory already held by the running jobs is not "available" any more: counted back in
-        mem = self._probe.mem_available_bytes + running * 512 * 1024 * 1024 if self._probe.mem_available_bytes else None
-        return max(1, tuner.choose_worker_concurrency(self._probe.cpus, pending=queued + running,
-                                                      mem_available_bytes=mem))
+        mem = free + running * 512 * 1024 * 1024 if free else None
+        base = tuner.choose_worker_concurrency(self._probe.cpus, pending=queued + running, mem_available_bytes=mem)
+        self._tune_extra(now, base, running, queued)
+        limit = min(base + self._extra, tuner.MAX_JOBS, max(1, queued + running))
+        if running and (self._disk_busy or (free and free < tuner.JOB_ADMIT_MEM_BYTES)):
+            limit = min(limit, running)  # nothing new starts until it comes back; nothing running is stopped
+        return max(1, limit)
+
+    def _validate_limit(self) -> int:
+        """PST analyses in parallel: a folder walk per file, light for the CPU, read-only."""
+        return max(2, min(8, (self._probe.cpus if self._probe else os.cpu_count() or 2) // 2))
 
     def tick(self) -> None:
         for jid, t in list(self.threads.items()):
@@ -169,10 +238,22 @@ class Worker:
                 del self.validating[pid]
         # pending PST validations
         for r in db.q("SELECT id FROM psts WHERE status='validating'"):
-            if r["id"] not in self.validating and len(self.validating) < 2:
+            if r["id"] not in self.validating and len(self.validating) < self._validate_limit():
                 t = threading.Thread(target=self._validate, args=(r["id"],), daemon=True, name=f"validate-{r['id']}")
                 self.validating[r["id"]] = t
                 t.start()
+        # server-side intake and notifications: isolated, they must never break the job loop
+        for part in (self.intake, self.notifier):
+            try:
+                part.tick()
+            except Exception:
+                log.exception("%s", type(part).__name__)
+        # dry runs, comparisons and the allowed hours of the servers: isolated like the parts above
+        for part in (self.planner.tick, planning.window_tick):
+            try:
+                part()
+            except Exception:
+                log.exception("planning")
         # jobs
         if self.auto_concurrency:
             n = self.auto_limit()
@@ -201,6 +282,7 @@ class Worker:
         settings.ensure_dirs()
         db.conn()
         self.recover(startup=True)
+        self.planner.recover()
         last_recover = time.time()
         log.info("worker %s started (concurrency %s)", self.id,
                  f"auto, {self.auto_limit()} now" if self.auto_concurrency else self.concurrency)
@@ -215,6 +297,7 @@ class Worker:
             self.stop_event.wait(poll)
         # clean shutdown: subprocesses terminated, then running jobs re-queued (idempotent resume)
         self.terminate_children()
+        self.intake.join(5)
         for jid in list(self.threads):
             cur = db.ex("UPDATE jobs SET status='queued', worker_id=NULL WHERE id=? AND status='running' AND worker_id=?",
                         (jid, self.id))

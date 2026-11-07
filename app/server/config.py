@@ -36,6 +36,13 @@ class Settings:
         self.max_child_crashes = max(1, _int("MAX_CHILD_CRASHES", 3))
         # time allowed for subprocesses to stop (SIGTERM) before SIGKILL
         self.child_term_grace = _int("CHILD_TERM_GRACE", 20)
+        # drop folder watched by the worker (can be a mount); default DATA_DIR/inbox
+        self.inbox_override = os.environ.get("INBOX_DIR", "")
+        # server-side fetch: 1 = also refuse private ranges (default: only link-local / metadata)
+        self.fetch_block_private = os.environ.get("FETCH_BLOCK_PRIVATE", "0") == "1"
+        # 1 = allow link-local / metadata addresses (not recommended)
+        self.fetch_allow_link_local = os.environ.get("FETCH_ALLOW_LINK_LOCAL", "0") == "1"
+        self.fetch_parallel = max(1, _int("FETCH_PARALLEL", 2))
 
     @property
     def db_path(self) -> Path:
@@ -44,6 +51,10 @@ class Settings:
     @property
     def pst_dir(self) -> Path:
         return self.data_dir / "pst"
+
+    @property
+    def inbox_dir(self) -> Path:
+        return Path(self.inbox_override) if self.inbox_override else self.data_dir / "inbox"
 
     @property
     def reports_dir(self) -> Path:

@@ -15,7 +15,11 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import crash, csvimport, db, preview, repo, uploads
+from ..connectors.wiring import items_key_of_account, source_problem, sync_files_source
+from . import crash, csvaccounts, csvimport, db, planning, preview, repo, tokens, uploads
+from .api_connectors import router as connectors_router
+from .api_planning import router as planning_router
+from .api_tokens import router as tokens_router
 from .config import settings
 from .dav import DavClient
 from .imap import ImapConn, ImapError, ImapParams
@@ -65,9 +69,14 @@ app = FastAPI(title="PST → IMAP/CalDAV/CardDAV", docs_url=None, openapi_url=No
 @app.middleware("http")
 async def auth_mw(request: Request, call_next):
     path = request.url.path
+    request.state.via = "session"
     if path.startswith("/api/") and path not in PUBLIC_API:
         if not check_session(request.cookies.get(COOKIE)):
-            return JSONResponse({"detail": "not authenticated"}, status_code=401)
+            # scripts and the `mccb` command: Authorization: Bearer <API token> (see tokens.py)
+            header = request.headers.get("authorization")
+            if not (header and await asyncio.to_thread(tokens.verify_header, header)):
+                return JSONResponse({"detail": "not authenticated"}, status_code=401)
+            request.state.via = "token"
     return await call_next(request)
 
 
@@ -208,7 +217,14 @@ def update_server(sid: int, s: ServerIn):
     cur = _server_or_404(sid)
     db.ex("UPDATE servers SET name=?,imap_host=?,imap_port=?,imap_security=?,verify_tls=?,root_folder=?,caldav_url=?,"
           "carddav_url=?,dav_enabled=?,workers=?,notes=?,tuning=?,builders=? WHERE id=?", (*_srv_values(s, cur), sid))
+    new = db.q1("SELECT * FROM servers WHERE id=?", (sid,))
+    if any(cur[k] != new[k] for k in _SRV_CONNECTION):  # the last test was about another connection
+        db.ex("UPDATE servers SET last_test=NULL, last_test_result=NULL WHERE id=?", (sid,))
     return repo.get_server(sid)
+
+
+# Settings a connection test depends on: changing one clears the stored result.
+_SRV_CONNECTION = ("imap_host", "imap_port", "imap_security", "verify_tls", "caldav_url", "carddav_url", "dav_enabled")
 
 
 @app.delete("/api/servers/{sid}")
@@ -249,6 +265,7 @@ def test_server(sid: int):
         res["imap"] = {"ok": False, "msg": f"connection failed: {e}"}
     for kind, col in (("caldav", "caldav_url"), ("carddav", "carddav_url")):
         res[kind] = _probe_dav(r, kind, r[col])
+    db.ex("UPDATE servers SET last_test=?, last_test_result=? WHERE id=?", (time.time(), db.jdump(res), sid))
     return res
 
 
@@ -258,7 +275,7 @@ def _probe_dav(r, kind: str, template: str | None) -> dict:
     if not r["dav_enabled"]:
         return {"ok": True, "msg": "DAV disabled for this server"}
     if template and "{" in template:
-        return {"ok": True, "msg": "template URL: checked when each account is tested"}
+        return {"ok": True, "msg": "template URL: checked when each mailbox is tested"}
     urls = [template] if template else [f"https://{r['imap_host']}/.well-known/{kind}"]
     for url in urls:
         try:
@@ -294,7 +311,7 @@ class AccountUpdate(BaseModel):
 def _account_or_404(aid: int):
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "unknown account")
+        raise HTTPException(404, "unknown mailbox")
     return r
 
 
@@ -314,13 +331,14 @@ def create_account(a: AccountIn):
     if not csvimport.EMAIL_RE.match(email):
         raise HTTPException(422, "invalid email address")
     if db.q1("SELECT id FROM accounts WHERE server_id=? AND email=?", (a.server_id, email)):
-        raise HTTPException(409, "this account already exists on this server")
+        raise HTTPException(409, "this mailbox already exists on this server")
     o = a.options or {}
     cur = db.ex("INSERT INTO accounts(server_id,email,login,password_enc,opt_mail,opt_calendar,opt_contacts,pst_id,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (a.server_id, email, (a.login or "").strip(), encrypt(a.password) if a.password else None,
                  int(o.get("mail", True)), int(o.get("calendar", True)), int(o.get("contacts", True)),
                  a.pst_id if a.pst_id and repo.get_pst(a.pst_id) else None, time.time()))
+    sync_files_source(cur.lastrowid)
     return repo.get_account(cur.lastrowid)
 
 
@@ -363,9 +381,12 @@ def update_account(aid: int, a: AccountUpdate):
             db.ex(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", (*vals, aid))
             if target_changed:  # new target: everything must be re-sent
                 db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+                planning.forget_cursors(aid)
+            if "pst_id" in a.model_fields_set:
+                sync_files_source(aid)
         except Exception as e:
             if "UNIQUE" in str(e):
-                raise HTTPException(409, "this account already exists on this server")
+                raise HTTPException(409, "this mailbox already exists on this server")
             raise
     return repo.get_account(r["id"])
 
@@ -374,7 +395,7 @@ def update_account(aid: int, a: AccountUpdate):
 def delete_account(aid: int):
     _account_or_404(aid)
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping')", (aid,)):
-        raise HTTPException(409, "a job is running for this account")
+        raise HTTPException(409, "a job is running for this mailbox")
     db.ex("DELETE FROM accounts WHERE id=?", (aid,))
     return {"ok": True}
 
@@ -386,6 +407,7 @@ def set_account_pst(aid: int, body: dict = Body(...)):
     if pid is not None and not repo.get_pst(int(pid)):
         raise HTTPException(404, "unknown PST")
     db.ex("UPDATE accounts SET pst_id=? WHERE id=?", (pid, aid))
+    sync_files_source(aid)
     return repo.get_account(aid)
 
 
@@ -445,25 +467,14 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
     data = await file.read(5 * 1024 * 1024 + 1)
     if len(data) > 5 * 1024 * 1024:
         raise HTTPException(413, "CSV file too large (5 MB max)")
-    rows, errors = csvimport.parse(data)
-    created = updated = 0
-    for row in rows:
-        ex = db.q1("SELECT id FROM accounts WHERE server_id=? AND email=?", (server_id, row["email"]))
-        if ex:
-            db.ex("UPDATE accounts SET password_enc=?, login=?, status='new' WHERE id=?",
-                  (encrypt(row["password"]), row["login"], ex["id"]))
-            updated += 1
-        else:
-            db.ex("INSERT INTO accounts(server_id,email,login,password_enc,created_at) VALUES (?,?,?,?,?)",
-                  (server_id, row["email"], row["login"], encrypt(row["password"]), time.time()))
-            created += 1
-    return {"created": created, "updated": updated, "errors": errors}
+    rows, errors, _extended = csvimport.parse_ext(data)
+    return csvaccounts.apply(server_id, rows, errors)
 
 
 @app.get("/api/accounts/csv-template")
 def csv_template():
     return Response(csvimport.TEMPLATE.encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": 'attachment; filename="accounts.csv"'})
+                    headers={"Content-Disposition": 'attachment; filename="mailboxes.csv"'})
 
 
 # ======================================================================= uploads / PST
@@ -517,6 +528,8 @@ async def preview_pst(pid: int, limit: int = 20):
         raise HTTPException(404, "unknown PST")
     if row["status"] != "valid":
         raise HTTPException(409, "PST not valid")
+    if (db.jload(row["scan"], None) or {}).get("format") == "files":
+        raise HTTPException(409, "no preview for this kind of file: it is not a PST")
     limit = max(1, min(200, limit))
     try:
         zpath, tmp = await preview.build_zip(row["path"], limit)
@@ -536,34 +549,48 @@ def delete_pst(pid: int):
     return {"ok": True}
 
 
+from .api_intake import router as intake_router  # noqa: E402
+app.include_router(intake_router)
+
+
 # ======================================================================= jobs
 class RunIn(BaseModel):
     account_ids: list[int]
+    # optional: a named batch groups the jobs started together (GET /api/batches); mode "delta" is the final resync
+    # (what arrived since the previous pass); priority: higher runs first among the queued jobs
+    name: str | None = Field(None, max_length=120)
+    mode: str = Field("full", pattern="^(full|delta)$")
+    priority: int = 0
 
 
 @app.post("/api/runs")
 def create_runs(body: RunIn):
     jobs, errors = [], []
+    batch_id = None
     for aid in body.account_ids:
         a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
         if a is None:
-            errors.append({"account_id": aid, "msg": "unknown account"})
+            errors.append({"account_id": aid, "msg": "unknown mailbox"})
             continue
-        if not a["password_enc"]:
+        if not a["password_enc"] and not a["target_kind"]:
             errors.append({"account_id": aid, "msg": "password missing"})
             continue
-        p = db.q1("SELECT status FROM psts WHERE id=?", (a["pst_id"],)) if a["pst_id"] else None
-        if p is None or p["status"] != "valid":
-            errors.append({"account_id": aid, "msg": "no valid PST linked"})
+        problem = source_problem(a)
+        if problem:
+            errors.append({"account_id": aid, "msg": problem})
             continue
         active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
                        "ORDER BY id DESC LIMIT 1", (aid,))
         if active:
             jobs.append(repo.job_view(active))
             continue
-        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, created_at) VALUES (?, 'queued', 'precheck', ?, ?)",
-                    (aid, db.jdump(repo.empty_progress()), time.time()))
-        repo.log(cur.lastrowid, "Job queued")
+        if body.name and body.name.strip() and batch_id is None:
+            batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",
+                             (body.name.strip(), time.time())).lastrowid
+        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at) "
+                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?)",
+                    (aid, db.jdump(repo.empty_progress()), body.mode, batch_id, body.priority, time.time()))
+        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if body.mode == "delta" else ""))
         jobs.append(repo.get_job(cur.lastrowid))
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})
@@ -604,7 +631,7 @@ def pause_job(jid: int):
     r = _job_or_404(jid)
     if r["status"] not in ("queued", "running"):
         raise HTTPException(409, f"cannot pause a job in status '{r['status']}'")
-    db.ex("UPDATE jobs SET status='paused' WHERE id=? AND status IN ('queued','running')", (jid,))
+    db.ex("UPDATE jobs SET status='paused', pause_reason=NULL WHERE id=? AND status IN ('queued','running')", (jid,))
     repo.log(jid, "Pause requested")
     return repo.get_job(jid)
 
@@ -616,8 +643,9 @@ def resume_job(jid: int):
         raise HTTPException(409, f"the job is not paused ('{r['status']}')")
     if r["worker_id"]:
         # the worker has not yet taken the pause into account: let it continue
-        db.ex("UPDATE jobs SET status='running' WHERE id=? AND status='paused' AND worker_id IS NOT NULL", (jid,))
-    db.ex("UPDATE jobs SET status='queued' WHERE id=? AND status='paused'", (jid,))
+        db.ex("UPDATE jobs SET status='running', pause_reason=NULL WHERE id=? AND status='paused' AND worker_id IS NOT NULL",
+              (jid,))
+    db.ex("UPDATE jobs SET status='queued', pause_reason=NULL WHERE id=? AND status='paused'", (jid,))
     repo.log(jid, "Resume requested")
     return repo.get_job(jid)
 
@@ -641,8 +669,9 @@ def _requeue(jid: int, mode: str) -> dict:
         raise HTTPException(409, f"job still active ('{r['status']}')")
     if db.q1("SELECT id FROM jobs WHERE account_id=? AND id<>? AND status IN ('queued','running','paused','stopping')",
              (r["account_id"], jid)):
-        raise HTTPException(409, "another job is active for this account")
-    db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck' WHERE id=?", (mode, jid))
+        raise HTTPException(409, "another job is active for this mailbox")
+    db.ex("UPDATE jobs SET status='queued', mode=?, error=NULL, finished_at=NULL, phase='precheck', pause_reason=NULL "
+          "WHERE id=?", (mode, jid))
     crash.reset_crashes(jid)  # new rerun: "retry errors" retries the "libpff crash" items once
     repo.log(jid, "Rerun (errors only)" if mode == "errors" else "Full rerun (already imported items skipped)")
     return repo.get_job(jid)  # type: ignore[return-value]
@@ -674,6 +703,9 @@ def job_report(jid: int, download: int = 0):
     if not p.exists():
         raise HTTPException(404, "report not available yet")
     data = json.loads(p.read_text(encoding="utf-8"))
+    cmp = db.q1("SELECT * FROM compares WHERE job_id=? AND status='done' ORDER BY id DESC LIMIT 1", (jid,))
+    if cmp is not None:  # the last comparison asked for this job, with the date it was made
+        data["compare"] = {"id": cmp["id"], "generated_at": cmp["updated_at"], **(db.jload(cmp["result"], {}) or {})}
     headers = {"Content-Disposition": f'attachment; filename="job-report-{jid}.json"'} if download else {}
     return JSONResponse(data, headers=headers)
 
@@ -681,10 +713,10 @@ def job_report(jid: int, download: int = 0):
 @app.get("/api/jobs/{jid}/errors")
 def job_errors(jid: int, limit: int = 1000):
     r = _job_or_404(jid)
-    a = db.q1("SELECT pst_id FROM accounts WHERE id=?", (r["account_id"],))
-    if a is None or a["pst_id"] is None:
+    a = db.q1("SELECT * FROM accounts WHERE id=?", (r["account_id"],))
+    pkey = items_key_of_account(a) if a is not None else None
+    if pkey is None:
         return []
-    pkey = db.pst_key_of(db.q1("SELECT id, pst_sha FROM psts WHERE id=?", (a["pst_id"],)))
     rows = db.q("SELECT id, kind, folder, item_key, subject, error, updated_at FROM items WHERE account_id=? AND pst_key=? "
                 "AND status='error' ORDER BY id LIMIT ?", (r["account_id"], pkey, max(1, min(limit, 10000))))
     return [dict(x) for x in rows]
@@ -737,6 +769,11 @@ async def _prune_events() -> None:
         await asyncio.sleep(300)
 
 
+app.include_router(connectors_router)  # before the /api catch-all below
+app.include_router(planning_router)
+app.include_router(tokens_router)
+
+
 # ======================================================================= static SPA
 @app.api_route("/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 def api_404(rest: str):
@@ -749,11 +786,15 @@ def spa(path: str):
     if path:
         f = (root / path).resolve()
         if f.is_file() and (f == root or root in f.parents):
-            return FileResponse(f)
+            # Hashed file names from the build: the URL changes with the content.
+            immutable = path.startswith("assets/")
+            return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"} if immutable else None)
+        if path.startswith("assets/"):  # a stale page asking for an old chunk must not get HTML
+            raise HTTPException(404, "unknown asset")
     index = root / "index.html"
     if index.is_file():
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
-    return PlainTextResponse("Web interface missing (app/web/index.html)", status_code=200)
+    return PlainTextResponse("Web interface missing: build it with `npm run build` in web/ (app/web/index.html)", status_code=200)
 
 
 def main() -> None:

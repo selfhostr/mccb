@@ -28,11 +28,14 @@ CREATE TABLE IF NOT EXISTS {name} (
     size INTEGER,
     job_id INTEGER,
     updated_at REAL NOT NULL,
+    source_ref TEXT,
     UNIQUE (account_id, pst_key, kind, item_key)
 );
 """
 # Items are attached to the PST by its fingerprint (`pst_key` = psts.pst_sha) and not by its id:
 # deleting then re-uploading the same file recovers the progress state (no re-import or duplicate).
+# Other sources use a namespace of their own in pst_key ("src-...", see connectors/registry.py) and pst_id 0.
+# source_ref: second identity of the item at the source (SourceItem.alt_key), survives a change of item_key.
 ITEMS_INDEXES = """
 CREATE INDEX IF NOT EXISTS items_status2 ON items(account_id, pst_key, kind, status);
 CREATE INDEX IF NOT EXISTS items_folder2 ON items(account_id, pst_key, kind, folder);
@@ -93,6 +96,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     opt_calendar INTEGER NOT NULL DEFAULT 1,
     opt_contacts INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL,
+    source_kind TEXT,
+    source_config TEXT,
+    source_secret_enc TEXT,
+    target_kind TEXT,
+    target_config TEXT,
+    target_secret_enc TEXT,
     UNIQUE (server_id, email)
 );
 CREATE TABLE IF NOT EXISTS jobs (
@@ -133,17 +142,66 @@ CREATE TABLE IF NOT EXISTS events (
     ts REAL NOT NULL DEFAULT ((julianday('now') - 2440587.5) * 86400.0)
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    request TEXT NOT NULL DEFAULT '{}',
+    result TEXT,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS compares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    detail INTEGER NOT NULL DEFAULT 0,
+    result TEXT,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL UNIQUE,
+    token_hash TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    revoked_at REAL
+);
+CREATE TABLE IF NOT EXISTS notify_sent (
+    kind TEXT NOT NULL,
+    ref_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (kind, ref_id)
+);
 
 CREATE TRIGGER IF NOT EXISTS ev_job_i AFTER INSERT ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
-CREATE TRIGGER IF NOT EXISTS ev_job_u AFTER UPDATE ON jobs BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END;
+{JOB_UPDATE_TRIGGER};
 CREATE TRIGGER IF NOT EXISTS ev_acc_i AFTER INSERT ON accounts BEGIN INSERT INTO events(kind, ref_id) VALUES ('account', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_acc_u AFTER UPDATE ON accounts BEGIN INSERT INTO events(kind, ref_id) VALUES ('account', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_pst_i AFTER INSERT ON psts BEGIN INSERT INTO events(kind, ref_id) VALUES ('pst', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_pst_u AFTER UPDATE ON psts BEGIN INSERT INTO events(kind, ref_id) VALUES ('pst', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_plan_i AFTER INSERT ON plans BEGIN INSERT INTO events(kind, ref_id) VALUES ('plan', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_plan_u AFTER UPDATE ON plans BEGIN INSERT INTO events(kind, ref_id) VALUES ('plan', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_cmp_i AFTER INSERT ON compares BEGIN INSERT INTO events(kind, ref_id) VALUES ('compare', NEW.id); END;
+CREATE TRIGGER IF NOT EXISTS ev_cmp_u AFTER UPDATE ON compares BEGIN INSERT INTO events(kind, ref_id) VALUES ('compare', NEW.id); END;
 CREATE TRIGGER IF NOT EXISTS ev_chunk_i AFTER INSERT ON upload_chunks BEGIN INSERT INTO events(kind, ref_id) VALUES ('upload', NEW.pst_id); END;
 """
 
-SCHEMA = SCHEMA_TEMPLATE.replace("{ITEMS}", ITEMS_DDL.replace("{name}", "items"))
+# Every visible column but the heartbeat: the worker writes it each second for each job, and each event makes the
+# web process read and send the job to every open page.
+JOB_UPDATE_TRIGGER = ("CREATE TRIGGER IF NOT EXISTS ev_job_u AFTER UPDATE OF status, phase, progress, current_folder, rate, "
+                      "rate_bytes, eta, mode, worker_id, started_at, finished_at, error, report_path, tuning ON jobs "
+                      "BEGIN INSERT INTO events(kind, ref_id) VALUES ('job', NEW.id); END")
+SCHEMA = (SCHEMA_TEMPLATE.replace("{ITEMS}", ITEMS_DDL.replace("{name}", "items"))
+          .replace("{JOB_UPDATE_TRIGGER}", JOB_UPDATE_TRIGGER))
 
 
 def pst_key_of(pst_row) -> str | None:
@@ -193,12 +251,51 @@ def _migrate_tuning(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_job_trigger(conn: sqlite3.Connection) -> None:
+    """Earlier versions: the trigger also fired on heartbeat updates. Replaced under the write lock."""
+    def old() -> bool:
+        r = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='ev_job_u'").fetchone()
+        return r is not None and "UPDATE OF" not in r[0]
+    if not old():
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if old():
+            conn.execute("DROP TRIGGER ev_job_u")
+            conn.execute(JOB_UPDATE_TRIGGER)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Migrations: jobs.rate_bytes, jobs.tuning, servers.tuning/builders, items(pst_id) -> items(pst_key = PST
-    fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`."""
+    """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
+    items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
+    accounts.source_* / target_* (NULL: the PST of the account, written to its server), items.source_ref and the
+    planning columns: servers.policy / accounts.policy (JSON: folder mapping, filters, allowed hours, bandwidth),
+    jobs.batch_id / jobs.priority / jobs.pause_reason (see docs/planning.md)."""
+    _add_column(conn, "servers", "policy TEXT")
+    _add_column(conn, "servers", "last_test REAL")         # time of the last connection test (NULL: never)
+    _add_column(conn, "servers", "last_test_result TEXT")  # JSON {imap, caldav, carddav: {ok, msg}}
+    _add_column(conn, "accounts", "policy TEXT")
+    _add_column(conn, "jobs", "batch_id INTEGER")
+    _add_column(conn, "jobs", "priority INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "jobs", "pause_reason TEXT")  # NULL: paused by the administrator; 'window': outside allowed hours
+    conn.execute("CREATE INDEX IF NOT EXISTS jobs_batch ON jobs(batch_id)")
+    for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
+                "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
+        _add_column(conn, "accounts", ddl)
+    _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
     _migrate_tuning(conn)
+    # server-side intake (drop folder, remote fetch): origin of a PST, fetch progress, encrypted fetch spec
+    _add_column(conn, "psts", "source TEXT")             # 'upload' (NULL) | 'inbox' | 'fetch'
+    _add_column(conn, "psts", "origin TEXT")             # display label (no secrets), e.g. host + file name
+    _add_column(conn, "psts", "received_bytes INTEGER")  # progress while status is 'fetching'
+    _add_column(conn, "psts", "fetch_spec TEXT")         # encrypted JSON: how to (re)fetch, credentials included
+    _migrate_job_trigger(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
     if "pst_key" not in cols:
         conn.execute("BEGIN IMMEDIATE")
@@ -247,6 +344,9 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # fewer checkpoints (one fsync each, every writer waits) and index pages of a huge items table kept in memory
+    conn.execute("PRAGMA wal_autocheckpoint=8000")
+    conn.execute("PRAGMA cache_size=-32000")
     with _init_lock:
         if path not in _initialized:
             conn.execute("PRAGMA journal_mode=WAL")

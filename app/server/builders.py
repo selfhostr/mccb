@@ -28,7 +28,7 @@ IMPORT_HEADER = "X-PST-Import-Id"
 
 
 def default_processes() -> int:
-    """BUILD_PROCESSES, default min(cpu_count - 1, 8) (at least 1). 0 = build inside the job process."""
+    """BUILD_PROCESSES, default machine_default(). 0 = build inside the job process."""
     v = os.environ.get("BUILD_PROCESSES", "").strip()
     if v:
         try:
@@ -41,20 +41,25 @@ def default_processes() -> int:
 def machine_default() -> int:
     """Builder count without BUILD_PROCESSES (manual mode with `builders` unset): the auto-tuner's static
     choice on a cheap machine probe (no benchmark) - usable cores (cgroup quota, affinity, cpu_count) - 1,
-    bounded by the available memory (cgroup-aware), at most 8, at least 1."""
+    bounded by the available memory (cgroup-aware), at most tuner.MAX_BUILDERS, at least 1."""
     from . import tuner
     try:
         return tuner.choose_builders(tuner.probe_machine())
     except Exception:  # noqa: BLE001 - probe failure: the former default
-        return max(1, min((os.cpu_count() or 2) - 1, 8))
+        return max(1, min((os.cpu_count() or 2) - 1, tuner.MAX_BUILDERS))
 
 
-def byte_budget() -> int:
-    """Bytes of built messages allowed in flight (built, not yet APPENDed): BUILD_MAX_INFLIGHT_MB (256)."""
-    try:
-        return max(8, int(os.environ.get("BUILD_MAX_INFLIGHT_MB", "256"))) * 1024 * 1024
-    except ValueError:
-        return 256 * 1024 * 1024
+def byte_budget(mem_available_bytes: int = 0, running_jobs: int = 1) -> int:
+    """Bytes of built messages allowed in flight (built, not yet APPENDed): BUILD_MAX_INFLIGHT_MB. Unset: 256 MiB, up
+    to a quarter of the free memory split between the running jobs (auto-tuned job), at most 4 GiB."""
+    base = 256 * 1024 * 1024
+    v = os.environ.get("BUILD_MAX_INFLIGHT_MB", "").strip()
+    if v:
+        try:
+            return max(8, int(v)) * 1024 * 1024
+        except ValueError:
+            return base
+    return max(base, min(4096 * 1024 * 1024, mem_available_bytes // (4 * max(1, running_jobs))))
 
 
 def norm_hash(raw: bytes) -> str:

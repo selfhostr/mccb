@@ -1,0 +1,13 @@
+# Headers of the static demo (npm run build:demo -> web/dist-demo, published under /demo/).
+# Cloudflare Pages `_headers` block, to be added to the site's file: it replaces the site CSP for /demo/*.
+# As tight as the demo allows, and tested: `npm run test:demo` serves dist-demo with exactly this policy and fails
+# on any CSP violation or any request to another origin. What the demo needs, and nothing more:
+#   script-src 'self'   its own module chunks, the hash worker and boot.js; no inline script, no eval
+#   style-src 'self'    one generated stylesheet; Svelte sets styles through the CSSOM, not through style attributes
+#   img-src 'self'      the logo (assets are never inlined as data: URLs in this build)
+#   font-src 'self'    the Inter and JetBrains Mono files, same origin
+#   connect-src 'self'  nothing is requested: fetch and EventSource are simulated in the page; kept as the floor
+# Not needed: unsafe-inline, unsafe-eval, data:, blob:, any other origin, WebSocket, service worker.
+/demo/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; media-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
