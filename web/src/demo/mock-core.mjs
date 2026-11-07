@@ -281,7 +281,7 @@ function run(job) {
 function planFor(account) {
 	const base = { account_id: account.id, email: account.email, targets: {}, kinds: {}, folders: [], quota: null, target_limit: null, warnings: [], notes: [] };
 	const pst = state.psts.get(account.pst_id);
-	if (!pst || pst.status !== 'valid') return { ...base, status: 'error', source: { kind: 'pst', ok: false, msg: 'no PST linked to this account' } };
+	if (!pst || pst.status !== 'valid') return { ...base, status: 'error', source: { kind: 'pst', ok: false, msg: 'no PST linked to this mailbox' } };
 	const t = pst.scan.totals;
 	const kind = (items, bytes, over = {}) => ({ folders: 1, items, bytes, done: 0, to_migrate: items, to_migrate_bytes: bytes, bytes_estimated: true, filtered: { date: 3 }, oversized: 0, oversized_bytes: 0, folders_to_create: 1, excluded_folders: 0, excluded_items: 0, ...over });
 	const out = { ...base, status: 'ok', source: { kind: 'pst', ok: true, msg: `${pst.filename}: 3 folder(s) analysed` }, kinds: { mail: kind(t.mail, 9_000_000), calendar: kind(t.calendar, null), contacts: kind(t.contacts, null) } };
@@ -585,7 +585,7 @@ export async function handle(req) {
 				return send(200, [...state.accounts.values()].filter((a) => !server || a.server_id === Number(server)).sort((a, b) => a.email.localeCompare(b.email)).map(accountView));
 			}
 			const body = json();
-			if ([...state.accounts.values()].some((a) => a.server_id === body.server_id && a.email === body.email)) return fail(409, 'this account already exists on this server');
+			if ([...state.accounts.values()].some((a) => a.server_id === body.server_id && a.email === body.email)) return fail(409, 'this mailbox already exists on this server');
 			const id = state.next.account++;
 			const account = makeAccount(id, body.email, body.server_id, { login: body.login || body.email, has_password: !!body.password });
 			state.accounts.set(id, account);
@@ -593,7 +593,7 @@ export async function handle(req) {
 			return send(201, accountView(account));
 		}
 		const account = state.accounts.get(Number(parts[1]));
-		if (!account) return fail(404, 'unknown account');
+		if (!account) return fail(404, 'unknown mailbox');
 		if (parts[2] === 'test') {
 			state.testCalls[account.id] = (state.testCalls[account.id] ?? 0) + 1;
 			await new Promise((r) => setTimeout(r, state.testDelay));
@@ -618,7 +618,7 @@ export async function handle(req) {
 		if (parts[2] === 'source' || parts[2] === 'target') {
 			const role = parts[2];
 			if (m === 'GET') return send(200, accountView(account)[role]);
-			if ([...state.jobs.values()].some((j) => j.account_id === account.id && ['queued', 'running', 'paused', 'stopping'].includes(j.status))) return fail(409, 'a job is active for this account');
+			if ([...state.jobs.values()].some((j) => j.account_id === account.id && ['queued', 'running', 'paused', 'stopping'].includes(j.status))) return fail(409, 'a job is active for this mailbox');
 			const body = json();
 			state.routeCalls.push({ id: account.id, role, body });
 			const key = role === 'source' ? 'srcSecrets' : 'tgtSecrets';
@@ -732,7 +732,7 @@ export async function handle(req) {
 	if (path === '/runs/plan' && m === 'POST') {
 		const ids = json().account_ids ?? [];
 		const unknown = ids.filter((id) => !state.accounts.has(id));
-		if (unknown.length) return fail(422, { msg: 'unknown account(s)', account_ids: unknown });
+		if (unknown.length) return fail(422, { msg: 'unknown mailbox(es)', account_ids: unknown });
 		const plan = { id: state.next2.plan++, account_ids: ids, at: Date.now() };
 		state.plans.set(plan.id, plan);
 		return send(202, { id: plan.id, status: 'queued', account_ids: ids, error: null, result: null });

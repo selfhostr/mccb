@@ -273,7 +273,7 @@ class Notifier:
                       f"ORDER BY j.finished_at", (*TERMINAL, since)):
             if not _claim("job", r["id"]):
                 continue
-            who = r["email"] or f"account {r['account_id']}"
+            who = r["email"] or f"mailbox {r['account_id']}"
             prog = db.jload(r["progress"], None) or {}
             counts = ", ".join(f"{k} {v.get('done', 0)}/{v.get('total', 0)}"
                                + (f" ({v['errors']} errors)" if v.get("errors") else "")
@@ -310,7 +310,7 @@ class Notifier:
             bad = [j for j in jobs if j["status"] in ("failed", "done_with_errors")]
             head = f"Batch '{b['name']}' finished: " + ", ".join(f"{n} {s.replace('_', ' ')}" for s, n in
                                                                  sorted(counts.items()))
-            lines = [f"- {j['email'] or 'account ' + str(j['account_id'])}: {j['status'].replace('_', ' ')}"
+            lines = [f"- {j['email'] or 'mailbox ' + str(j['account_id'])}: {j['status'].replace('_', ' ')}"
                      + (f" ({j['error']})" if j["error"] else "") for j in bad[:MAX_LINES]]
             if len(bad) > MAX_LINES:
                 lines.append(f"... and {len(bad) - MAX_LINES} more")
@@ -331,7 +331,7 @@ class Notifier:
                 over = r["status"] in ("done", "done_with_errors") or ph > PHASES.index(k)
                 if over and p.get("total") and p.get("done", 0) + p.get("errors", 0) >= p["total"] \
                         and _claim(f"phase:{k}", r["id"]):
-                    who = r["email"] or f"account {r['account_id']}"
+                    who = r["email"] or f"mailbox {r['account_id']}"
                     self._add(cfg, Event("phase", f"phase_{k}", r["id"], f"{who}: {k}",
                                          f"Phase finished ({k}): {who}\n{p.get('done', 0)}/{p['total']}"
                                          + (f", {p['errors']} errors" if p.get("errors") else "")))

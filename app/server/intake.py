@@ -692,7 +692,7 @@ def chain_one(pst, cfg: dict) -> dict:
     out = {"result": "assigned", "account_id": a["id"], "started": False, "job_id": None}
     if cfg["start_import"]:
         if not a["password_enc"]:
-            out["detail"] = "assigned, not started: no password on the account"
+            out["detail"] = "assigned, not started: no password on the mailbox"
         else:
             jid = queue_job(a["id"])
             out.update(started=jid is not None, job_id=jid)

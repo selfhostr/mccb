@@ -16,7 +16,7 @@ Screenshots: [screenshots/](screenshots/)
 
 MCCB (Mail Contact Calendrier Bridge) moves mail, calendars, contacts and tasks from a source to a target, one mailbox at a time, and runs as many mailboxes in parallel as the machine and the servers allow. It started as a PST importer and now reads and writes the usual protocols.
 
-- **Built for batches.** Add servers, add accounts one by one or by CSV, choose a source and a target for each, run them all and read one report per mailbox.
+- **Built for batches.** Add servers, add mailboxes one by one or by CSV, choose a source and a target for each, run them all and read one report per mailbox.
 - **Built for big sources.** Resumable uploads, a drop folder and server-side fetch for large files, a preview and a dry run before anything is written.
 - **Safe to interrupt.** Pause, stop, crash or restart: a resume checks the target and never duplicates an item.
 
@@ -36,7 +36,7 @@ docker compose logs web | grep -A2 "Admin password"
 ```
 
 1. Open `http://<host>:22362` and sign in with the printed password (shown once).
-2. Add a server, then accounts. Give each a source (a PST or another file, or a live server) and run.
+2. Add a server, then mailboxes. Give each a source (a PST or another file, or a live server) and run.
 3. Put it behind a reverse proxy with HTTPS: port 22362 speaks plain HTTP.
 
 Back up `./data`, including `secret.key`: without it the stored mailbox passwords cannot be decrypted. Details: [install](docs/install.md), [backup](docs/backup.md), [upgrading](docs/upgrading.md).

@@ -837,7 +837,7 @@ class JobRunner:
     # ------------------------------------------------------------ execution
     def run(self) -> None:
         if not self.acc or not self.srv:
-            self._finish("failed", "account or server deleted")
+            self._finish("failed", "mailbox or server deleted")
             return
         started = time.time()
         self.report.update({"job_id": self.job_id, "account": self.acc["email"], "server": self.srv["name"],
@@ -884,7 +884,7 @@ class JobRunner:
     def _execute(self) -> None:
         """The phases of the job. Here the PST to server route; see connector_runner.py for the others."""
         if not self.pst_row:
-            raise JobFailed("no PST linked to the account")
+            raise JobFailed("no PST linked to the mailbox")
         if self.pst_row["status"] != "valid":
             raise JobFailed(f"PST not valid (status {self.pst_row['status']})")
         eng = engine()

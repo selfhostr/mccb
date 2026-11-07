@@ -32,7 +32,7 @@ export MCCB_URL=https://mccb.example.org MCCB_TOKEN=mccb_xxxxxxxx_...
 | command | what it does |
 |---|---|
 | `mccb status` | server version, worker alive or not, active jobs |
-| `mccb accounts [--server ID]` | accounts with their status and last job |
+| `mccb accounts [--server ID]` | mailboxes with their status and last job |
 | `mccb jobs [--active] [--limit N] [--json]` | jobs with progress |
 | `mccb run ID... [--name N] [--delta] [--priority N] [--watch]` | start migrations, as a named batch if `--name` |
 | `mccb watch JOB [--logs] [--interval S]` | follow a job until it ends |
@@ -41,6 +41,6 @@ export MCCB_URL=https://mccb.example.org MCCB_TOKEN=mccb_xxxxxxxx_...
 
 Options before the command: `--url` (or `MCCB_URL`), `--token` (or `MCCB_TOKEN`), `--token-file` (keeps the token out of the process list), `--insecure` (no TLS verification).
 
-**Upload with resume.** The file is sent in the chunks the server asks for, each with its SHA-256, retried with a growing pause. Run the same command again after an interruption: the server knows the file by name, size and modification time and only the missing chunks are sent. A file already on the server sends nothing. With `--account` the PST is linked to the account once it is valid; `--wait` waits for the analysis.
+**Upload with resume.** The file is sent in the chunks the server asks for, each with its SHA-256, retried with a growing pause. Run the same command again after an interruption: the server knows the file by name, size and modification time and only the missing chunks are sent. A file already on the server sends nothing. With `--account` the PST is linked to the mailbox once it is valid; `--wait` waits for the analysis.
 
 **Exit codes.** `watch` and `run --watch`: 0 done, 1 done with errors, 2 failed, 3 stopped, 130 interrupted. Other commands: 0 on success, 4 on an API, network or argument error. A script can therefore chain `mccb upload ... && mccb run ... --watch`.

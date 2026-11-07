@@ -51,13 +51,13 @@ class RulesIn(BaseModel):
 def _account(aid: int):
     r = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
     if r is None:
-        raise HTTPException(404, "unknown account")
+        raise HTTPException(404, "unknown mailbox")
     return r
 
 
 def _idle(aid: int) -> None:
     if db.q1(f"SELECT id FROM jobs WHERE account_id=? AND status IN {ACTIVE}", (aid,)):
-        raise HTTPException(409, "a job is active for this account")
+        raise HTTPException(409, "a job is active for this mailbox")
 
 
 def _validated(kind: str, role_name: str, config: dict | None, current: dict, secrets: dict | None) -> tuple[dict, dict]:

@@ -59,8 +59,8 @@
 			<input bind:this={input} class="input py-2" type="file" accept=".csv,.txt" required />
 		</Field>
 		<div class="flex flex-wrap gap-2">
-			<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="accounts.csv">{m.migrations_csv_template()}</Button>
-			<Button variant="ghost" icon={Download} href="/api/accounts/export-csv" download="accounts-export.csv" data-testid="csv-export">{m.migrations_csv_export()}</Button>
+			<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="mailboxes.csv">{m.migrations_csv_template()}</Button>
+			<Button variant="ghost" icon={Download} href="/api/accounts/export-csv" download="mailboxes-export.csv" data-testid="csv-export">{m.migrations_csv_export()}</Button>
 		</div>
 		{#if error}<ErrorNotice title={m.migrations_csv_failed()} message={error} />{/if}
 		{#if result}

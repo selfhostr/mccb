@@ -28,7 +28,7 @@ class PstSource(Source):
         from ..server.engine_loader import engine
         row = db.q1("SELECT * FROM psts WHERE id=?", (self.pst_id,)) if self.pst_id else None
         if row is None:
-            raise ConnectorError("no PST linked to the account", ConnectorError.CONFIG)
+            raise ConnectorError("no PST linked to the mailbox", ConnectorError.CONFIG)
         if row["status"] != "valid":
             raise ConnectorError(f"PST not valid (status {row['status']})", ConnectorError.CONFIG)
         self.eng = engine()

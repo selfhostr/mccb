@@ -244,6 +244,46 @@ test.describe('migrations', () => {
 		await expect(page).toHaveURL(/\/$/);
 	});
 
+	test('a new migration is one form, and its panel says what is missing before the start', async ({ page }) => {
+		await ready(page);
+		await page.getByRole('button', { name: 'New migration', exact: true }).click();
+		let dialog = page.getByRole('dialog');
+		await expect(dialog.getByText('From', { exact: true })).toBeVisible();
+		await expect(dialog.getByText('To', { exact: true })).toBeVisible();
+		await dialog.getByRole('textbox', { name: /^Email address/ }).fill('new.one@example.com');
+		await dialog.locator('input[type=password]').fill('pw');
+		await dialog.getByRole('button', { name: 'Add a mailbox' }).click();
+		await expect(dialog).toHaveCount(0);
+
+		// Saving opens the panel of the new mailbox: no source yet, so the start waits for one.
+		const panel = page.getByTestId('job-panel');
+		await expect(panel).toContainText('new.one@example.com');
+		await expect(panel.getByTestId('account-start')).toBeDisabled();
+		await expect(panel.getByTestId('start-hint')).toHaveText('Choose where the mail comes from first.');
+		await expect(row(page, 'new.one@example.com')).toContainText('No source yet');
+
+		const select = panel.getByRole('combobox', { name: /^PST file for/ });
+		await select.selectOption({ index: 1 });
+		await expect(panel.getByTestId('account-start')).toBeEnabled();
+		await panel.getByTestId('account-start').click();
+		dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Ready to start: 1');
+		await dialog.getByTestId('import-confirm').click();
+		await expect(page.getByTestId('toast').filter({ hasText: 'Jobs queued: 1' })).toBeVisible();
+		await expect(panel.getByTestId('account-start')).toHaveCount(0);
+	});
+
+	test('a new migration can take a file already on the server', async ({ page }) => {
+		await ready(page);
+		await page.getByRole('button', { name: 'New migration', exact: true }).click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByTestId('new-source').selectOption({ index: 1 });
+		await dialog.getByRole('textbox', { name: /^Email address/ }).fill('with.file@example.com');
+		await dialog.locator('input[type=password]').fill('pw');
+		await dialog.getByRole('button', { name: 'Add a mailbox' }).click();
+		await expect(page.getByTestId('job-panel').getByTestId('account-start')).toBeEnabled();
+	});
+
 	test('a mailbox without a job has its own panel, with its URL', async ({ page }) => {
 		await ready(page);
 		await page.getByTestId('filter-q').fill('alice');
@@ -290,14 +330,14 @@ test.describe('migrations', () => {
 
 		await mock(page.request, 'reset', { accounts: 0 });
 		await page.reload();
-		await expect(page.getByTestId('empty-state')).toContainText('No accounts yet');
+		await expect(page.getByTestId('empty-state')).toContainText('No mailboxes yet');
 
 		await page.route('**/api/accounts', (route) => route.fulfill({ status: 500, json: { detail: 'database is locked' } }));
 		await page.reload();
 		await expect(page.getByRole('alert')).toContainText('database is locked');
 		await page.unroute('**/api/accounts');
 		await page.getByRole('button', { name: 'Retry' }).click();
-		await expect(page.getByTestId('empty-state')).toContainText('No accounts yet');
+		await expect(page.getByTestId('empty-state')).toContainText('No mailboxes yet');
 	});
 
 	test('old links still work', async ({ page }) => {

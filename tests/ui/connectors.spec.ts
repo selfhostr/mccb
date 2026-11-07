@@ -133,7 +133,7 @@ test.describe('connectors', () => {
 		await expect(target.getByTestId('route-target-kind')).toBeHidden();
 		await dialog.getByTestId('route-target-disclosure').locator('summary').click();
 		await expect(dialog.getByTestId('route-resend')).toHaveCount(0);
-		await expect(target.getByTestId('route-target-kind').locator('option')).toHaveText(["The account's server", 'CalDAV', 'IMAP']);
+		await expect(target.getByTestId('route-target-kind').locator('option')).toHaveText(["The mailbox's server", 'CalDAV', 'IMAP']);
 		await target.getByTestId('route-target-kind').selectOption('imap');
 		await expect(dialog.getByTestId('route-resend')).toContainText('everything will be sent again');
 		await target.locator('[data-field="host"]').fill('mail.new.example.com');
@@ -188,7 +188,7 @@ test.describe('connectors', () => {
 		await dialog.getByTestId('route-source').locator('[data-field="mailbox"]').fill('alice');
 		await dialog.getByTestId('route-source').locator('[data-field="api_key"]').fill('k');
 		await page.getByTestId('route-save').click();
-		await expect(dialog.getByRole('alert')).toContainText('a job is active for this account');
+		await expect(dialog.getByRole('alert')).toContainText('a job is active for this mailbox');
 	});
 
 	test('an account that reads from a connector can be imported without a PST', async ({ page }) => {

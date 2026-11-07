@@ -99,7 +99,7 @@ def plan_account(account_id: int) -> dict:
                  "targets": {}, "kinds": {}, "folders": [], "quota": None, "target_limit": None, "warnings": [],
                  "notes": [], "excluded_folders": []}
     if acc is None:
-        out.update(status="error", error="unknown account")
+        out.update(status="error", error="unknown mailbox")
         return out
     srv = db.q1("SELECT * FROM servers WHERE id=?", (acc["server_id"],))
     policy = pol.effective(acc, srv)
@@ -321,7 +321,7 @@ def compare_job(job_id: int, detail: bool = False) -> dict:
     job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
     acc = db.q1("SELECT * FROM accounts WHERE id=?", (job["account_id"],)) if job else None
     if acc is None:
-        raise ConnectorError("account deleted", ConnectorError.CONFIG)
+        raise ConnectorError("mailbox deleted", ConnectorError.CONFIG)
     srv = db.q1("SELECT * FROM servers WHERE id=?", (acc["server_id"],))
     key = wiring.items_key_of_account(acc)
     res: dict = {"job_id": job_id, "account_id": acc["id"], "namespace": key, "generated_at": time.time(),

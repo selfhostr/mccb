@@ -2,13 +2,13 @@
 
 By the end of this page you will know how to check a migration before it starts, choose what is migrated and where it lands, run many mailboxes in waves, keep to the hours a server allows, compare the result with the source, and finish with a last pass at cutover.
 
-Everything here is optional. An account and a server with nothing configured behave as before.
+Everything here is optional. A mailbox and a server with nothing configured behave as before.
 
 ## Dry run
 
-`POST /api/runs/plan {account_ids: [...]}` answers at once (`202`) with a plan `{id, status: "queued"}`. The worker fills it in; read it with `GET /api/plans/{id}` until `status` is `done` (or follow `plan` events on `/api/events`). A dry run connects, lists and counts. It writes nothing to any target, creates no job and changes no account.
+`POST /api/runs/plan {account_ids: [...]}` answers at once (`202`) with a plan `{id, status: "queued"}`. The worker fills it in; read it with `GET /api/plans/{id}` until `status` is `done` (or follow `plan` events on `/api/events`). A dry run connects, lists and counts. It writes nothing to any target, creates no job and changes no mailbox.
 
-For each account the result holds:
+For each mailbox the result holds:
 
 | field | content |
 |---|---|
@@ -22,11 +22,11 @@ For each account the result holds:
 | `warnings` | what to read before starting: quota too small, messages over the limit of the target |
 | `notes` | what to know: a PST has estimated sizes, its filters are judged during the run, excluded folders |
 
-`totals` sums the accounts. Sizes of a live source (IMAP) are exact. For a PST they are estimated from the file size and its folder counts, and the date and size filters are not applied in the counts, because a PST has no item index before the run. A target that cannot say whether a folder exists (DAV) leaves `create` null.
+`totals` sums the mailboxes. Sizes of a live source (IMAP) are exact. For a PST they are estimated from the file size and its folder counts, and the date and size filters are not applied in the counts, because a PST has no item index before the run. A target that cannot say whether a folder exists (DAV) leaves `create` null.
 
 ## Policy: mapping, filters, hours, bandwidth
 
-A policy is a JSON document on a server (`GET/PUT /api/servers/{id}/policy`) or on an account (`GET/PUT /api/accounts/{id}/policy`). `PUT` replaces it; `null` or `{}` removes it. The account is applied on top of the server: single values of the account win, the lists are added (the account's rules first).
+A policy is a JSON document on a server (`GET/PUT /api/servers/{id}/policy`) or on a mailbox (`GET/PUT /api/accounts/{id}/policy`). `PUT` replaces it; `null` or `{}` removes it. The mailbox is applied on top of the server: single values of the mailbox win, the lists are added (the mailbox's rules first).
 
 ```json
 {
@@ -45,7 +45,7 @@ A policy is a JSON document on a server (`GET/PUT /api/servers/{id}/policy`) or 
 
 The target folder of a source folder is decided in this order:
 
-1. The first matching rule of `folder_map` (account rules, then server rules). `source` is a folder path with `/` between levels, case-insensitive, or a pattern with `*` or `?`. Without a wildcard a rule covers the folder and its sub-folders. `target` is a path (`Archive/Old`; the sub-folders follow) or a role: `@inbox`, `@sent`, `@drafts`, `@trash`, `@junk`, which lands the folder in the special-use folder of the target (found by its SPECIAL-USE flag or its usual name, created with the flag if missing).
+1. The first matching rule of `folder_map` (mailbox rules, then server rules). `source` is a folder path with `/` between levels, case-insensitive, or a pattern with `*` or `?`. Without a wildcard a rule covers the folder and its sub-folders. `target` is a path (`Archive/Old`; the sub-folders follow) or a role: `@inbox`, `@sent`, `@drafts`, `@trash`, `@junk`, which lands the folder in the special-use folder of the target (found by its SPECIAL-USE flag or its usual name, created with the flag if missing).
 2. Built-in names, for a top-level folder (or one directly under the Inbox) that the source did not flag. Sent Items, Deleted Items, Junk E-mail, Drafts and their translations in the nine interface locales (de, en, es, fr, it, pt, pt-BR, ru, zh-Hans) land in the Sent, Trash, Junk and Drafts folders of the target. A role goes to the first folder that claims it; a second folder with a known name keeps its own name.
 3. The special folders the source declared (SPECIAL-USE, PST).
 
@@ -75,7 +75,7 @@ With a `window`, queued jobs of that server wait outside the hours and start whe
 
 ## Batches and queue order
 
-`POST /api/runs {account_ids, name?, mode?, priority?}` with a `name` creates a batch: the jobs started together share a `batch_id`. An account that already has an active job keeps it and joins no batch.
+`POST /api/runs {account_ids, name?, mode?, priority?}` with a `name` creates a batch: the jobs started together share a `batch_id`. A mailbox that already has an active job keeps it and joins no batch.
 
 - `GET /api/batches` lists them with `jobs`, `by_status`, `state` (`queued`, `running`, `paused`, `finished`), `items` (done, total, errors per kind), `failed`, `with_errors`; `GET /api/batches/{id}` adds `job_list`.
 - `POST /api/batches/{id}/pause`, `resume`, `stop`, `retry-failed` act on every job that allows it and answer with the batch plus `changed` and `skipped`. `retry-failed` reruns the jobs in `failed` (full rerun) and `done_with_errors` (errors only).
@@ -95,7 +95,7 @@ A first pass copies the bulk while users keep working. A final resync picks up w
 
 - A source that can list changes (IMAP) is asked only for what is new since the previous delta pass of each folder. The first delta pass has no cursor and lists everything, skipping what is already migrated.
 - A source that cannot (the others) is listed in full, and the items already migrated are skipped. The result is the same, only slower.
-- The cursor of a folder moves only when everything listed is recorded. A job that stops half way starts again from the old cursor, and the items already done are skipped. Changing the target of an account forgets its cursors, with its items.
+- The cursor of a folder moves only when everything listed is recorded. A job that stops half way starts again from the old cursor, and the items already done are skipped. Changing the target of a mailbox forgets its cursors, with its items.
 - A PST is a snapshot: a delta pass over the same PST finds nothing new. For mail that arrived after the export, send a new PST holding only the new items, or migrate those mailboxes from IMAP.
 
 Cutover, step by step:
@@ -104,12 +104,12 @@ Cutover, step by step:
 2. Migrate the bulk in named batches, inside the allowed hours of the server.
 3. Compare each job; rerun the errors.
 4. On the day: point the mail flow to the new server, so nothing new reaches the old one.
-5. Run the final resync (`mode: "delta"`) for every account, then compare again.
+5. Run the final resync (`mode: "delta"`) for every mailbox, then compare again.
 6. Check the reports (`totals`, `oversized`, `filtered`), then retire the old mailboxes yourself. MCCB never deletes anything at the source.
 
-## Accounts as CSV
+## Mailboxes as CSV
 
-See [Import accounts](import-accounts.md): the file can carry the PST file name, the content toggles and the settings of a source, and `GET /api/accounts/export-csv` writes the same columns back, never a password.
+See [Import mailboxes](import-accounts.md): the file can carry the PST file name, the content toggles and the settings of a source, and `GET /api/accounts/export-csv` writes the same columns back, never a password.
 
 ## Tests
 

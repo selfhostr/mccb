@@ -71,20 +71,20 @@ test.describe('keyboard', () => {
 
 	test('a visible focus ring, menus by arrow keys, Esc closes', async ({ page }) => {
 		await ready(page);
-		const add = page.getByRole('button', { name: 'New migration', exact: true });
-		await add.focus();
+		const more = page.getByRole('button', { name: 'More actions for alice@example.com' });
+		await more.focus();
 		await page.keyboard.press('Enter');
 		await expect(page.getByRole('menuitem').first()).toBeFocused();
 		await page.keyboard.press('ArrowDown');
 		await expect(page.getByRole('menuitem').nth(1)).toBeFocused();
 		await page.keyboard.press('Escape');
 		await expect(page.getByRole('menuitem')).toHaveCount(0);
-		await expect(add).toBeFocused();
-		const outline = await add.evaluate((el) => getComputedStyle(el).outlineStyle);
+		await expect(more).toBeFocused();
+		const outline = await more.evaluate((el) => getComputedStyle(el).outlineStyle);
 		expect(outline).toBe('solid');
 
-		await page.keyboard.press('Enter');
-		await expect(page.getByRole('menuitem').first()).toBeFocused();
+		const add = page.getByRole('button', { name: 'New migration', exact: true });
+		await add.focus();
 		await page.keyboard.press('Enter');
 		await expect(page.getByRole('dialog')).toBeVisible();
 		await page.keyboard.press('Escape');

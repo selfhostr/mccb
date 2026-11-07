@@ -52,11 +52,11 @@ Off by default. In `PUT /api/intake/settings`:
 {"auto_chain": {"enabled": true, "start_import": true, "default_domains": {"1": "example.com"}}}
 ```
 
-After a PST is analysed as `valid`, MCCB looks for the account whose address matches the file name:
+After a PST is analysed as `valid`, MCCB looks for the mailbox whose address matches the file name:
 
-- `jane.doe@example.com.pst` matches the account `jane.doe@example.com`;
+- `jane.doe@example.com.pst` matches the mailbox `jane.doe@example.com`;
 - `jane.doe.pst` matches `jane.doe@example.com` on server 1 when `default_domains` has `"1": "example.com"`.
 
-If exactly one account matches and it has no PST yet, the PST is assigned to it. With `start_import` the import is queued too, when the account has a password and no active job. An existing assignment is never changed. When several accounts match, nothing is done. The outcome is in the `chain` field of the PST (`assigned`, `ambiguous`, `no_match`, `account_has_pst`, `already_assigned`). Only PSTs analysed after you enable the option are considered.
+If exactly one mailbox matches and it has no PST yet, the PST is assigned to it. With `start_import` the import is queued too, when the mailbox has a password and no active job. An existing assignment is never changed. When several mailboxes match, nothing is done. The outcome is in the `chain` field of the PST (`assigned`, `ambiguous`, `no_match`, `account_has_pst`, `already_assigned`). Only PSTs analysed after you enable the option are considered.
 
 Pair this with [Notifications](notifications.md) to be told when everything is done.
