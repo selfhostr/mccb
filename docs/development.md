@@ -1,6 +1,6 @@
 # Development
 
-By the end of this page you will have MCCB running from source and its test suite passing, all in Docker.
+By the end of this page you will have mccb running from source and its test suite passing, all in Docker.
 
 ```bash
 git clone https://github.com/yetysw/mccb.git && cd mccb

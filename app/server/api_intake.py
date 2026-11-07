@@ -45,7 +45,7 @@ def test_notification(body: dict = Body(default={})):
     names = [ch] if ch else [n for n in notify.CHANNELS if cfg[n]["enabled"]]
     if not names:
         raise HTTPException(422, "no channel enabled")
-    msg = notify.Message("test", "MCCB test notification", "If you read this, notifications work.\n"
+    msg = notify.Message("test", "mccb test notification", "If you read this, notifications work.\n"
                          "Example address: jane.doe@example.com", 3, {"test": True, "ts": time.time()})
     res = notify.deliver(msg, cfg, names, retries=False)
     return {"ok": all(r["ok"] for r in res.values()), "results": res}

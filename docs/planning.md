@@ -105,7 +105,7 @@ Cutover, step by step:
 3. Compare each job; rerun the errors.
 4. On the day: point the mail flow to the new server, so nothing new reaches the old one.
 5. Run the final resync (`mode: "delta"`) for every mailbox, then compare again.
-6. Check the reports (`totals`, `oversized`, `filtered`), then retire the old mailboxes yourself. MCCB never deletes anything at the source.
+6. Check the reports (`totals`, `oversized`, `filtered`), then retire the old mailboxes yourself. mccb never deletes anything at the source.
 
 ## Mailboxes as CSV
 

@@ -1,6 +1,6 @@
-# Put MCCB behind a reverse proxy
+# Put mccb behind a reverse proxy
 
-By the end of this page MCCB will be served over HTTPS with uploads and live updates working.
+By the end of this page mccb will be served over HTTPS with uploads and live updates working.
 
 The `web` service listens on plain HTTP on 22362 and trusts `X-Forwarded-*` headers
 (uvicorn `proxy_headers`, all proxies accepted): the client IP for login rate limiting and the

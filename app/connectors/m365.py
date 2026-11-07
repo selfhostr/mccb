@@ -426,7 +426,7 @@ def _dtz(value: datetime | date) -> dict:
 def task_json(t: pim.Task, import_id: str) -> dict:
     out: dict = {"title": t.subject or "(no title)", "status": GRAPH_TASK_STATUS.get(t.status, "notStarted"),
                  "importance": t.priority,
-                 "linkedResources": [{"applicationName": "MCCB", "displayName": "Migrated item", "externalId": import_id}]}
+                 "linkedResources": [{"applicationName": "mccb", "displayName": "Migrated item", "externalId": import_id}]}
     if t.body.strip():
         out["body"] = {"contentType": "text", "content": t.body.strip()}
     if t.categories:

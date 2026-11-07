@@ -317,7 +317,7 @@ def main() -> None:
     if "--healthcheck" in sys.argv:
         sys.exit(healthcheck())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    logging.getLogger("worker").info("MCCB v%s starting (worker)", __import__("app.server.version", fromlist=["get_version"]).get_version())
+    logging.getLogger("worker").info("mccb v%s starting (worker)", __import__("app.server.version", fromlist=["get_version"]).get_version())
     w = Worker()
 
     def _stop(*_):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mccb: command line for the MCCB API. Standard library only, one file: copy it to any machine with Python 3.8+
+"""mccb: command line for the mccb API. Standard library only, one file: copy it to any machine with Python 3.8+
 (a NAS, a server) and push PST files or start migrations from there.
 
     export MCCB_URL=https://mccb.example.org MCCB_TOKEN=mccb_xxxxxxxx_...
@@ -267,7 +267,7 @@ def cmd_upload(api: Api, a) -> int:
 
 # ------------------------------------------------------------------ entry point
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="mccb", description="Command line for the MCCB API.")
+    p = argparse.ArgumentParser(prog="mccb", description="Command line for the mccb API.")
     p.add_argument("--url", default=os.environ.get("MCCB_URL", DEFAULT_URL), help="server URL (MCCB_URL)")
     p.add_argument("--token", default=os.environ.get("MCCB_TOKEN", ""), help="API token (MCCB_TOKEN)")
     p.add_argument("--token-file", help="file holding the token (keeps it out of the process list)")
