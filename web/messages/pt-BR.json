@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Pronto. Os itens já copiados são ignorados, então iniciar duas vezes não cria duplicatas.",
 	"migrations_start_unchecked": "O login ainda não foi verificado. Ele é verificado de novo logo antes do início.",
 	"migrations_new_source": "Origem",
-	"migrations_new_source_hint": "Um PST ou outro arquivo de e-mail. Exchange, IMAP, Google e outros servidores são escolhidos depois de salvar, em Origem e destino.",
+	"migrations_new_source_hint": "Um arquivo já no servidor, um para enviar agora, ou escolher depois.",
 	"migrations_new_source_later": "Escolher depois",
 	"migrations_new_source_file": "{name}, enviado depois de salvar",
 	"migrations_new_email_hint": "A caixa de correio em {server} que recebe o e-mail.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Com falha: {count}",
 	"migrations_conn_untested": "Não testadas: {count}",
 	"migrations_conn_group": "Verificação das conexões",
-	"migrations_filter_tested_ok": "Conexão verificada"
+	"migrations_filter_tested_ok": "Conexão verificada",
+	"settings_server_provider": "Provedor",
+	"settings_server_provider_other": "Outro servidor IMAP",
+	"settings_server_provider_oauth": "A Microsoft recusa senhas simples por IMAP. Para gravar no Microsoft 365, escolha Exchange Online em Origem e destino de cada caixa de correio.",
+	"settings_server_provider_app_password": "{name} pede uma senha de app: crie uma nas configurações de segurança da conta e use-a como senha da caixa de correio.",
+	"migrations_new_source_files": "Arquivo: PST, mbox, EML",
+	"migrations_new_add_server": "Adicionar outro servidor",
+	"migrations_steps_server": "Adicionar o servidor de destino",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak ou qualquer servidor IMAP. Ele é verificado logo depois de salvar.",
+	"migrations_steps_new": "Criar uma migração",
+	"migrations_steps_new_hint": "De onde vem o e-mail (um PST ou outro arquivo, Exchange, Microsoft 365, Google, IMAP) e a caixa de correio para onde vai. Muitas caixas de uma vez: importe um arquivo CSV.",
+	"migrations_steps_start": "Iniciá-la",
+	"migrations_steps_start_hint": "O painel da caixa de correio diz o que ainda falta e depois Iniciar a migração copia tudo. O progresso aparece na lista."
 }

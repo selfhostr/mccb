@@ -2,13 +2,10 @@
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 	import CircleX from '@lucide/svelte/icons/circle-x';
-	import FileUp from '@lucide/svelte/icons/file-up';
 	import Plus from '@lucide/svelte/icons/plus';
 	import Search from '@lucide/svelte/icons/search';
 	import SearchX from '@lucide/svelte/icons/search-x';
-	import Server from '@lucide/svelte/icons/server';
 	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
-	import Users from '@lucide/svelte/icons/users';
 	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, del } from '../../lib/api/client.ts';
@@ -40,7 +37,9 @@
 	import BatchBar from './BatchBar.svelte';
 	import CsvDialog from './CsvDialog.svelte';
 	import ImportDialog from './ImportDialog.svelte';
+	import GettingStarted from './GettingStarted.svelte';
 	import JobPanel from './JobPanel.svelte';
+	import ServerDialog from '../settings/ServerDialog.svelte';
 	import RouteDialog from './RouteDialog.svelte';
 	import SelectionBar from './SelectionBar.svelte';
 	import TestDialog from './TestDialog.svelte';
@@ -172,6 +171,7 @@
 		| { kind: 'details'; id: number }
 		| { kind: 'route'; account: Account }
 		| { kind: 'import'; plan: ImportPlan }
+		| { kind: 'server' }
 		| null
 	>(null);
 	const closeDialog = () => (dialog = null);
@@ -249,6 +249,8 @@
 	<AccountSettings {id} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
 {/snippet}
 
+<!-- On a wide screen the list stays beside the panel instead of under it. -->
+<div class={`transition-[padding] duration-200 ${panelJob != null || panelAccount != null ? 'min-[1680px]:pr-[600px]' : ''}`}>
 <PageHeader title={m.migrations_page_title()} {sentence}>
 	{#snippet actions()}
 		{#if data.servers.length}
@@ -268,19 +270,8 @@
 		<div class="flex flex-col gap-2" data-testid="skeleton">
 			{#each [0, 1, 2, 3, 4, 5] as i (i)}<Skeleton class="h-[var(--row-h)]" />{/each}
 		</div>
-	{:else if !data.servers.length}
-		<EmptyState icon={Server} title={m.migrations_empty_no_server_title()} description={m.migrations_empty_no_server_text()}>
-			{#snippet action()}
-				<Button variant="primary" href="/settings#servers">{m.migrations_empty_no_server_action()}</Button>
-			{/snippet}
-		</EmptyState>
-	{:else if !data.accounts.size}
-		<EmptyState icon={Users} title={m.migrations_empty_no_account_title()} description={m.migrations_empty_no_account_text()}>
-			{#snippet action()}
-				<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })}>{m.migrations_add_label()}</Button>
-				<Button icon={FileUp} onclick={() => (dialog = { kind: 'csv' })}>{m.migrations_add_csv()}</Button>
-			{/snippet}
-		</EmptyState>
+	{:else if !data.servers.length || !data.accounts.size}
+		<GettingStarted hasServer={!!data.servers.length} onserver={() => (dialog = { kind: 'server' })} onnew={() => (dialog = { kind: 'add' })} oncsv={() => (dialog = { kind: 'csv' })} />
 	{:else}
 		<div data-testid="overall"><Progress value={overallPercent} label={m.migrations_page_overall()} /></div>
 
@@ -407,6 +398,8 @@
 	{/if}
 </div>
 
+</div>
+
 {#if data.selected.size}
 	<SelectionBar
 		targets={split.targets.length}
@@ -439,7 +432,9 @@
 	</aside>
 {/if}
 
-{#if dialog?.kind === 'add'}
+{#if dialog?.kind === 'server'}
+	<ServerDialog onclose={closeDialog} />
+{:else if dialog?.kind === 'add'}
 	<AccountDialog defaultServer={server} onclose={closeDialog} oncsv={() => (dialog = { kind: 'csv' })} />
 {:else if dialog?.kind === 'edit'}
 	<AccountDialog account={dialog.account} onclose={closeDialog} />

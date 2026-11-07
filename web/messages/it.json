@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Pronto. Gli elementi già copiati vengono saltati, quindi avviare due volte non crea duplicati.",
 	"migrations_start_unchecked": "L'accesso non è ancora stato verificato. Viene verificato di nuovo subito prima dell'avvio.",
 	"migrations_new_source": "Origine",
-	"migrations_new_source_hint": "Un PST o un altro file di posta. Exchange, IMAP, Google e gli altri server si scelgono dopo il salvataggio, in Origine e destinazione.",
+	"migrations_new_source_hint": "Un file già sul server, uno da inviare ora, oppure scegli dopo.",
 	"migrations_new_source_later": "Scegli dopo",
 	"migrations_new_source_file": "{name}, inviato dopo il salvataggio",
 	"migrations_new_email_hint": "La casella su {server} che riceve la posta.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Non riuscite: {count}",
 	"migrations_conn_untested": "Non testate: {count}",
 	"migrations_conn_group": "Verifica delle connessioni",
-	"migrations_filter_tested_ok": "Connessione verificata"
+	"migrations_filter_tested_ok": "Connessione verificata",
+	"settings_server_provider": "Fornitore",
+	"settings_server_provider_other": "Altro server IMAP",
+	"settings_server_provider_oauth": "Microsoft rifiuta le password semplici via IMAP. Per scrivere in Microsoft 365, scegli Exchange Online in Origine e destinazione di ogni casella.",
+	"settings_server_provider_app_password": "{name} chiede una password per le app: creane una nelle impostazioni di sicurezza dell'account e usala come password della casella.",
+	"migrations_new_source_files": "File: PST, mbox, EML",
+	"migrations_new_add_server": "Aggiungi un altro server",
+	"migrations_steps_server": "Aggiungi il server di destinazione",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak o qualsiasi server IMAP. Viene verificato subito dopo il salvataggio.",
+	"migrations_steps_new": "Crea una migrazione",
+	"migrations_steps_new_hint": "Da dove arriva la posta (un PST o un altro file, Exchange, Microsoft 365, Google, IMAP) e la casella in cui va. Molte caselle insieme: importa un file CSV.",
+	"migrations_steps_start": "Avviala",
+	"migrations_steps_start_hint": "Il pannello della casella dice cosa manca ancora, poi Avvia la migrazione copia tutto. L'avanzamento appare nell'elenco."
 }

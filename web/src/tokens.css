@@ -59,6 +59,7 @@ html[data-theme='light'] {
 	--ease: cubic-bezier(0.16, 1, 0.3, 1);
 	--row-h: 56px;
 	--bar-h: 96px;
+	--side-w: 0px;
 }
 
 html[data-density='comfortable'] {
@@ -76,4 +77,26 @@ html[data-density='comfortable'] {
 	:root {
 		--bar-h: 56px;
 	}
+}
+
+/* Wide screens: the navigation is a column on the left and the top bar goes away. */
+@media (min-width: 64rem) {
+	:root {
+		--bar-h: 0px;
+		--side-w: 232px;
+	}
+}
+
+/* Marks of mail systems and file kinds (Mark.svelte): fixed colours, the same in both themes. */
+:root {
+	--c-mark-fastmail: #0067b9;
+	--c-mark-infomaniak: #0098ff;
+	--c-mark-microsoft: #0f6cbd;
+	--c-mark-jmap: #2f7d5b;
+	--c-mark-icloud: #3478f6;
+	--c-mark-neutral: #5b6472;
+	--c-mark-dav: #6b4fbb;
+	--c-mark-file: #7a5c2e;
+	--c-mark-pst: #b7472a;
+	--c-mark-google: #c5221f;
 }

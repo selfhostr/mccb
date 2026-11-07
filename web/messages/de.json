@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Bereit. Bereits kopierte Elemente werden übersprungen, ein zweiter Start erzeugt keine Duplikate.",
 	"migrations_start_unchecked": "Die Anmeldung wurde noch nicht geprüft. Sie wird direkt vor dem Start erneut geprüft.",
 	"migrations_new_source": "Quelle",
-	"migrations_new_source_hint": "Eine PST- oder andere Maildatei. Exchange, IMAP, Google und andere Server werden nach dem Speichern unter Quelle und Ziel gewählt.",
+	"migrations_new_source_hint": "Eine Datei, die schon auf dem Server liegt, eine jetzt zu sendende, oder später wählen.",
 	"migrations_new_source_later": "Später wählen",
 	"migrations_new_source_file": "{name}, wird nach dem Speichern gesendet",
 	"migrations_new_email_hint": "Das Postfach auf {server}, das die E-Mails erhält.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Fehlgeschlagen: {count}",
 	"migrations_conn_untested": "Nicht getestet: {count}",
 	"migrations_conn_group": "Verbindungsprüfung",
-	"migrations_filter_tested_ok": "Verbindung geprüft"
+	"migrations_filter_tested_ok": "Verbindung geprüft",
+	"settings_server_provider": "Anbieter",
+	"settings_server_provider_other": "Anderer IMAP-Server",
+	"settings_server_provider_oauth": "Microsoft lehnt einfache Passwörter über IMAP ab. Um in Microsoft 365 zu schreiben, wählen Sie Exchange Online unter Quelle und Ziel jedes Postfachs.",
+	"settings_server_provider_app_password": "{name} verlangt ein App-Passwort: Erstellen Sie eines in den Sicherheitseinstellungen des Kontos und verwenden Sie es als Passwort des Postfachs.",
+	"migrations_new_source_files": "Datei: PST, mbox, EML",
+	"migrations_new_add_server": "Weiteren Server hinzufügen",
+	"migrations_steps_server": "Zielserver hinzufügen",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak oder ein beliebiger IMAP-Server. Er wird direkt nach dem Speichern geprüft.",
+	"migrations_steps_new": "Migration anlegen",
+	"migrations_steps_new_hint": "Woher die E-Mails kommen (PST oder andere Datei, Exchange, Microsoft 365, Google, IMAP) und in welches Postfach sie gehen. Viele Postfächer auf einmal: CSV-Datei importieren.",
+	"migrations_steps_start": "Starten",
+	"migrations_steps_start_hint": "Der Bereich des Postfachs zeigt, was noch fehlt, dann kopiert Migration starten alles. Der Fortschritt erscheint in der Liste."
 }

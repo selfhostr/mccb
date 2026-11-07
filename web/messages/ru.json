@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Готово. Уже скопированные элементы пропускаются, повторный запуск не создаёт дубликатов.",
 	"migrations_start_unchecked": "Вход ещё не проверен. Он проверяется снова прямо перед запуском.",
 	"migrations_new_source": "Источник",
-	"migrations_new_source_hint": "PST или другой почтовый файл. Exchange, IMAP, Google и другие серверы выбираются после сохранения, в разделе «Источник и назначение».",
+	"migrations_new_source_hint": "Файл, уже лежащий на сервере, файл для отправки сейчас, или выбрать позже.",
 	"migrations_new_source_later": "Выбрать позже",
 	"migrations_new_source_file": "{name}, будет отправлен после сохранения",
 	"migrations_new_email_hint": "Ящик на {server}, который получает почту.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "С ошибкой: {count}",
 	"migrations_conn_untested": "Не проверено: {count}",
 	"migrations_conn_group": "Проверка подключений",
-	"migrations_filter_tested_ok": "Подключение проверено"
+	"migrations_filter_tested_ok": "Подключение проверено",
+	"settings_server_provider": "Провайдер",
+	"settings_server_provider_other": "Другой IMAP-сервер",
+	"settings_server_provider_oauth": "Microsoft не принимает обычные пароли по IMAP. Чтобы писать в Microsoft 365, выберите Exchange Online в разделе «Источник и назначение» каждого ящика.",
+	"settings_server_provider_app_password": "{name} требует пароль приложения: создайте его в настройках безопасности учётной записи и используйте как пароль ящика.",
+	"migrations_new_source_files": "Файл: PST, mbox, EML",
+	"migrations_new_add_server": "Добавить ещё сервер",
+	"migrations_steps_server": "Добавьте целевой сервер",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak или любой IMAP-сервер. Он проверяется сразу после сохранения.",
+	"migrations_steps_new": "Создайте перенос",
+	"migrations_steps_new_hint": "Откуда берётся почта (PST или другой файл, Exchange, Microsoft 365, Google, IMAP) и в какой ящик она идёт. Много ящиков сразу: импортируйте файл CSV.",
+	"migrations_steps_start": "Запустите его",
+	"migrations_steps_start_hint": "Панель ящика показывает, чего ещё не хватает, затем «Начать перенос» копирует всё. Ход переноса виден в списке."
 }

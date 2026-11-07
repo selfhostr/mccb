@@ -13,7 +13,7 @@
 
 <PageHeader title={m.settings_page_title()} sentence={m.settings_page_sentence({ servers: data.servers.length })} />
 
-<div class="flex max-w-[720px] flex-col gap-10">
+<div class="flex max-w-[960px] flex-col gap-10">
 	<ServersSection />
 	<IntakeSection />
 	<NotificationsSection />

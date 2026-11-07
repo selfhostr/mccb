@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Listo. Los elementos ya copiados se omiten, así que iniciar dos veces no crea duplicados.",
 	"migrations_start_unchecked": "El inicio de sesión aún no se ha comprobado. Se comprueba de nuevo justo antes de empezar.",
 	"migrations_new_source": "Origen",
-	"migrations_new_source_hint": "Un PST u otro archivo de correo. Exchange, IMAP, Google y otros servidores se eligen después de guardar, en Origen y destino.",
+	"migrations_new_source_hint": "Un archivo que ya está en el servidor, uno para enviar ahora, o elegir más tarde.",
 	"migrations_new_source_later": "Elegir más tarde",
 	"migrations_new_source_file": "{name}, se envía después de guardar",
 	"migrations_new_email_hint": "El buzón en {server} que recibe el correo.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Con error: {count}",
 	"migrations_conn_untested": "Sin probar: {count}",
 	"migrations_conn_group": "Comprobación de conexiones",
-	"migrations_filter_tested_ok": "Conexión verificada"
+	"migrations_filter_tested_ok": "Conexión verificada",
+	"settings_server_provider": "Proveedor",
+	"settings_server_provider_other": "Otro servidor IMAP",
+	"settings_server_provider_oauth": "Microsoft rechaza las contraseñas simples por IMAP. Para escribir en Microsoft 365, elija Exchange Online en Origen y destino de cada buzón.",
+	"settings_server_provider_app_password": "{name} pide una contraseña de aplicación: cree una en los ajustes de seguridad de la cuenta y úsela como contraseña del buzón.",
+	"migrations_new_source_files": "Archivo: PST, mbox, EML",
+	"migrations_new_add_server": "Añadir otro servidor",
+	"migrations_steps_server": "Añadir el servidor de destino",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak o cualquier servidor IMAP. Se comprueba justo después de guardar.",
+	"migrations_steps_new": "Crear una migración",
+	"migrations_steps_new_hint": "De dónde viene el correo (un PST u otro archivo, Exchange, Microsoft 365, Google, IMAP) y el buzón al que va. Muchos buzones a la vez: importe un archivo CSV.",
+	"migrations_steps_start": "Iniciarla",
+	"migrations_steps_start_hint": "El panel del buzón dice lo que aún falta y luego Iniciar la migración lo copia todo. El progreso se ve en la lista."
 }

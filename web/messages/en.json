@@ -584,7 +584,7 @@
 	"migrations_start_ready": "Ready. Items already copied are skipped, so starting twice creates no duplicates.",
 	"migrations_start_unchecked": "The login has not been checked yet. It is checked again just before the start.",
 	"migrations_new_source": "Source",
-	"migrations_new_source_hint": "A PST or another mail file. Exchange, IMAP, Google and other servers are chosen after saving, with Source and target.",
+	"migrations_new_source_hint": "A file already on the server, one to send now, or choose later.",
 	"migrations_new_source_later": "Choose later",
 	"migrations_new_source_file": "{name}, sent after saving",
 	"migrations_new_email_hint": "The mailbox on {server} that receives the mail.",
@@ -596,5 +596,17 @@
 	"migrations_conn_failed": "Failed: {count}",
 	"migrations_conn_untested": "Not tested: {count}",
 	"migrations_conn_group": "Connection checks",
-	"migrations_filter_tested_ok": "Connection verified"
+	"migrations_filter_tested_ok": "Connection verified",
+	"settings_server_provider": "Provider",
+	"settings_server_provider_other": "Other IMAP server",
+	"settings_server_provider_oauth": "Microsoft refuses plain passwords over IMAP. To write into Microsoft 365, choose Exchange Online in each mailbox's Source and target.",
+	"settings_server_provider_app_password": "{name} asks for an app password: create one in the account's security settings and use it as the mailbox password.",
+	"migrations_new_source_files": "File: PST, mbox, EML",
+	"migrations_new_add_server": "Add another server",
+	"migrations_steps_server": "Add the server the mail goes to",
+	"migrations_steps_server_hint": "Gmail, Microsoft 365, iCloud, Fastmail, Infomaniak or any IMAP server. It is checked right after saving.",
+	"migrations_steps_new": "Create a migration",
+	"migrations_steps_new_hint": "Where the mail comes from (a PST or another file, Exchange, Microsoft 365, Google, IMAP) and the mailbox it goes to. Many mailboxes at once: import a CSV file.",
+	"migrations_steps_start": "Start it",
+	"migrations_steps_start_hint": "The mailbox's panel says what is still missing, then Start migration copies everything. Progress shows in the list."
 }
