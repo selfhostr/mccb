@@ -382,6 +382,7 @@ class ImapConn:
             raise wrap_exc(e) from e
         self._check(typ, data, f"SELECT {name}")
         self.selected = name
+        self.selected_readonly = readonly
         try:
             return int(data[0])
         except Exception:
@@ -534,6 +535,78 @@ class ImapConn:
             self._m().noop()
         except Exception as e:
             raise wrap_exc(e) from e
+
+    # -- in-place work on an existing mailbox (repair)
+    def ensure_selected(self, name: str, readonly: bool) -> None:
+        """SELECT unless `name` is already selected well enough (EXAMINE does not allow writing)."""
+        if self.selected != name or (not readonly and getattr(self, "selected_readonly", True)):
+            self.select(name, readonly=readonly)
+
+    def uids(self, name: str, readonly: bool = True) -> list[str]:
+        """UIDs of the messages not flagged \\Deleted, in ascending order."""
+        self.ensure_selected(name, readonly)
+        try:
+            with self._patient():
+                typ, data = self._m().uid("SEARCH", "UNDELETED")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        t = _text(self._check(typ, data, "SEARCH"))
+        return sorted((u for u in t.split() if u.isdigit()), key=int)
+
+    def fetch_messages(self, name: str, uids: list[str], readonly: bool = True
+                       ) -> list[tuple[str, list[str], datetime | None, bytes]]:
+        """[(uid, flags, internaldate, raw)] in one UID FETCH, without setting \\Seen."""
+        if not uids:
+            return []
+        self.ensure_selected(name, readonly)
+        try:
+            typ, data = self._m().uid("FETCH", ",".join(uids), "(UID FLAGS INTERNALDATE BODY.PEEK[])")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "FETCH")
+        out = []
+        for d in data or []:
+            if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
+                continue
+            head = d[0] if isinstance(d[0], bytes) else str(d[0]).encode()
+            m = re.search(rb"UID (\d+)", head)
+            if not m:
+                continue
+            flags = [f.decode("utf-8", "replace") for f in imaplib.ParseFlags(head)
+                     if f.lower() not in (b"\\recent", b"\\deleted")]
+            tt = imaplib.Internaldate2tuple(head)
+            when = datetime.fromtimestamp(time.mktime(tt)).astimezone() if tt else None
+            out.append((m.group(1).decode(), flags, when, d[1]))
+        return out
+
+    def uid_copy(self, name: str, uids: list[str], dest: str) -> None:
+        self.ensure_selected(name, False)
+        try:
+            typ, data = self._m().uid("COPY", ",".join(uids), quote(dest))
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, f"COPY to {dest}")
+
+    def uid_delete(self, name: str, uids: list[str]) -> bool:
+        """Flags \\Deleted and expunges ONLY these messages (UID EXPUNGE, UIDPLUS). Without UIDPLUS they stay
+        flagged \\Deleted: a plain EXPUNGE would also remove what the owner flagged. True when expunged."""
+        if not uids:
+            return True
+        self.ensure_selected(name, False)
+        M = self._m()
+        seq = ",".join(uids)
+        try:
+            typ, data = M.uid("STORE", seq, "+FLAGS.SILENT", "(\\Deleted)")
+            self._check(typ, data, "STORE")
+            if "UIDPLUS" not in self.caps:
+                return False
+            typ, data = M.uid("EXPUNGE", seq)
+        except ImapError:
+            raise
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "UID EXPUNGE")
+        return True
 
 
 # ---------------------------------------------------------------- special folders
