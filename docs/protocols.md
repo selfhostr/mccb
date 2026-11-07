@@ -42,7 +42,7 @@ Gmail through IMAP, Google Calendar and Google People (contacts) through their R
 
 ## Files: mbox, Maildir, .eml, .msg, .ics, .vcf, .zip
 
-These arrive like a PST: through the upload page, `POST /api/uploads`, a URL fetch, or the drop folder (see [Server-side intake](server-intake.md)). The analysis recognizes them, the row appears in the PST list with `scan.format: "files"`, and a mailbox that links it reads it with the `files` connector. A PST or OST is analysed as before and is never read by this connector.
+These arrive like a PST: through the Files page, `POST /api/uploads`, a URL fetch, or the drop folder (see [Server-side intake](server-intake.md)). The analysis recognizes them, the row appears in the PST list with `scan.format: "files"`, and a mailbox that links it reads it with the `files` connector. A PST or OST is analysed as before and is never read by this connector.
 
 | What you have | How to send it |
 |---|---|
