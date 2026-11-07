@@ -201,7 +201,7 @@ class ConnectorJobRunner(JobRunner):
         if self.setup_error:
             raise JobFailed(self.setup_error)
         if not self.pst_key:
-            raise JobFailed("no PST linked to the account" if self.source_kind == wiring.PST else "source not set")
+            raise JobFailed("no PST linked to the mailbox" if self.source_kind == wiring.PST else "source not set")
         ctx = {"guard": _NativeGuard(self)}
         try:
             self.targets = wiring.targets_of_account(self.acc, self.srv)
@@ -209,7 +209,7 @@ class ConnectorJobRunner(JobRunner):
         except ConnectorError as e:
             raise JobFailed(str(e)) from e
         self.report["source"] = {"kind": self.source_kind, "namespace": self.pst_key}
-        self.log(f"Route: {self.source_kind} to " + (self.acc["target_kind"] or "the server of the account"))
+        self.log(f"Route: {self.source_kind} to " + (self.acc["target_kind"] or "the server of the mailbox"))
         try:
             if self.source.native_code:
                 self._mark(phase="open")

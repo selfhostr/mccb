@@ -14,14 +14,14 @@ EWS is not offered for Exchange Online. Microsoft blocks it by default since 202
 
 ## Routes
 
-An account has one source and one target of its own. The server of the account covers the kinds its target does not serve.
+A mailbox has one source and one target of its own. The server of the mailbox covers the kinds its target does not serve.
 
-- **Exchange to IMAP, CalDAV and CardDAV on one server:** source `exchange_ews` or `m365_graph`, no target of its own. Mail goes to the IMAP server of the account, calendars and contacts to its DAV addresses if DAV is enabled on the server, tasks to a CalDAV calendar that accepts `VTODO`.
-- **Exchange to a separate CalDAV or CardDAV server:** set the target of the account to `caldav` or `carddav`. It serves its own kinds, the server of the account covers the rest.
-- **To Exchange:** one account per source, as a source reads one protocol. For a mailbox on IMAP and DAV, that is up to three accounts with the same Exchange target: source `imap` for mail, `caldav` for calendars and tasks, `carddav` for contacts. `email` is unique per server: create a second server entry if the same address must appear twice.
+- **Exchange to IMAP, CalDAV and CardDAV on one server:** source `exchange_ews` or `m365_graph`, no target of its own. Mail goes to the IMAP server of the mailbox, calendars and contacts to its DAV addresses if DAV is enabled on the server, tasks to a CalDAV calendar that accepts `VTODO`.
+- **Exchange to a separate CalDAV or CardDAV server:** set the target of the mailbox to `caldav` or `carddav`. It serves its own kinds, the server of the mailbox covers the rest.
+- **To Exchange:** one MCCB mailbox per source, as a source reads one protocol. For a mailbox on IMAP and DAV, that is up to three MCCB mailboxes with the same Exchange target: source `imap` for mail, `caldav` for calendars and tasks, `carddav` for contacts. `email` is unique per server: create a second server entry if the same address must appear twice.
 - **Exchange to Exchange:** source and target are both Exchange, every kind goes through.
 
-Tasks have no option of their own: they follow the calendar option of the account.
+Tasks have no option of their own: they follow the calendar option of the mailbox.
 
 ## Exchange on premises (EWS)
 
@@ -92,7 +92,7 @@ Graph has no way to import a message with everything intact.
 
 Microsoft documents a limit of 4 MB for S/MIME payloads and none for other MIME content. A larger message may be refused with HTTP 413: it is reported as an error for this item, the others go on.
 
-**If you need the received dates, write mail with `imap_oauth2`.** An account has one target, so this takes two accounts for the same source: one with the target `imap_oauth2`, the other with the target `m365_graph` and the mail option off. `email` is unique per server: create a second server entry for the second account.
+**If you need the received dates, write mail with `imap_oauth2`.** A mailbox has one target, so this takes two MCCB mailboxes for the same source: one with the target `imap_oauth2`, the other with the target `m365_graph` and the mail option off. `email` is unique per server: create a second server entry for the second mailbox.
 
 ### IMAP with OAuth2, app-only on Exchange Online
 
@@ -114,7 +114,7 @@ On a Dovecot-style server one account reaches every mailbox: in the `imap` conne
 
 ## Migrate a tenant
 
-There is one account per mailbox, with the same application. List the mailboxes, then create the accounts through the [API](api.md):
+Every mailbox uses the same application. List the mailboxes, then create them through the [API](api.md):
 
 ```bash
 # cookies.txt holds the session cookie of POST /api/login

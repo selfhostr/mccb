@@ -290,14 +290,14 @@ test.describe('migrations', () => {
 
 		await mock(page.request, 'reset', { accounts: 0 });
 		await page.reload();
-		await expect(page.getByTestId('empty-state')).toContainText('No accounts yet');
+		await expect(page.getByTestId('empty-state')).toContainText('No mailboxes yet');
 
 		await page.route('**/api/accounts', (route) => route.fulfill({ status: 500, json: { detail: 'database is locked' } }));
 		await page.reload();
 		await expect(page.getByRole('alert')).toContainText('database is locked');
 		await page.unroute('**/api/accounts');
 		await page.getByRole('button', { name: 'Retry' }).click();
-		await expect(page.getByTestId('empty-state')).toContainText('No accounts yet');
+		await expect(page.getByTestId('empty-state')).toContainText('No mailboxes yet');
 	});
 
 	test('old links still work', async ({ page }) => {

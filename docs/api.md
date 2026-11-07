@@ -13,7 +13,7 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `tuning:'auto'|'manual',builders:int|null}` (manual: `workers` IMAP connections, `builders` builder processes, null =
   machine default; `tuning` omitted on creation = `manual` if `workers` is not 2 or 4 (earlier defaults) else `auto`, omitted on update = unchanged)
   (`caldav_url`/`carddav_url`: empty = `.well-known` auto-discovery, otherwise a template with `{email}`, `{user}`, `{domain}`)
-- Accounts: `GET /api/accounts?server_id=`, `POST /api/accounts {server_id,email,password,login?}`,
+- Mailboxes (`account` in the API): `GET /api/accounts?server_id=`, `POST /api/accounts {server_id,email,password,login?}`,
   `PUT/DELETE /api/accounts/{id}`, `POST /api/accounts/{id}/test` → `{imap:{ok,msg,quota},caldav:{ok,msg},carddav:{ok,msg}}`,
   `POST /api/accounts/import-csv` (multipart file + server_id; columns `email;password[;login]`, `,` or `;`, optional header)
   → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
@@ -87,7 +87,7 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `GET /api/jobs/{id}/compare/csv`. `GET /api/jobs/{id}/filtered`, `GET /api/jobs/{id}/oversized`.
   Jobs gain `priority`, `batch_id` and `pause_reason` (`'window'`: waiting for the allowed hours, resumes by itself; `null`: paused by the administrator).
   The report gains `filtered`, `oversized`, `policy`, `totals.<kind>.filtered` and, after a comparison, `compare`.
-- Accounts as CSV: `POST /api/accounts/import-csv` accepts the optional columns of [Import accounts](import-accounts.md) and may answer `warnings:[{line,msg}]`;
+- Mailboxes as CSV: `POST /api/accounts/import-csv` accepts the optional columns of [Import mailboxes](import-accounts.md) and may answer `warnings:[{line,msg}]`;
   `GET /api/accounts/export-csv[?server_id=]` writes them back (never a password or a secret).
 - API tokens (see [Command line and API tokens](cli.md)): `GET /api/tokens`, `POST /api/tokens {name}` → **201** with `token` (shown once), `DELETE /api/tokens/{id}`.
   Any route accepts `Authorization: Bearer <token>`; the token routes themselves need a session (**403** with a token).

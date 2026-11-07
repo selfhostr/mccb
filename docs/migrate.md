@@ -2,14 +2,14 @@
 
 By the end of this page a mailbox, its calendar and its contacts will be imported from a PST file, with a report.
 
-A PST is the most common source, so the steps below follow it. Other sources (mbox, Maildir, loose messages, a live IMAP, CalDAV, CardDAV, Exchange, Microsoft 365, JMAP or Google server) follow the same steps, except that uploading and linking a file is replaced by choosing the source and the target of the account: see [Connectors](connectors.md) and [Protocols and file formats](protocols.md). Files other than a PST arrive in the same way and are listed with the PSTs.
+A PST is the most common source, so the steps below follow it. Other sources (mbox, Maildir, loose messages, a live IMAP, CalDAV, CardDAV, Exchange, Microsoft 365, JMAP or Google server) follow the same steps, except that uploading and linking a file is replaced by choosing the source and the target of the mailbox: see [Connectors](connectors.md) and [Protocols and file formats](protocols.md). Files other than a PST arrive in the same way and are listed with the PSTs.
 
 1. **Servers.** Create a server: IMAP host and port, security (`ssl`, `starttls`, `none`), TLS
    verification (can be disabled), optional root folder (`root_folder`, e.g. `PST Import`), CalDAV/CardDAV URL
    (empty = auto-discovery, see [DAV discovery](dav.md)), number of parallel connections (`workers`). A test button
    checks the connection.
-2. **Accounts.** Add mailboxes one by one or via [CSV](import-accounts.md). The IMAP login is
-   tested when added, then again before the run (`precheck`). For each account you can enable or
+2. **Mailboxes.** Add mailboxes one by one or via [CSV](import-accounts.md). The IMAP login is
+   tested when added, then again before the run (`precheck`). For each mailbox you can enable or
    disable mail, calendar and contacts.
 3. **PST upload.** Drag and drop the file onto the Uploads page. It is split into chunks
    (32 MiB by default), sent 3 in parallel with automatic retry. Each chunk is verified by
@@ -24,8 +24,8 @@ A PST is the most common source, so the steps below follow it. Other sources (mb
    organized by folder. Open it **before launching** to check accents (subjects, bodies, folder
    names), attachment names and types, and embedded images. Generated in a
    subprocess, 120 s maximum; 409 error if the PST is not valid, 500 if libpff crashes.
-6. **Association.** Attach a valid PST to each account. Before the run, a [dry run](planning.md) shows counts, sizes, quota and the folders that will be created, and a [policy](planning.md) can map folders, leave some out and set allowed hours.
-7. **Runs.** Select accounts then "Run" (`POST /api/runs`): one job per mailbox, queued.
+6. **Association.** Attach a valid PST to each mailbox. Before the run, a [dry run](planning.md) shows counts, sizes, quota and the folders that will be created, and a [policy](planning.md) can map folders, leave some out and set allowed hours.
+7. **Runs.** Select mailboxes then "Run" (`POST /api/runs`): one job per mailbox, queued.
    The worker runs `WORKER_CONCURRENCY` at a time. Phases: `precheck` (IMAP, DAV, quota), `mail`,
    `calendar`, `contacts`, `verify`.
 8. **Pause / resume / stop.** From the job detail: pause, resume, stop, full retry, or
