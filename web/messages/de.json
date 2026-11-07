@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Wohin die Postfächer migriert werden.",
 	"settings_servers_title": "Server",
 	"settings_server_test": "{name} testen",
-	"settings_server_test_not_saved": "Der Server speichert dieses Ergebnis nicht. Es verschwindet, wenn Sie die Seite verlassen. Postfachtests werden gespeichert.",
 	"settings_server_tuning": "Abstimmung und Notizen",
 	"settings_server_tuning_auto": "Automatisch",
 	"settings_server_tuning_manual": "Manuell",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Später wählen",
 	"migrations_new_source_file": "{name}, wird nach dem Speichern gesendet",
 	"migrations_new_email_hint": "Das Postfach auf {server}, das die E-Mails erhält.",
-	"migrations_new_password_hint": "Das Passwort dieses Postfachs auf dem Zielserver. Es wird direkt nach dem Speichern geprüft."
+	"migrations_new_password_hint": "Das Passwort dieses Postfachs auf dem Zielserver. Es wird direkt nach dem Speichern geprüft.",
+	"settings_server_check_ok": "Geprüft",
+	"settings_server_check_failed": "Prüfung fehlgeschlagen",
+	"settings_server_check_never": "Nicht geprüft",
+	"migrations_conn_ok": "Geprüft: {count}",
+	"migrations_conn_failed": "Fehlgeschlagen: {count}",
+	"migrations_conn_untested": "Nicht getestet: {count}",
+	"migrations_conn_group": "Verbindungsprüfung",
+	"migrations_filter_tested_ok": "Verbindung geprüft"
 }

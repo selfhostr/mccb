@@ -217,7 +217,14 @@ def update_server(sid: int, s: ServerIn):
     cur = _server_or_404(sid)
     db.ex("UPDATE servers SET name=?,imap_host=?,imap_port=?,imap_security=?,verify_tls=?,root_folder=?,caldav_url=?,"
           "carddav_url=?,dav_enabled=?,workers=?,notes=?,tuning=?,builders=? WHERE id=?", (*_srv_values(s, cur), sid))
+    new = db.q1("SELECT * FROM servers WHERE id=?", (sid,))
+    if any(cur[k] != new[k] for k in _SRV_CONNECTION):  # the last test was about another connection
+        db.ex("UPDATE servers SET last_test=NULL, last_test_result=NULL WHERE id=?", (sid,))
     return repo.get_server(sid)
+
+
+# Settings a connection test depends on: changing one clears the stored result.
+_SRV_CONNECTION = ("imap_host", "imap_port", "imap_security", "verify_tls", "caldav_url", "carddav_url", "dav_enabled")
 
 
 @app.delete("/api/servers/{sid}")
@@ -258,6 +265,7 @@ def test_server(sid: int):
         res["imap"] = {"ok": False, "msg": f"connection failed: {e}"}
     for kind, col in (("caldav", "caldav_url"), ("carddav", "carddav_url")):
         res[kind] = _probe_dav(r, kind, r[col])
+    db.ex("UPDATE servers SET last_test=?, last_test_result=? WHERE id=?", (time.time(), db.jdump(res), sid))
     return res
 
 

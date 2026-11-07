@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Para onde as caixas de correio são migradas.",
 	"settings_servers_title": "Servidores",
 	"settings_server_test": "Testar {name}",
-	"settings_server_test_not_saved": "O servidor não guarda este resultado. Ele some quando você sai da página. Os testes de caixas de correio são guardados.",
 	"settings_server_tuning": "Ajuste e notas",
 	"settings_server_tuning_auto": "Automático",
 	"settings_server_tuning_manual": "Manual",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Escolher depois",
 	"migrations_new_source_file": "{name}, enviado depois de salvar",
 	"migrations_new_email_hint": "A caixa de correio em {server} que recebe o e-mail.",
-	"migrations_new_password_hint": "A senha desta caixa de correio no servidor de destino. Ela é verificada logo depois de salvar."
+	"migrations_new_password_hint": "A senha desta caixa de correio no servidor de destino. Ela é verificada logo depois de salvar.",
+	"settings_server_check_ok": "Verificado",
+	"settings_server_check_failed": "Falha na verificação",
+	"settings_server_check_never": "Não verificado",
+	"migrations_conn_ok": "Verificadas: {count}",
+	"migrations_conn_failed": "Com falha: {count}",
+	"migrations_conn_untested": "Não testadas: {count}",
+	"migrations_conn_group": "Verificação das conexões",
+	"migrations_filter_tested_ok": "Conexão verificada"
 }

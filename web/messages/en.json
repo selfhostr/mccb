@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Where the mailboxes are migrated to.",
 	"settings_servers_title": "Servers",
 	"settings_server_test": "Test {name}",
-	"settings_server_test_not_saved": "The server does not store this result. It disappears when you leave the page. Mailbox tests are stored.",
 	"settings_server_tuning": "Tuning and notes",
 	"settings_server_tuning_auto": "Automatic",
 	"settings_server_tuning_manual": "Manual",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Choose later",
 	"migrations_new_source_file": "{name}, sent after saving",
 	"migrations_new_email_hint": "The mailbox on {server} that receives the mail.",
-	"migrations_new_password_hint": "The password of this mailbox on the destination server. It is checked right after saving."
+	"migrations_new_password_hint": "The password of this mailbox on the destination server. It is checked right after saving.",
+	"settings_server_check_ok": "Verified",
+	"settings_server_check_failed": "Check failed",
+	"settings_server_check_never": "Not verified",
+	"migrations_conn_ok": "Verified: {count}",
+	"migrations_conn_failed": "Failed: {count}",
+	"migrations_conn_untested": "Not tested: {count}",
+	"migrations_conn_group": "Connection checks",
+	"migrations_filter_tested_ok": "Connection verified"
 }

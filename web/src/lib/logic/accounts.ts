@@ -5,8 +5,20 @@ import { hasCustomSource, hasOwnTarget } from './connector.ts';
 export const ACTIVE_JOB = ['queued', 'running', 'paused', 'stopping'];
 export const isActive = (job: Job | undefined | null): boolean => !!job && ACTIVE_JOB.includes(job.status);
 
-export type StatusFilter = '' | 'untested' | 'test_failed' | 'no_pst' | 'active' | 'done' | 'problem';
-export const STATUS_FILTERS: StatusFilter[] = ['', 'untested', 'test_failed', 'no_pst', 'active', 'done', 'problem'];
+export type StatusFilter = '' | 'untested' | 'tested_ok' | 'test_failed' | 'no_pst' | 'active' | 'done' | 'problem';
+export const STATUS_FILTERS: StatusFilter[] = ['', 'untested', 'tested_ok', 'test_failed', 'no_pst', 'active', 'done', 'problem'];
+
+/** Where the last connection test of a mailbox left it. */
+export type Connection = 'ok' | 'failed' | 'untested';
+export function connectionOf(account: Pick<Account, 'status'>): Connection {
+	return account.status === 'ok' ? 'ok' : account.status === 'new' ? 'untested' : 'failed';
+}
+
+export function connectionCounts(accounts: Iterable<Pick<Account, 'status'>>): Record<Connection, number> {
+	const c: Record<Connection, number> = { ok: 0, failed: 0, untested: 0 };
+	for (const account of accounts) c[connectionOf(account)]++;
+	return c;
+}
 
 /** A password change sets the status back to `new` and leaves the old result in place: it no longer applies. */
 export function currentResult(account: Pick<Account, 'status' | 'last_test_result'>): TestResult | null {
@@ -37,6 +49,8 @@ export function matchesFilter(
 	switch (filter.status) {
 		case 'untested':
 			return account.status === 'new';
+		case 'tested_ok':
+			return account.status === 'ok';
 		case 'test_failed':
 			return account.status === 'auth_failed' || account.status === 'error';
 		case 'no_pst':

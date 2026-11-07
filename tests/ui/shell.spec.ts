@@ -158,13 +158,17 @@ test.describe('settings', () => {
 		await expect(page.getByTestId('account-email').first()).not.toContainText('alice@example.com');
 	});
 
-	test('server test: every protocol, and it says it is not stored', async ({ page }) => {
+	test('server test: every protocol, and the verdict stays after a reload', async ({ page }) => {
 		await ready(page, '/settings');
+		const row = page.locator('[data-server="Production"]');
+		await expect(row.getByTestId('server-verdict')).toContainText('Not verified');
 		await page.getByRole('button', { name: 'Test Production' }).click();
 		const result = page.getByTestId('server-test');
 		await expect(result).toContainText('IMAP');
 		await expect(result).toContainText('CardDAV');
-		await expect(page.getByTestId('section-servers')).toContainText('does not store');
+		await expect(row.getByTestId('server-verdict')).toContainText('Check failed');
+		await page.reload();
+		await expect(page.locator('[data-server="Production"]').getByTestId('server-verdict')).toContainText('Check failed');
 	});
 
 	test('lists the connector catalogue, and tolerates a server without the route', async ({ page }) => {

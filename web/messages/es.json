@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Adónde se migran los buzones.",
 	"settings_servers_title": "Servidores",
 	"settings_server_test": "Probar {name}",
-	"settings_server_test_not_saved": "El servidor no guarda este resultado. Desaparece al salir de la página. Las pruebas de buzones sí se guardan.",
 	"settings_server_tuning": "Ajuste y notas",
 	"settings_server_tuning_auto": "Automático",
 	"settings_server_tuning_manual": "Manual",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Elegir más tarde",
 	"migrations_new_source_file": "{name}, se envía después de guardar",
 	"migrations_new_email_hint": "El buzón en {server} que recibe el correo.",
-	"migrations_new_password_hint": "La contraseña de este buzón en el servidor de destino. Se comprueba justo después de guardar."
+	"migrations_new_password_hint": "La contraseña de este buzón en el servidor de destino. Se comprueba justo después de guardar.",
+	"settings_server_check_ok": "Verificado",
+	"settings_server_check_failed": "Verificación fallida",
+	"settings_server_check_never": "Sin verificar",
+	"migrations_conn_ok": "Verificadas: {count}",
+	"migrations_conn_failed": "Con error: {count}",
+	"migrations_conn_untested": "Sin probar: {count}",
+	"migrations_conn_group": "Comprobación de conexiones",
+	"migrations_filter_tested_ok": "Conexión verificada"
 }

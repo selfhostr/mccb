@@ -14,9 +14,12 @@ export interface Server {
 	notes: string;
 	tuning: 'auto' | 'manual';
 	builders: number | null;
+	/** Last connection test, stored by the server; cleared when a connection setting changes. */
+	last_test?: number | null;
+	last_test_result?: TestResult | null;
 }
 
-export type ServerInput = Omit<Server, 'id'>;
+export type ServerInput = Omit<Server, 'id' | 'last_test' | 'last_test_result'>;
 
 export interface ProbeResult {
 	ok: boolean;

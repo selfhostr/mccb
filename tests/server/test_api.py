@@ -27,7 +27,9 @@ def test_servers_crud(client):
     assert r.status_code == 201
     s = r.json()
     assert set(s) == {"id", "name", "imap_host", "imap_port", "imap_security", "verify_tls", "root_folder",
-                      "caldav_url", "carddav_url", "dav_enabled", "workers", "notes", "tuning", "builders"}
+                      "caldav_url", "carddav_url", "dav_enabled", "workers", "notes", "tuning", "builders",
+                      "last_test", "last_test_result"}
+    assert s["last_test"] is None and s["last_test_result"] is None
     assert s["carddav_url"] == "https://dav/{email}/"
     sid = s["id"]
     assert client.get(f"/api/servers/{sid}").json()["name"] == "Prod"
@@ -37,6 +39,25 @@ def test_servers_crud(client):
     assert client.post("/api/servers", json=dict(SRV, imap_security="bad")).status_code == 422
     assert client.delete(f"/api/servers/{sid}").status_code == 200
     assert client.get(f"/api/servers/{sid}").status_code == 404
+
+
+def test_server_test_is_stored_and_cleared_by_a_connection_change(client, monkeypatch):
+    import imaplib
+
+    def refuse(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", refuse)
+    sid = client.post("/api/servers", json={**SRV, "dav_enabled": False}).json()["id"]
+    res = client.post(f"/api/servers/{sid}/test").json()
+    assert res["imap"]["ok"] is False and res["caldav"]["ok"] is True
+    s = client.get(f"/api/servers/{sid}").json()
+    assert s["last_test"] and s["last_test_result"] == res
+    assert client.get("/api/servers").json()[0]["last_test_result"] == res
+    # Notes only: the stored verdict still applies
+    assert client.put(f"/api/servers/{sid}", json={**SRV, "dav_enabled": False, "notes": "y"}).json()["last_test_result"] == res
+    # Another host: it no longer does
+    s = client.put(f"/api/servers/{sid}", json={**SRV, "dav_enabled": False, "imap_host": "other.example.test"}).json()
+    assert s["last_test"] is None and s["last_test_result"] is None
 
 
 def test_accounts_crud_and_password_encrypted(client, env):

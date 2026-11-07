@@ -12,7 +12,7 @@
 	import PolicyFields from './PolicyFields.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
 
-	let { server = null, onclose }: { server?: Server | null; onclose: () => void } = $props();
+	let { server = null, onclose, onsaved }: { server?: Server | null; onclose: () => void; onsaved?: (saved: Server) => void } = $props();
 
 	const initial: ServerInput = untrack(() =>
 		server
@@ -46,11 +46,12 @@
 					return;
 				}
 			}
-			if (server) await put(`/servers/${server.id}`, body);
-			else await post('/servers', body);
+			const saved = server ? await put<Server>(`/servers/${server.id}`, body) : await post<Server>('/servers', body);
 			await data.reloadServers();
 			toast(m.settings_server_saved({ name: body.name }), 'signal');
 			onclose();
+			// Checked right away: the list shows at a glance whether the server answers.
+			onsaved?.(saved);
 		} catch (err) {
 			error = errorText(err);
 		} finally {

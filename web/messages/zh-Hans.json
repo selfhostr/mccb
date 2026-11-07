@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "邮箱要迁移到的位置。",
 	"settings_servers_title": "服务器",
 	"settings_server_test": "测试 {name}",
-	"settings_server_test_not_saved": "服务器不保存此结果。离开页面后结果会消失。邮箱测试结果会保存。",
 	"settings_server_tuning": "调优和备注",
 	"settings_server_tuning_auto": "自动",
 	"settings_server_tuning_manual": "手动",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "稍后选择",
 	"migrations_new_source_file": "{name}，保存后发送",
 	"migrations_new_email_hint": "{server} 上接收邮件的邮箱。",
-	"migrations_new_password_hint": "此邮箱在目标服务器上的密码。保存后会立即检查。"
+	"migrations_new_password_hint": "此邮箱在目标服务器上的密码。保存后会立即检查。",
+	"settings_server_check_ok": "已验证",
+	"settings_server_check_failed": "验证失败",
+	"settings_server_check_never": "未验证",
+	"migrations_conn_ok": "已验证：{count}",
+	"migrations_conn_failed": "失败：{count}",
+	"migrations_conn_untested": "未测试：{count}",
+	"migrations_conn_group": "连接检查",
+	"migrations_filter_tested_ok": "连接已验证"
 }

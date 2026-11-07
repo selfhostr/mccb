@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Куда переносятся почтовые ящики.",
 	"settings_servers_title": "Серверы",
 	"settings_server_test": "Проверить {name}",
-	"settings_server_test_not_saved": "Сервер не хранит этот результат. Он исчезнет, когда вы покинете страницу. Проверки ящиков сохраняются.",
 	"settings_server_tuning": "Настройка и заметки",
 	"settings_server_tuning_auto": "Автоматически",
 	"settings_server_tuning_manual": "Вручную",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Выбрать позже",
 	"migrations_new_source_file": "{name}, будет отправлен после сохранения",
 	"migrations_new_email_hint": "Ящик на {server}, который получает почту.",
-	"migrations_new_password_hint": "Пароль этого ящика на целевом сервере. Он проверяется сразу после сохранения."
+	"migrations_new_password_hint": "Пароль этого ящика на целевом сервере. Он проверяется сразу после сохранения.",
+	"settings_server_check_ok": "Проверен",
+	"settings_server_check_failed": "Проверка не пройдена",
+	"settings_server_check_never": "Не проверен",
+	"migrations_conn_ok": "Проверено: {count}",
+	"migrations_conn_failed": "С ошибкой: {count}",
+	"migrations_conn_untested": "Не проверено: {count}",
+	"migrations_conn_group": "Проверка подключений",
+	"migrations_filter_tested_ok": "Подключение проверено"
 }

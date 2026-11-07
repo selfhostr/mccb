@@ -23,6 +23,8 @@ def server_view(r) -> dict:
         "workers": r["workers"], "notes": r["notes"] or "",
         "tuning": (r["tuning"] if "tuning" in r.keys() else None) or "auto",
         "builders": r["builders"] if "builders" in r.keys() else None,
+        "last_test": r["last_test"] if "last_test" in r.keys() else None,
+        "last_test_result": db.jload(r["last_test_result"], None) if "last_test_result" in r.keys() else None,
     }
 
 

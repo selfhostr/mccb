@@ -412,7 +412,6 @@
 	"settings_servers_sentence": "Dove vengono migrate le caselle.",
 	"settings_servers_title": "Server",
 	"settings_server_test": "Prova {name}",
-	"settings_server_test_not_saved": "Il server non conserva questo risultato. Scompare quando lasci la pagina. Le prove delle caselle vengono conservate.",
 	"settings_server_tuning": "Regolazione e note",
 	"settings_server_tuning_auto": "Automatica",
 	"settings_server_tuning_manual": "Manuale",
@@ -589,5 +588,13 @@
 	"migrations_new_source_later": "Scegli dopo",
 	"migrations_new_source_file": "{name}, inviato dopo il salvataggio",
 	"migrations_new_email_hint": "La casella su {server} che riceve la posta.",
-	"migrations_new_password_hint": "La password di questa casella sul server di destinazione. Viene verificata subito dopo il salvataggio."
+	"migrations_new_password_hint": "La password di questa casella sul server di destinazione. Viene verificata subito dopo il salvataggio.",
+	"settings_server_check_ok": "Verificato",
+	"settings_server_check_failed": "Verifica non riuscita",
+	"settings_server_check_never": "Non verificato",
+	"migrations_conn_ok": "Verificate: {count}",
+	"migrations_conn_failed": "Non riuscite: {count}",
+	"migrations_conn_untested": "Non testate: {count}",
+	"migrations_conn_group": "Verifica delle connessioni",
+	"migrations_filter_tested_ok": "Connessione verificata"
 }

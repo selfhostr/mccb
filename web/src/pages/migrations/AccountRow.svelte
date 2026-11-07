@@ -5,6 +5,9 @@
 	 * and a progress event for this one only reaches ProgressCell.
 	 */
 	import ArrowDown from '@lucide/svelte/icons/arrow-down';
+	import CircleCheck from '@lucide/svelte/icons/circle-check';
+	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
+	import CircleX from '@lucide/svelte/icons/circle-x';
 	import ArrowUp from '@lucide/svelte/icons/arrow-up';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
@@ -13,6 +16,7 @@
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { m } from '#lib/paraglide/messages.js';
 	import type { Account } from '../../lib/api/types.ts';
+	import { connectionOf } from '../../lib/logic/accounts.ts';
 	import { endpointSummary, hasCustomSource } from '../../lib/logic/connector.ts';
 	import { rowHref } from '../../lib/logic/routes.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
@@ -52,6 +56,16 @@
 		return accountLook(account.status, custom || account.pst_id != null);
 	});
 
+	// The connection at a glance, next to the address: verified, refused or never tested.
+	const conn = $derived.by(() => {
+		if (phase) return { icon: FlaskConical, tone: 'text-info-ink', label: m.migrations_test_running() };
+		const c = connectionOf(account);
+		if (c === 'ok') return { icon: CircleCheck, tone: 'text-signal-ink', label: m.migrations_test_status_ok() };
+		if (c === 'untested') return { icon: CircleDashed, tone: 'text-ink-3', label: m.migrations_test_never() };
+		return { icon: CircleX, tone: 'text-warning-ink', label: account.status === 'auth_failed' ? m.migrations_row_login_refused() : m.migrations_test_status_failed() };
+	});
+	const ConnIcon = $derived(conn.icon);
+
 	// The route in words: where the mail comes from and where it goes.
 	const fileName = $derived(account.pst_id != null ? prefs.file(data.psts.get(account.pst_id)?.filename) : '');
 	const sourceLabel = $derived(endpointSummary(connectors.list, account.source, 'source')?.label ?? '');
@@ -89,7 +103,12 @@
 </label>
 <div class="acct-who">
 	<a class="acct-link" {href} data-account-link={id} data-job-link={jobId}>
-		<span class="truncate font-semibold" title={email} data-testid="account-email">{email}</span>
+		<span class="flex min-w-0 items-center gap-1.5">
+			<span class={`inline-flex shrink-0 ${conn.tone}`} title={conn.label} data-testid="account-conn" data-conn={phase ? 'testing' : connectionOf(account)}>
+				<ConnIcon size={14} aria-hidden="true" /><span class="sr-only">{conn.label}</span>
+			</span>
+			<span class="truncate font-semibold" title={email} data-testid="account-email">{email}</span>
+		</span>
 		<span class="truncate text-xs text-ink-2">{route}</span>
 	</a>
 </div>
