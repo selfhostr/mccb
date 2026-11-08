@@ -11,6 +11,7 @@ Start here:
 - [Migrate a mailbox](migrate.md): add a server, add mailboxes, pick a source, run.
 - [Connectors](connectors.md) and [Protocols and file formats](protocols.md): what each source and target moves.
 - [Pause, resume and retry](resume.md): how an interrupted import continues without duplicates.
+- [Repair a damaged mailbox](repair.md): broken accents, attachments and signature images left by another tool.
 - [Command line and API tokens](cli.md), [Server-side intake](server-intake.md) and [Notifications](notifications.md): work without watching a browser.
 
 mccb is MIT licensed, with no paid edition. Exchange, Microsoft 365 and Google were tested against simulated servers only. Read [Known limitations](limits.md) before relying on it.

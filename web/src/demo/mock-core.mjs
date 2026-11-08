@@ -133,6 +133,7 @@ export function reset(options = {}) {
 		retryCalls: [],
 		runBodies: [],
 		hold: options.hold ?? false,
+		repair: { boxes: new Map(), runs: new Map(), next: { box: 1, run: 1 } },
 		planDelay: options.planDelay ?? 600,
 		plans: new Map(),
 		compares: new Map(),
@@ -500,6 +501,11 @@ export async function handle(req) {
 			for (const a of [...state.accounts.values()]) if (a.server_id === server.id) state.accounts.delete(a.id);
 			return send(200, { ok: true });
 		}
+	}
+
+	if (parts[0] === 'repair') {
+		const r = handleRepair(parts.slice(1), m, json);
+		if (r) return r;
 	}
 
 	if (path === '/connectors' && m === 'GET') return send(200, CATALOGUE);
@@ -960,4 +966,82 @@ function seedDemo() {
 	state.next.pst = 11;
 	state.next.server = 3;
 	state.next2.batch = 2;
+}
+
+// ---------------------------------------------------------------- repair tab (fictional: a run ends at once)
+const REPAIR_REPORT = {
+	issues: { replacement_chars: 12, attachment_names: 4 },
+	folders: { INBOX: { seen: 240, affected: 9, repaired: 0, issues: { replacement_chars: 7, attachment_names: 2 } }, 'Archive/2023': { seen: 180, affected: 5, repaired: 0, issues: { replacement_chars: 5, attachment_names: 2 } } },
+	examples: [{ folder: 'INBOX', uid: '17', subject: 'Offre r\ufffdvis\ufffde', date: 'Tue, 05 Mar 2024 10:00:00 +0100', issues: ['replacement_chars'], fixed: null }],
+	errors: [],
+	notes: []
+};
+
+function repairRun(box, mode) {
+	const id = state.repair.next.run++;
+	const seen = 420;
+	const affected = box.email.startsWith('clean') ? 0 : 14;
+	const report = mode === 'scan' ? (affected ? REPAIR_REPORT : { issues: {}, folders: {}, examples: [], errors: [], notes: [] }) : { issues: {}, folders: {}, examples: [], errors: [], notes: [] };
+	const now = Date.now() / 1000;
+	const run = { id, box_id: box.id, mode, status: 'done', folder: null, error: null, created_at: now, started_at: now, finished_at: now,
+		progress: { total: seen, seen, affected: mode === 'scan' ? affected : 0, repaired: mode === 'repair' ? affected : 0, restored: mode === 'restore' ? affected : 0, skipped: 0, errors: 0, folder: null, folders_done: 2, folders_total: 2 },
+		issues: report.issues, report };
+	state.repair.runs.set(id, run);
+	return run;
+}
+
+function repairBoxView(box) {
+	const runs = [...state.repair.runs.values()].filter((r) => r.box_id === box.id);
+	const last = runs.length ? { ...runs[runs.length - 1], report: undefined } : null;
+	return { ...box, last_scan: last, active_run: null };
+}
+
+function handleRepair(parts, m, json) {
+	const R = state.repair;
+	if (parts[0] === 'boxes' && parts.length === 1) {
+		if (m === 'GET') return send(200, [...R.boxes.values()].map(repairBoxView));
+		const body = json();
+		if ([...R.boxes.values()].some((b) => b.server_id === body.server_id && b.email === body.email)) return fail(409, 'this mailbox is already in the list for this server');
+		const id = R.next.box++;
+		const box = { id, server_id: Number(body.server_id), email: body.email, login: body.login ?? '', has_password: true, status: 'new', last_test: null, last_test_result: null, created_at: Date.now() / 1000 };
+		R.boxes.set(id, box);
+		return send(201, repairBoxView(box));
+	}
+	if (parts[0] === 'boxes' && parts[1] === 'import-csv') return send(200, { created: 0, updated: 0, errors: [], ids: [] });
+	if (parts[0] === 'boxes') {
+		const box = R.boxes.get(Number(parts[1]));
+		if (!box) return fail(404, 'unknown mailbox');
+		if (parts[2] === 'test') {
+			const ok = !box.email.startsWith('bad');
+			box.status = ok ? 'ok' : 'auth_failed';
+			box.last_test = Date.now() / 1000;
+			box.last_test_result = { imap: { ok, msg: ok ? 'IMAP connection successful' : 'LOGIN failed', quota: null } };
+			return send(200, box.last_test_result);
+		}
+		if (parts[2] === 'preview') {
+			return send(200, { issues: ['replacement_chars'], already: false, fixes: ['replacement_chars'], left: [], error: null,
+				before: { subject: 'Offre r\ufffdvis\ufffde', text: 'Bonjour, voici l\u2019offre r\ufffdvis\ufffde.', parts: [] },
+				after: { subject: 'Offre r\ufffdvis\ufffde', text: 'Bonjour, voici l\u2019offre r\u00e9vis\u00e9e.', parts: [] } });
+		}
+		if (parts[2] === 'runs') return send(200, [...R.runs.values()].filter((r) => r.box_id === box.id).reverse());
+		if (m === 'PUT') {
+			Object.assign(box, json(), { id: box.id, status: 'new' });
+			return send(200, repairBoxView(box));
+		}
+		if (m === 'DELETE') {
+			R.boxes.delete(box.id);
+			return send(200, { ok: true });
+		}
+	}
+	if (parts[0] === 'runs' && parts.length === 1 && m === 'POST') {
+		const body = json();
+		const runs = body.box_ids.map((id) => R.boxes.get(id)).filter(Boolean).map((b) => repairRun(b, body.mode));
+		return send(202, { runs: runs.map((r) => ({ ...r, report: undefined })), skipped_busy: [] });
+	}
+	if (parts[0] === 'runs' && parts[1]) {
+		const run = R.runs.get(Number(parts[1]));
+		if (!run) return fail(404, 'unknown run');
+		return send(200, run);
+	}
+	return null;
 }

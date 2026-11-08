@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from . import crash, db, intake, notify, planning, repo, tuner
+from . import crash, db, intake, notify, planning, repair_runs, repo, tuner
 from .config import settings
 
 log = logging.getLogger("worker")
@@ -47,6 +47,7 @@ class Worker:
         self.intake = intake.Intake(self.stop_event)   # drop folder, remote fetch, auto chain
         self.notifier = notify.Notifier()               # polls the DB; delivery on its own thread
         self.planner = planning.Jobs()                  # dry runs and comparisons asked through the API
+        self.repairs = repair_runs.Runs()               # analysis and repair of damaged mailboxes
 
     # -------------------------------------------------- crash recovery
     def recover(self, startup: bool = False) -> None:
@@ -249,7 +250,7 @@ class Worker:
             except Exception:
                 log.exception("%s", type(part).__name__)
         # dry runs, comparisons and the allowed hours of the servers: isolated like the parts above
-        for part in (self.planner.tick, planning.window_tick):
+        for part in (self.planner.tick, planning.window_tick, self.repairs.tick):
             try:
                 part()
             except Exception:
@@ -283,6 +284,7 @@ class Worker:
         db.conn()
         self.recover(startup=True)
         self.planner.recover()
+        self.repairs.recover()
         last_recover = time.time()
         log.info("worker %s started (concurrency %s)", self.id,
                  f"auto, {self.auto_limit()} now" if self.auto_concurrency else self.concurrency)

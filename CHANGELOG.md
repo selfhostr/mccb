@@ -2,6 +2,8 @@
 
 ## Unreleased
 - The interface, messages and documentation say "mailbox" everywhere. The API routes and fields and the `mccb accounts` command keep their names. CSV downloads are now named `mailboxes.csv` and `mailboxes-export.csv`.
+- Repair tab, see [Repair a damaged mailbox](docs/repair.md): its own list of mailboxes (by hand or CSV), an analysis that only reads, then a repair of the damage other migration tools leave (accents replaced by U+FFFD, mojibake, attachments without a real name, detached signature images). Each repaired message is checked before it is written, the originals are kept in the mailbox and can be restored.
+- Servers keep their last connection test (`last_test`, `last_test_result`) and show Verified or Check failed; each mailbox shows a check, a cross or a circle next to its address, with counters that filter the list. Mailboxes imported from a CSV are tested at once.
 - Planning (see [Plan, filter and control a migration](docs/planning.md)): dry run (`POST /api/runs/plan`), folder mapping with built-in names in nine languages, per-server and per-account policy (folder rules, excluded folders, date range, maximum size), allowed hours and a bandwidth limit per server, named batches with group actions, queue order, comparison of source and target (CSV, in the report), final resync (`mode: "delta"`) and a clear report of messages the target refuses for their size.
 - Mailboxes CSV: optional columns (PST file name, content toggles, source settings) and an export that never contains a password. Old three-column files are read as before.
 - API tokens and the `mccb` command line (upload with resume, run, watch, plan), see [Command line and API tokens](docs/cli.md).
