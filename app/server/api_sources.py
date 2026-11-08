@@ -9,9 +9,10 @@ import threading
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from ..connectors import m365_provision as mp
 from ..connectors import registry, wiring
 from ..connectors.base import ConnectorError
 from . import db, repo, runs, tenant_match
@@ -39,6 +40,11 @@ class ProbeIn(BaseModel):
     config: dict[str, Any] | None = None
     secrets: dict[str, str] | None = None
     id: int | None = None  # secrets omitted: those stored on this connection
+
+
+class ProvisionIn(BaseModel):
+    cloud: str = "global"
+    name: str | None = Field(None, max_length=120)
 
 
 class LinkItem(BaseModel):
@@ -380,3 +386,70 @@ def link(cid: int, body: LinkIn):
         jobs, job_errors, batch_id = runs.create_jobs(linked, body.batch_name, body.mode)
         errors += job_errors
     return {"linked": linked, "errors": errors, "jobs": jobs, "batch_id": batch_id}
+
+
+# ------------------------------------------------------------------ Connect with Microsoft (m365_provision)
+def _enabled() -> None:
+    if not mp.bootstrap_client_id():
+        raise HTTPException(409, "Connect with Microsoft is turned off (M365_BOOTSTRAP_CLIENT_ID is empty)")
+
+
+def _start(kind: str, cloud: str, **kw) -> dict:
+    try:
+        return mp.start(kind, cloud, **kw).started()
+    except mp.ProvisionError as e:
+        raise HTTPException(502, str(e)) from e
+
+
+def _save_provisioned(flow: mp.Flow, config: dict, secret: str, provisioned: dict, check: dict) -> dict:
+    """The connection made by a provisioning flow, saved as POST "" does, with its check stored as a Test."""
+    config, secrets = _validated("m365_graph", config, {}, {"client_secret": secret})
+    name = (flow.name or "Microsoft 365").strip()[:120]
+    cid = db.ex("INSERT INTO source_connections(name, kind, config, secret_enc, notes, created_at, last_test, "
+                "last_test_result, provisioned) VALUES (?,?,?,?,?,?,?,?,?)",
+                (name, "m365_graph", db.jdump(config), wiring.dump_secrets(secrets), "", time.time(), time.time(),
+                 db.jdump(check), db.jdump(provisioned))).lastrowid
+    return repo.source_connection_view(_row(cid))
+
+
+def _clear_provisioned(flow: mp.Flow) -> dict | None:
+    if db.q1("SELECT id FROM source_connections WHERE id=?", (flow.connection_id,)) is None:
+        return None  # deleted meanwhile
+    db.ex("UPDATE source_connections SET provisioned=NULL WHERE id=?", (flow.connection_id,))
+    return repo.source_connection_view(_row(flow.connection_id))
+
+
+@router.post("/provision", status_code=201)
+def provision(body: ProvisionIn):
+    """Starts the device code flow that creates the Entra app in the client tenant; poll GET /provision/{flow_id}."""
+    _enabled()
+    if body.cloud not in mp.CLOUDS:
+        raise HTTPException(422, f"unknown cloud '{body.cloud}'")
+    return _start("provision", body.cloud, save=_save_provisioned, name=(body.name or "").strip())
+
+
+@router.post("/{cid:int}/deprovision", status_code=201)
+def deprovision(cid: int):
+    """Starts the device code flow that deletes the application created by provisioning (only that one)."""
+    r = _row(cid)
+    prov = db.jload(r["provisioned"], None)
+    if not prov or not prov.get("app_object_id"):
+        raise HTTPException(409, "this connection was not created by Connect with Microsoft")
+    _enabled()
+    config = db.jload(r["config"], {}) or {}
+    return _start("deprovision", config.get("cloud") or "global", clear=_clear_provisioned, connection_id=cid,
+                  app_object_id=str(prov["app_object_id"]), tenant_id=str(config.get("tenant_id") or ""))
+
+
+@router.get("/provision/{flow_id}")
+def provision_status(flow_id: str):
+    f = mp.get_flow(flow_id)
+    if f is None:
+        raise HTTPException(404, "unknown flow")
+    return f.view()
+
+
+@router.delete("/provision/{flow_id}", status_code=204)
+def provision_cancel(flow_id: str):
+    mp.cancel_flow(flow_id)
+    return Response(status_code=204)

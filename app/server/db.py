@@ -331,6 +331,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # NULL: the source config and secrets are the account's own; set: they come from that source_connections row
     # (no FK: deleting a connection that accounts use is refused by the API)
     _add_column(conn, "accounts", "source_connection_id INTEGER")
+    # JSON {app_object_id, sp_object_id, created_at}: the Entra app was created by "Connect with Microsoft" (not secret)
+    _add_column(conn, "source_connections", "provisioned TEXT")
     _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}

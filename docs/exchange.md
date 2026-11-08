@@ -56,7 +56,20 @@ Add-MailboxPermission -Identity shared@example.com -User svc-migration -AccessRi
 
 App-only: one Entra application and one secret reach every mailbox of the tenant. A shared mailbox is a mailbox like the others: give its address in `mailbox`.
 
-### Register the application
+### Connect with Microsoft
+
+The quickest way, and the one to try first. In **Settings**, **Servers**, add a Microsoft 365 tenant and press **Connect with Microsoft**.
+
+1. mccb shows a code. Open `microsoft.com/devicelogin`, enter it and sign in with a **Global Administrator** of the tenant. (Granting application permissions also works for an account that holds both Application Administrator and Privileged Role Administrator, but Global Administrator is the safe choice.)
+2. Accept the consent screen. It is named **Microsoft Graph Command Line Tools**, the public Microsoft application mccb uses once to sign you in and create the migration application. It is not an mccb application, and mccb keeps no access to it afterwards.
+3. mccb creates the **mccb migration** application with the exact application permissions listed below, grants admin consent, and creates a client secret valid for one year.
+4. Microsoft takes a few minutes to activate a new application and its consent. mccb waits for it, then runs the test of the tenant. The tenant is then ready, with its directory ID, client ID and secret filled in.
+
+After the migration, remove the application: in the [Entra admin center](https://entra.microsoft.com), **App registrations**, **mccb migration**, **Delete**. Deleting it also removes its consent and secret. The secret expires by itself one year after its creation. To use another application as the sign-in application, or to turn this button off, set `M365_BOOTSTRAP_CLIENT_ID` (see [Configuration](configuration.md)).
+
+If your organisation does not allow this, register the application by hand.
+
+### Register the application by hand
 
 1. In the [Entra admin center](https://entra.microsoft.com), open **App registrations**, **New registration**. Any name, **Accounts in this organizational directory only**, no redirect URI.
 2. Note the **Application (client) ID** and the **Directory (tenant) ID**.
@@ -123,7 +136,7 @@ On a Dovecot-style server one account reaches every mailbox: in the `imap` conne
 
 One credential covers many mailboxes: the tenant is registered once as a source connection, and each mailbox of the target server is linked to it. Nothing is typed per mailbox.
 
-1. **Register the tenant.** In **Settings**, **Servers**, add a Microsoft 365 tenant: name, directory (tenant) ID, client ID, secret, cloud. Press **Test** and fix the permissions it names, see [Register the application](#register-the-application).
+1. **Register the tenant.** In **Settings**, **Servers**, add a Microsoft 365 tenant and press [Connect with Microsoft](#connect-with-microsoft). Or fill in the name, directory (tenant) ID, client ID, secret and cloud after [registering the application by hand](#register-the-application-by-hand), then press **Test** and fix the permissions it names.
 2. **Create the target mailboxes.** On the server the mailboxes go to, [import them by CSV](import-accounts.md) (address and password of each). Turn on DAV on that server if calendars and contacts must be copied: without it, the coverage shows `no CalDAV/CardDAV on the server` and only mail is migrated.
 3. **Open the matching screen.** On the tenant, press **Migrate mailboxes** and pick the server. The mailboxes of the tenant (users, shared mailboxes, rooms and equipment, with their type) are shown next to the accounts of the server, paired by primary address, then user principal name, then alias.
 4. **Read the states.** `Ready`: paired, can start. `Linked`: already uses this tenant. `Not on <server>`: a mailbox of the tenant with no account on the server. `No Microsoft 365 mailbox`: an account with no mailbox in the tenant. `Has another source`: the account has a source of its own, it is not replaced. `Conflict`: two mailboxes want the same account, or one is a tie. Each row also shows what will be copied (mail, calendar, contacts, tasks) and why a kind is not.

@@ -61,6 +61,7 @@ const CATALOGUE = [
 		label: 'Microsoft 365 (Graph)',
 		description: 'Read mailboxes, calendars, contacts and tasks from Microsoft 365 through the Graph API.',
 		directory: true,
+		provision: true,
 		source: {
 			items: ['mail', 'calendar', 'contacts'],
 			capabilities: ['folders'],
@@ -162,6 +163,12 @@ export function reset(options = {}) {
 		sourceTests: [],
 		linkCalls: [],
 		tenantNext: 2,
+		// "Connect with Microsoft": the flows in progress, and how the next one ends (null, 'admin', 'expired')
+		provisionOn: options.provision !== false,
+		provisionFail: options.provisionFail ?? null,
+		flows: new Map(),
+		flowNext: 1,
+		provisionCalls: [],
 		// set: what the tenant answers on listing its mailboxes (HTTP 502), as when Microsoft refuses
 		tenantFail: options.tenantFail ?? null,
 		policies: { server: new Map(), account: new Map() },
@@ -433,7 +440,12 @@ export async function control(path, body) {
 		reset(body);
 		return send(200, { ok: true });
 	}
-	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, provisionCalls: state.provisionCalls, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/provision') {
+		// How the next "Connect with Microsoft" flows end: null, 'admin' (not an administrator) or 'expired' (code expired).
+		state.provisionFail = body.fail ?? null;
+		return send(200, { ok: true });
+	}
 	if (path === '/__mock/inbox') {
 		state.inbox = body.files ?? [];
 		return send(200, { ok: true });
@@ -541,7 +553,7 @@ export async function handle(req) {
 	}
 
 	// The tenant connector is only offered once a tenant is seeded: other specs list the source kinds.
-	if (path === '/connectors' && m === 'GET') return send(200, state.tenantOn ? CATALOGUE : CATALOGUE.filter((c) => c.kind !== 'm365_graph'));
+	if (path === '/connectors' && m === 'GET') return send(200, state.tenantOn ? CATALOGUE.map((c) => (c.kind === 'm365_graph' ? { ...c, provision: state.provisionOn } : c)) : CATALOGUE.filter((c) => c.kind !== 'm365_graph'));
 	if (parts[0] === 'connectors' && parts[2] === 'test' && m === 'POST') {
 		const body = json();
 		const spec = CATALOGUE.find((c) => c.kind === parts[1]);
@@ -1141,7 +1153,7 @@ function tenantCheck(config, secrets) {
 
 function tenantView(c) {
 	const accounts = [...state.accounts.values()].filter((a) => a.source?.connection?.id === c.id).length;
-	return { id: c.id, name: c.name, kind: c.kind, config: c.config, has_secret: Object.keys(c.secrets).length > 0, notes: c.notes, last_test: c.last_test, last_test_result: c.last_test_result, accounts, created_at: c.created_at };
+	return { id: c.id, name: c.name, kind: c.kind, config: c.config, has_secret: Object.keys(c.secrets).length > 0, notes: c.notes, last_test: c.last_test, last_test_result: c.last_test_result, accounts, provisioned: c.provisioned ?? null, created_at: c.created_at };
 }
 
 function tenantConfig(body) {
@@ -1227,8 +1239,59 @@ function tenantMatch(conn, server) {
 	return { connection: { id: conn.id, name: conn.name }, server: { id: server.id, name: server.name, dav_enabled: !!server.dav_enabled, caldav_ok: t ? !!t.caldav?.ok : null, carddav_ok: t ? !!t.carddav?.ok : null }, rows, counts, fetched_at: Date.now() / 1000 - 120, purpose_checked: true, hidden };
 }
 
+// A flow answers one step further on each poll: waiting, then the steps, then done (or the failure chosen with /__mock/provision).
+const PROVISION_STEPS = ['signin', 'app', 'consent', 'propagation', 'test'];
+function flowView(flow) {
+	flow.polls++;
+	if (flow.fail === 'expired' && flow.polls > 1) return { status: 'expired', step: null, error: 'The code expired before the sign-in. Start again.', connection: null };
+	if (flow.fail === 'admin' && flow.polls > 2) return { status: 'error', step: 'signin', error: 'This account is not an administrator of the tenant (AADSTS65004). Sign in with a Global Administrator.', connection: null };
+	if (flow.remove) {
+		if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, connection: null };
+		if (flow.polls === 2) return { status: 'working', step: 'remove', error: null, connection: null };
+		const conn = state.sourceConnections.get(flow.connectionId);
+		if (conn) conn.provisioned = null;
+		return { status: 'done', step: 'remove', error: null, connection: conn ? tenantView(conn) : null };
+	}
+	if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, connection: null };
+	const step = PROVISION_STEPS[Math.min(flow.polls - 1, PROVISION_STEPS.length - 1)];
+	if (flow.polls <= PROVISION_STEPS.length) return { status: 'working', step, error: null, connection: null };
+	if (!flow.connectionId) {
+		const conn = { id: state.tenantNext++, name: flow.name || 'Fabrikam', kind: 'm365_graph', config: { tenant_id: '3c9e7a10-5b42-4d18-8f6a-1e2d4c7b9a05', client_id: 'a7d5e2b4-9c18-4f03-b6a1-8e0d3f5c2b79', cloud: flow.cloud || 'global' }, secrets: { client_secret: 'full-provisioned' }, notes: null, last_test: Date.now() / 1000, last_test_result: tenantCheck({}, { client_secret: 'full-provisioned' }), provisioned: { app_object_id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b', sp_object_id: '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', created_at: Date.now() / 1000 }, created_at: Date.now() / 1000 };
+		state.sourceConnections.set(conn.id, conn);
+		flow.connectionId = conn.id;
+	}
+	const conn = state.sourceConnections.get(flow.connectionId);
+	if (flow.fail === 'propagation' && !conn.healed) {
+		// The permissions are not active yet: saved, last check failing.
+		conn.last_test_result = { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'Microsoft has not activated the new credentials yet.' }], tenant_name: conn.name };
+		return { status: 'done', step: 'propagation', error: 'Microsoft did not activate the permissions in time.', connection: tenantView(conn) };
+	}
+	return { status: 'done', step: 'test', error: null, connection: tenantView(conn) };
+}
+
+function startFlow(extra) {
+	const flow = { id: `flow-${state.flowNext++}`, polls: 0, cancelled: false, fail: state.provisionFail, ...extra };
+	state.flows.set(flow.id, flow);
+	state.provisionCalls.push({ ...extra });
+	return send(201, { flow_id: flow.id, user_code: 'ABCD-EFGH', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 2, message: 'To sign in, open https://microsoft.com/devicelogin and enter the code ABCD-EFGH.' });
+}
+
 function handleTenants(parts, m, json, query) {
 	const C = state.sourceConnections;
+	if (parts[0] === 'provision') {
+		if (!state.provisionOn) return fail(409, 'Connect with Microsoft is not configured');
+		if (parts.length === 1 && m === 'POST') {
+			const body = json();
+			return startFlow({ cloud: body.cloud ?? null, name: String(body.name ?? '').trim() || null });
+		}
+		const flow = state.flows.get(parts[1]);
+		if (!flow) return fail(404, 'unknown flow');
+		if (m === 'DELETE') {
+			flow.cancelled = true;
+			return send(200, { ok: true });
+		}
+		if (m === 'GET') return flow.cancelled ? fail(404, 'unknown flow') : send(200, flowView(flow));
+	}
 	if (!parts.length) {
 		if (m === 'GET') return send(200, [...C.values()].map(tenantView));
 		const body = json();
@@ -1262,7 +1325,12 @@ function handleTenants(parts, m, json, query) {
 	}
 	const conn = C.get(Number(parts[0]));
 	if (!conn) return fail(404, 'unknown source connection');
+	if (parts[1] === 'deprovision' && m === 'POST') {
+		if (!state.provisionOn || !conn.provisioned) return fail(409, 'this connection was not created by Connect with Microsoft');
+		return startFlow({ remove: true, connectionId: conn.id });
+	}
 	if (parts[1] === 'test' && m === 'POST') {
+		conn.healed = true;
 		const result = tenantCheck(conn.config, conn.secrets);
 		state.sourceTests.push({ id: conn.id, kind: conn.kind, config: conn.config, has_secret: true });
 		conn.last_test = Date.now() / 1000;

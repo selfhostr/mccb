@@ -80,7 +80,8 @@ def source_connection_view(r) -> dict:
     n = db.q1("SELECT COUNT(*) AS n FROM accounts WHERE source_connection_id=?", (r["id"],))["n"]
     return {"id": r["id"], "name": r["name"], "kind": r["kind"], "config": db.jload(r["config"], {}) or {},
             "has_secret": bool(r["secret_enc"]), "notes": r["notes"] or "", "last_test": r["last_test"],
-            "last_test_result": db.jload(r["last_test_result"], None), "accounts": n, "created_at": r["created_at"]}
+            "last_test_result": db.jload(r["last_test_result"], None), "accounts": n, "created_at": r["created_at"],
+            "provisioned": db.jload(r["provisioned"], None) if "provisioned" in r.keys() else None}
 
 
 def target_view(r) -> dict:

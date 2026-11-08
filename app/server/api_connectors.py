@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..connectors import registry, sieve, wiring
+from ..connectors import m365_provision, registry, sieve, wiring
 from ..connectors.base import CAP_RULES, ConnectorError
 from . import db, planning, repo
 from .security import decrypt
@@ -80,7 +80,11 @@ def _stored(token: str | None) -> dict:
 
 @router.get("/connectors")
 def list_connectors():
-    return registry.catalogue()
+    out = registry.catalogue()
+    for c in out:
+        if c["kind"] == "m365_graph":  # "Connect with Microsoft" available (bootstrap app configured)
+            c["provision"] = bool(m365_provision.bootstrap_client_id())
+    return out
 
 
 @router.get("/accounts/{aid:int}/source")

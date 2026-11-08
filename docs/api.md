@@ -77,6 +77,23 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   other source (a PST without a valid file is none); others go on. An account already linked, or configured alone for the same
   tenant, keeps its `mailbox` value: same migration state, no duplicates. `include_tasks` omitted: the last test's tasks
   check (true if never tested). `start` queues the jobs as `POST /api/runs` does. **409** `detail:{msg,errors}` when none is linked.
+  Connection gains `provisioned:{app_object_id,sp_object_id,created_at}|null` (set when made by Connect with Microsoft, not secret).
+- Connect with Microsoft (device code flow, see [Exchange](exchange.md)): the `m365_graph` entry of `GET /api/connectors`
+  gains `provision:bool` (`M365_BOOTSTRAP_CLIENT_ID` not empty).
+  `POST /api/source-connections/provision {cloud?,name?}` (cloud default `global`, name default the organisation's) →
+  201 `{flow_id,user_code,verification_uri,expires_in,interval,message}`: sign in at `verification_uri` with `user_code` as an
+  administrator of the client tenant. mccb then creates the app "mccb migration" with the read-only application permissions,
+  grants admin consent, adds a client secret (1 year), waits for propagation (about 3 minutes at most), saves the connection
+  and stores the check as a Test. **409** when turned off, **422** unknown cloud, **502** when the login service refuses.
+  `POST /api/source-connections/{id}/deprovision` → same answer: a new sign-in, then only the application mccb created is
+  deleted and `provisioned` cleared (the connection stays; `DELETE` it if wanted). **409** if not provisioned or turned off.
+  `GET /api/source-connections/provision/{flow_id}` → `{status:'waiting'|'working'|'done'|'error'|'expired',
+  step:null|'signin'|'app'|'consent'|'secret'|'propagation'|'test'|'remove',error:null|string,connection:Connection|null}`
+  (poll every `interval` seconds; `connection` set on `done`). Done with `step:'propagation'` and an `error`: the credentials
+  did not work in time, the connection is saved all the same, run its Test again later. A failure before saving removes the
+  half-made application. **404** unknown or expired flow (kept 15 minutes after the end).
+  `DELETE /api/source-connections/provision/{flow_id}` cancels (204, also for an unknown flow). The delegated token stays in
+  memory for the flow only; the secret is never returned.
 - PST upload (resumable):
   `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
   `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 `{n,ok}` / 422 if wrong hash

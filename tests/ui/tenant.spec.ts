@@ -33,6 +33,7 @@ test.describe('Microsoft 365 tenants', () => {
 		await page.getByTestId('source-add').click();
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('source-name').fill('Fabrikam');
+		await dialog.getByText('Enter the app details by hand').click();
 		await dialog.locator('[data-field="tenant_id"]').fill('11111111-2222-3333-4444-555555555555');
 		await dialog.locator('[data-field="client_id"]').fill('66666666-7777-8888-9999-000000000000');
 		await dialog.getByLabel('Client secret').fill('wrong-secret');
@@ -48,6 +49,104 @@ test.describe('Microsoft 365 tenants', () => {
 		const list = await (await page.request.get('/api/source-connections')).text();
 		expect(list).not.toContain('full-secret');
 		expect(list).not.toContain('wrong-secret');
+	});
+
+	test('Connect with Microsoft: code, live steps, check list, then the matching screen', async ({ page }) => {
+		await ready(page, '/servers');
+		await page.getByTestId('source-add').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('provision-connect')).toBeVisible();
+		// The manual fields are folded away.
+		await expect(dialog.locator('[data-field="tenant_id"]')).toBeHidden();
+		await dialog.getByTestId('source-name').fill('Fabrikam');
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByTestId('provision-code')).toHaveText('ABCD-EFGH');
+		await expect(dialog.getByTestId('provision-notice')).toContainText('Microsoft Graph Command Line Tools');
+		await expect(dialog.getByTestId('provision-steps').locator('[data-step="signin"]')).toHaveAttribute('data-state', 'current');
+		await page.context().route('https://microsoft.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>sign-in</title>' }));
+		const popup = page.waitForEvent('popup');
+		await dialog.getByTestId('provision-open').click();
+		const tab = await popup;
+		await tab.waitForLoadState();
+		expect(tab.url()).toContain('microsoft.com/devicelogin');
+		await expect(dialog.locator('[data-step="propagation"][data-state="current"]')).toBeVisible({ timeout: 20_000 });
+		await expect(dialog.locator('[data-step="signin"]')).toHaveAttribute('data-state', 'done');
+		await expect(dialog.getByTestId('provision-done')).toBeVisible({ timeout: 20_000 });
+		await expect(dialog.locator('[data-check="tasks"]')).toContainText('OK');
+		expect((await state(page)).provisionCalls).toEqual([{ cloud: 'global', name: 'Fabrikam' }]);
+		await dialog.getByTestId('provision-migrate').click();
+		await expect(page).toHaveURL(/\/tenants\/2\/migrate/);
+	});
+
+	test('Connect with Microsoft: an error is said, Retry restarts, Enter by hand opens the fields', async ({ page }) => {
+		await mock(page.request, 'provision', { fail: 'admin' });
+		await ready(page, '/servers');
+		await page.getByTestId('source-add').click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByRole('alert')).toContainText('not an administrator', { timeout: 20_000 });
+		await mock(page.request, 'provision', { fail: null });
+		await dialog.getByTestId('provision-retry').click();
+		await expect(dialog.getByTestId('provision-code')).toBeVisible();
+		await dialog.getByTestId('provision-cancel').click();
+		await expect(dialog.getByTestId('provision-connect')).toBeVisible();
+		await mock(page.request, 'provision', { fail: 'expired' });
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByRole('alert')).toContainText('expired', { timeout: 20_000 });
+		await dialog.getByTestId('provision-manual').click();
+		await expect(dialog.locator('[data-field="tenant_id"]')).toBeVisible();
+		await expect(dialog.getByTestId('provision-panel')).toHaveCount(0);
+	});
+
+	test('Connect with Microsoft: permissions still propagating is a warning with Test again, not Retry', async ({ page }) => {
+		await mock(page.request, 'provision', { fail: 'propagation' });
+		await ready(page, '/servers');
+		await page.getByTestId('source-add').click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByTestId('provision-pending')).toContainText('still activating', { timeout: 20_000 });
+		await expect(dialog.getByTestId('provision-retry')).toHaveCount(0);
+		await expect(dialog.locator('[data-check="token"]')).toBeVisible();
+		await dialog.getByTestId('provision-test-again').click();
+		await expect(dialog.locator('[data-check="tasks"]')).toContainText('OK');
+	});
+
+	test('Connect with Microsoft is hidden when the server has no bootstrap app', async ({ page }) => {
+		await mock(page.request, 'reset', { tenant: true, provision: false });
+		await ready(page, '/servers');
+		await page.getByTestId('source-add').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('provision-connect')).toHaveCount(0);
+		await expect(dialog.locator('[data-field="tenant_id"]')).toBeVisible();
+	});
+
+	test('the tenant dialog says its field labels in the language of the UI', async ({ page }) => {
+		await ready(page, '/servers');
+		await page.getByRole('button', { name: 'Actions for Contoso' }).click();
+		await page.getByRole('menuitem', { name: 'Edit' }).click();
+		await expect(page.getByRole('dialog')).toContainText('Directory (tenant) ID of the Entra application.');
+	});
+
+	test('a tenant made by Connect with Microsoft offers to remove the app from the tenant', async ({ page }) => {
+		await ready(page, '/servers');
+		await page.getByRole('button', { name: 'Actions for Contoso' }).click();
+		await expect(page.getByRole('menuitem', { name: 'Remove the app from the tenant' })).toHaveCount(0);
+		await page.keyboard.press('Escape');
+		await page.getByTestId('source-add').click();
+		let dialog = page.getByRole('dialog');
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByTestId('provision-done')).toBeVisible({ timeout: 20_000 });
+		await dialog.getByTestId('provision-close').click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		await page.getByRole('button', { name: 'Actions for Fabrikam' }).click();
+		await page.getByRole('menuitem', { name: 'Remove the app from the tenant' }).click();
+		dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('provision-code')).toBeVisible();
+		await expect(dialog.locator('[data-step="remove"]')).toBeVisible();
+		await expect(dialog.getByTestId('provision-done')).toContainText('removed', { timeout: 20_000 });
+		await dialog.getByTestId('provision-close').click();
+		await page.getByRole('button', { name: 'Actions for Fabrikam' }).click();
+		await expect(page.getByRole('menuitem', { name: 'Remove the app from the tenant' })).toHaveCount(0);
 	});
 
 	test('Servers: a tenant with linked mailboxes cannot be deleted', async ({ page }) => {

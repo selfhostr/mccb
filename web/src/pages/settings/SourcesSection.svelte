@@ -2,6 +2,7 @@
 	/** Microsoft 365 tenants: registered once, tested, then migrated from the matching screen. */
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
+	import CloudOff from '@lucide/svelte/icons/cloud-off';
 	import Cloud from '@lucide/svelte/icons/cloud';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
@@ -18,6 +19,7 @@
 	import { sources } from '../../lib/stores/sources.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
+	import Dialog from '../../lib/ui/Dialog.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 	import KindIcon from '../../lib/ui/KindIcon.svelte';
@@ -27,11 +29,13 @@
 	import Section from '../../lib/ui/Section.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import CheckList from './CheckList.svelte';
+	import ProvisionPanel from './ProvisionPanel.svelte';
 	import SourceDialog from './SourceDialog.svelte';
 
 	void sources.load();
 
 	let editing = $state.raw<SourceConnection | 'new' | null>(null);
+	let unprovisioning = $state.raw<SourceConnection | null>(null);
 	let removing = $state.raw<SourceConnection | null>(null);
 	const results = new SvelteMap<number, CheckResult>();
 	const testing = new SvelteSet<number>();
@@ -99,6 +103,7 @@
 									items={[
 										{ label: m.sources_edit(), icon: Pencil, onselect: () => (editing = c) },
 										{ label: m.sources_migrate(), icon: Shuffle, onselect: () => router.go(`/tenants/${c.id}/migrate`) },
+										...(c.provisioned ? [{ label: m.provision_remove_menu(), icon: CloudOff, onselect: () => (unprovisioning = c) }] : []),
 										{ label: m.sources_delete(), icon: Trash2, danger: true, onselect: () => (removing = c) }
 									]}
 								/>
@@ -114,6 +119,13 @@
 
 {#if editing}
 	<SourceDialog connection={editing === 'new' ? null : editing} onclose={() => (editing = null)} onsaved={(saved) => test(saved)} />
+{/if}
+{#if unprovisioning}
+	{@const target = unprovisioning}
+	<Dialog title={m.provision_remove_title({ name: target.name })} onclose={() => (unprovisioning = null)}>
+		<p class="m-0 mb-3 text-sm text-ink-2">{m.provision_remove_text()}</p>
+		<ProvisionPanel remove start={() => sources.deprovision(target.id)} oncancel={() => (unprovisioning = null)} onclose={() => (unprovisioning = null)} />
+	</Dialog>
 {/if}
 {#if removing}
 	{@const target = removing}

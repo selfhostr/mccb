@@ -9,6 +9,7 @@
 - The Test of a tenant names the missing permissions, required or optional.
 - Mailboxes are linked by Entra object ID, so the final resync survives the removal of the domain from the tenant.
 - API routes `/api/source-connections`.
+- Connect with Microsoft: a Global Administrator signs in with a device code and mccb creates the "mccb migration" application, grants admin consent, adds a one-year secret and tests the tenant. See [Exchange](docs/exchange.md#connect-with-microsoft).
 
 ### Changed
 - Listing a tenant needs the application permission `User.Read.All` (or `Directory.Read.All`), with admin consent. Migrating a single mailbox does not.

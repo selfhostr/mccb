@@ -206,6 +206,8 @@ export interface Connector {
 	target: ConnectorRole | null;
 	/** True when the connector can register a connection and list its mailboxes (m365_graph). */
 	directory?: boolean;
+	/** True when "Connect with Microsoft" is available (a bootstrap app is configured). */
+	provision?: boolean;
 }
 
 /** Source or own target of an account as the API shows it. Secrets never come back. */
@@ -582,7 +584,28 @@ export interface SourceConnection {
 	last_test: number | null;
 	last_test_result: CheckResult | null;
 	accounts: number;
+	/** Set when the app was created in the tenant by "Connect with Microsoft". */
+	provisioned?: { app_object_id: string; sp_object_id: string; created_at: number } | null;
 	created_at: number;
+}
+
+export interface ProvisionFlow {
+	flow_id: string;
+	user_code: string;
+	verification_uri: string;
+	expires_in: number;
+	interval: number;
+	message: string;
+}
+
+export type ProvisionStatus = 'waiting' | 'working' | 'done' | 'error' | 'expired';
+export type ProvisionStep = 'signin' | 'app' | 'consent' | 'secret' | 'propagation' | 'test' | 'remove';
+
+export interface ProvisionState {
+	status: ProvisionStatus;
+	step: ProvisionStep | null;
+	error: string | null;
+	connection: SourceConnection | null;
 }
 
 export interface SourceConnectionInput {

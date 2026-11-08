@@ -8,7 +8,7 @@ import pytest
 
 SCHEMA_100 = Path(__file__).resolve().parents[1] / "fixtures" / "schema-1.0.0.sql"
 CONNECTION_COLS = {"id", "name", "kind", "config", "secret_enc", "notes", "created_at", "last_test",
-                   "last_test_result"}
+                   "last_test_result", "provisioned"}
 
 
 # ------------------------------------------------------------------ schema
@@ -234,7 +234,7 @@ def test_connection_crud_never_returns_the_secret(client):
     assert c["config"] == {"tenant_id": "contoso", "client_id": "app-1", "cloud": "global"}
     assert c["has_secret"] is True and c["accounts"] == 0 and c["notes"] == "client A" and c["last_test"] is None
     assert set(c) == {"id", "name", "kind", "config", "has_secret", "notes", "last_test", "last_test_result",
-                      "accounts", "created_at"}
+                      "accounts", "created_at", "provisioned"}
     for r in (client.get("/api/source-connections"), client.get(f"/api/source-connections/{c['id']}")):
         assert r.status_code == 200 and SECRET not in r.text
     r = no_secret(client.put(f"/api/source-connections/{c['id']}", json={"name": "Contoso Ltd"}))

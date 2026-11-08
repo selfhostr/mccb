@@ -1,5 +1,5 @@
 import { del, errorText, get, post, put } from '../api/client.ts';
-import type { CheckResult, LinkInput, LinkResponse, MatchResponse, SourceConnection, SourceConnectionInput, TenantMailboxes } from '../api/types.ts';
+import type { CheckResult, ProvisionFlow, ProvisionState, LinkInput, LinkResponse, MatchResponse, SourceConnection, SourceConnectionInput, TenantMailboxes } from '../api/types.ts';
 
 /** Source connections (Microsoft 365 tenants), as GET /api/source-connections serves them. */
 class Sources {
@@ -53,6 +53,22 @@ class Sources {
 	async remove(id: number): Promise<void> {
 		await del(`/source-connections/${id}`);
 		await this.reload();
+	}
+
+	provision(input: { cloud?: string; name?: string } = {}): Promise<ProvisionFlow> {
+		return post<ProvisionFlow>('/source-connections/provision', input);
+	}
+
+	deprovision(id: number): Promise<ProvisionFlow> {
+		return post<ProvisionFlow>(`/source-connections/${id}/deprovision`);
+	}
+
+	flowStatus(flowId: string): Promise<ProvisionState> {
+		return get<ProvisionState>(`/source-connections/provision/${encodeURIComponent(flowId)}`);
+	}
+
+	async cancelFlow(flowId: string): Promise<void> {
+		await del(`/source-connections/provision/${encodeURIComponent(flowId)}`);
 	}
 
 	mailboxes(id: number, refresh = false): Promise<TenantMailboxes> {
