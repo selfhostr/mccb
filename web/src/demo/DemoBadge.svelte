@@ -7,7 +7,7 @@
 
 	let { part }: { part: 'badge' | 'footer' } = $props();
 
-	const INSTALL = 'https://mccb.open.yety.ch/docs/install/';
+	const INSTALL = 'https://mccb.selfhostr.io/docs/install/';
 </script>
 
 {#if part === 'badge'}
