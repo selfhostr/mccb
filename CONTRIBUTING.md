@@ -45,7 +45,6 @@ CI (`.github/workflows/tests.yml`) runs the first command on every pull request 
 - The web UI lives in `web/` (Svelte 5, Vite, Tailwind 4, Paraglide). The build goes to `app/web/`, which is generated and not committed. The Docker image builds it in a Node stage.
 - Every visible string goes through Paraglide in nine locales, colours are tokens from `web/src/tokens.css`, primitives live in `web/src/lib/ui/`.
 - Never log or return a mailbox password.
-- Pull requests that change the UI include before and after screenshots.
 
 ## Developer Certificate of Origin
 
