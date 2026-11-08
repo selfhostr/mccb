@@ -14,7 +14,7 @@ mccb holds the IMAP and DAV passwords of the mailboxes it migrates and reads the
 
 **Please do not open a public issue for a security problem.**
 
-Report it privately through GitHub's private vulnerability reporting: open the repository's **Security** tab, then **Report a vulnerability** (<https://github.com/yetysw/mccb/security/advisories/new>).
+Report it privately through GitHub's private vulnerability reporting: open the repository's **Security** tab, then **Report a vulnerability** (<https://github.com/selfhostr/mccb/security/advisories/new>).
 
 Include what you can of: the affected component, steps to reproduce or a proof of concept, the impact as you understand it, and the version or commit you tested.
 
@@ -41,6 +41,6 @@ Out of scope: vulnerabilities in the servers you migrate to, in the native PST l
 ## Hardening notes for operators
 
 - Port 22362 speaks plain HTTP. Put mccb behind a reverse proxy with TLS and publish only the proxy, for example `127.0.0.1:22362:22362` in the compose file. Set `COOKIE_SECURE=1`.
-- Back up `./data` including `secret.key`, and keep it out of screenshots.
+- Back up `./data` including `secret.key`.
 - Disable TLS verification of an IMAP server only for a server you control.
 - Delete uploaded PST files and the data directory when a migration is finished.

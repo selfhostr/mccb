@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The project moved to the selfhostr organisation: repository `github.com/selfhostr/mccb`, image `ghcr.io/selfhostr/mccb`, site and documentation on `mccb.selfhostr.io`. Old GitHub links redirect. To keep receiving updates, change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
+
 ## 2.0.0
 mccb 2.0.0 grows from a PST migrator into a mailbox, calendar and contact migration tool: Exchange (EWS and Microsoft Graph), JMAP, Google and file sources join IMAP and CalDAV/CardDAV, with planning, a command line and a new web UI. A Repair tab detects and fixes damaged messages in mailboxes. It also scales much further on large machines. Read "Upgrading from 1.x" below before updating.
 

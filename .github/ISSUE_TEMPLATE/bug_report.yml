@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Thanks for the report. Security problems go to
-        https://github.com/yetysw/mccb/security/advisories/new instead, not here.
+        https://github.com/selfhostr/mccb/security/advisories/new instead, not here.
   - type: textarea
     id: what
     attributes:
