@@ -37,7 +37,7 @@ The image is tagged `X.Y.Z`, `X.Y` and `latest`. To pin a version, replace `late
 ## Build from source
 
 ```bash
-git clone https://github.com/yetysw/mccb.git
+git clone https://github.com/selfhostr/mccb.git
 cd mccb
 docker compose up -d --build
 docker compose logs web      # read the generated admin password

@@ -8,14 +8,10 @@
 
 <!-- Anything a reviewer needs to know: design choices, alternatives rejected, follow-ups left out. -->
 
-## Screenshots
-
-<!-- Required for UI changes: before and after. Delete this section otherwise. -->
-
 ## Checklist
 
 - [ ] `docker compose -f docker-compose.test.yml run --rm --build tests` passes
 - [ ] New behaviour and bug fixes come with tests
 - [ ] `docs/` and `CHANGELOG.md` are updated if behaviour changed
-- [ ] No secret, mailbox, real hostname or PST content in the diff or the screenshots
+- [ ] No secret, mailbox, real hostname or PST content in the diff
 - [ ] Commits are signed off (`git commit -s`)

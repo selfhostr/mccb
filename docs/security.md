@@ -33,4 +33,4 @@ This page lists what mccb protects, and what it does not.
 
 ## Report a vulnerability
 
-See [SECURITY.md](https://github.com/yetysw/mccb/blob/main/SECURITY.md).
+See [SECURITY.md](https://github.com/selfhostr/mccb/blob/main/SECURITY.md).

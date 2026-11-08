@@ -6,7 +6,7 @@ By the end of this page mccb will run a newer image with your data intact.
 docker compose pull && docker compose up -d
 ```
 
-If you pinned a version, change the tag in `docker-compose.yml` first. Read the [changelog](https://github.com/yetysw/mccb/blob/main/CHANGELOG.md) before a minor or major version.
+If you pinned a version, change the tag in `docker-compose.yml` first. Read the [changelog](https://github.com/selfhostr/mccb/blob/main/CHANGELOG.md) before a minor or major version.
 
 Back up `./data` first: see [Back up and restore](backup.md).
 
