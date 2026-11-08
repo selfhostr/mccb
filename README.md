@@ -1,11 +1,11 @@
 <div align="center">
 
-<a href="https://mccb.open.yety.ch"><img src=".github/assets/banner.svg" alt="mccb: migrate mail, calendars and contacts between servers" width="100%"></a>
+<a href="https://mccb.selfhostr.io"><img src=".github/assets/banner.svg" alt="mccb: migrate mail, calendars and contacts between servers" width="100%"></a>
 
 <h3>Migrate mailboxes with their calendars and contacts between servers, in bulk, from a web dashboard.</h3>
 
 
-[![CI](https://github.com/yetysw/mccb/actions/workflows/tests.yml/badge.svg)](https://github.com/yetysw/mccb/actions/workflows/tests.yml)
+[![CI](https://github.com/selfhostr/mccb/actions/workflows/tests.yml/badge.svg)](https://github.com/selfhostr/mccb/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -24,13 +24,13 @@ More than 500 GB of mail already migrated without errors, with calendars and con
 
 Free, for good. MIT licence, no paid edition.
 
-Site: [mccb.open.yety.ch](https://mccb.open.yety.ch). Documentation: [mccb.open.yety.ch/docs](https://mccb.open.yety.ch/docs/). Demo in your browser, with fictional data: [mccb.open.yety.ch/demo](https://mccb.open.yety.ch/demo/).
+Site: [mccb.selfhostr.io](https://mccb.selfhostr.io). Documentation: [mccb.selfhostr.io/docs](https://mccb.selfhostr.io/docs/). Demo in your browser, with fictional data: [mccb.selfhostr.io/demo](https://mccb.selfhostr.io/demo/).
 
 ## Quick start
 
 ```bash
 mkdir mccb && cd mccb
-curl -fsSLO https://raw.githubusercontent.com/yetysw/mccb/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/selfhostr/mccb/main/docker-compose.yml
 docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
@@ -95,4 +95,4 @@ MIT, see [LICENSE](LICENSE). mccb is provided "as is", without warranty of any k
 
 mccb is free. If it saves you time, you can support its development:
 
-[Sponsor us on GitHub](https://github.com/sponsors/yetysw), recurring or one-off.
+[Sponsor us on GitHub](https://github.com/sponsors/selfhostr), recurring or one-off.

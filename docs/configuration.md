@@ -1,6 +1,6 @@
 # Configuration
 
-All variables are optional. Set them in `.env` (see [`.env.example`](https://github.com/yetysw/mccb/blob/main/.env.example)); the `web` and `worker` services both read it.
+All variables are optional. Set them in `.env` (see [`.env.example`](https://github.com/selfhostr/mccb/blob/main/.env.example)); the `web` and `worker` services both read it.
 
 | variable | default | role |
 |----------|---------|------|

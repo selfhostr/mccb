@@ -5,14 +5,14 @@ By the end of this page mccb will be running in Docker and you will be signed in
 ## Requirements
 
 - Docker with Compose.
-- A published image for `linux/amd64` (`ghcr.io/yetysw/mccb`). No `.env` file and no build are needed.
+- A published image for `linux/amd64` (`ghcr.io/selfhostr/mccb`). No `.env` file and no build are needed.
 - Disk space for the PST files you upload, in `./data/pst/`. Uploads check free space first and answer 507 when there is not enough.
 
 ## Start it
 
 ```bash
 mkdir mccb && cd mccb
-curl -fsSLO https://raw.githubusercontent.com/yetysw/mccb/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/selfhostr/mccb/main/docker-compose.yml
 docker compose up -d
 docker compose logs web | grep -A2 "Admin password"
 ```
@@ -37,7 +37,7 @@ The image is tagged `X.Y.Z`, `X.Y` and `latest`. To pin a version, replace `late
 ## Build from source
 
 ```bash
-git clone https://github.com/yetysw/mccb.git
+git clone https://github.com/selfhostr/mccb.git
 cd mccb
 docker compose up -d --build
 docker compose logs web      # read the generated admin password

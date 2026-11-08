@@ -1,7 +1,7 @@
 services:
   web:
     build: .
-    image: ghcr.io/yetysw/mccb:latest
+    image: ghcr.io/selfhostr/mccb:latest
     command: ["python", "-m", "app.server.web"]
     env_file:
       - path: .env
@@ -22,7 +22,7 @@ services:
 
   worker:
     build: .
-    image: ghcr.io/yetysw/mccb:latest
+    image: ghcr.io/selfhostr/mccb:latest
     depends_on:
       - web
     command: ["python", "-m", "app.server.worker"]

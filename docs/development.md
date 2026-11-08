@@ -3,7 +3,7 @@
 By the end of this page you will have mccb running from source and its test suite passing, all in Docker.
 
 ```bash
-git clone https://github.com/yetysw/mccb.git && cd mccb
+git clone https://github.com/selfhostr/mccb.git && cd mccb
 docker compose up -d --build
 docker compose -f docker-compose.test.yml run --rm --build tests
 ```
