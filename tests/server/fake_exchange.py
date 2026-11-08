@@ -360,6 +360,18 @@ class FakeGraph:
         self.delta_expired = False
         self.forbid: set[str] = set()
         self.base_versions: list[str] = []
+        # tenant directory: users as Graph returns them, the userPurpose of each ("shared", 404, 403; absent: "user")
+        self.directory: list[dict] = []
+        self.purposes: dict[str, str | int] = {}
+        self.roles: list[str] | None = None   # None: the access token is not a JWT
+        self.org_name: str | None = "Contoso Ltd"
+        self.last_token = ""
+
+    def _access_token(self) -> str:
+        if self.roles is None:
+            return f"tok{self.tokens}"
+        enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+        return f"{enc({'alg': 'none'})}.{enc({'roles': self.roles})}.tok{self.tokens}"
 
     def new_id(self, prefix: str) -> str:
         self.seq += 1
@@ -373,19 +385,36 @@ class FakeGraph:
             if form.get("client_secret") != self.SECRET:
                 return httpx.Response(401, json={"error": "invalid_client", "error_description": "AADSTS7000215: wrong secret"})
             self.tokens += 1
-            return httpx.Response(200, json={"access_token": f"tok{self.tokens}", "expires_in": 3599, "token_type": "Bearer"})
+            self.last_token = self._access_token()
+            return httpx.Response(200, json={"access_token": self.last_token, "expires_in": 3599, "token_type": "Bearer"})
         self.requests.append(request)
         if self.throttle:
             return httpx.Response(429, headers={"Retry-After": str(self.throttle.pop(0))}, json={
                 "error": {"code": "ApplicationThrottled", "message": "too many requests"}})
-        if request.headers.get("authorization") != f"Bearer tok{self.tokens}" or self.expire_next_token:
+        if request.headers.get("authorization") != f"Bearer {self.last_token}" or self.expire_next_token:
             self.expire_next_token = False
             return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken", "message": "expired"}})
-        m_ = re.match(r"^/(v1\.0|beta)/users/([^/]+)(/.*)$", urllib.parse.unquote(url.path))
+        upath = urllib.parse.unquote(url.path)
+        if (d := re.match(r"^/(?:v1\.0|beta)(/users|/organization)$", upath)) and request.method == "GET":
+            if d.group(1) == "/users":
+                return self._page(request, self.directory, dict(url.params.multi_items()))
+            return httpx.Response(200, json={"value": [{"displayName": self.org_name}] if self.org_name else []})
+        m_ = re.match(r"^/(v1\.0|beta)/users/([^/]+)(/.*)$", upath)
         if not m_:
             return self._err(404, "ResourceNotFound")
         self.base_versions.append(m_.group(1))
-        if m_.group(2).lower() != self.mailbox.lower():
+        ref = m_.group(2)
+        known = next((u for u in self.directory if u["id"] == ref), None)
+        if known is not None and m_.group(3) == "/mailboxSettings":
+            purpose = self.purposes.get(ref, "user")
+            if isinstance(purpose, int):
+                return self._err(purpose, "ErrorInvalidUser" if purpose == 404 else "ErrorAccessDenied")
+            return httpx.Response(200, json={"userPurpose": purpose})
+        if known is not None and m_.group(3).startswith("/mailFolders/inbox") and known.get("mail", "") != self.mailbox:
+            return httpx.Response(200, json={"id": "mf-inbox"})
+        if known is not None and known.get("mail"):
+            ref = known["mail"]  # a user id stands for the address
+        if ref.lower() != self.mailbox.lower():
             return self._err(404, "ErrorInvalidUser")
         path = m_.group(3)
         key = f"{request.method}:{path}"

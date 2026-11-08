@@ -15,11 +15,12 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..connectors.wiring import items_key_of_account, source_problem, sync_files_source
-from . import crash, csvaccounts, csvimport, db, planning, preview, repo, tokens, uploads
+from ..connectors.wiring import items_key_of_account, sync_files_source
+from . import crash, csvaccounts, csvimport, db, planning, preview, repo, runs, tokens, uploads
 from .api_connectors import router as connectors_router
 from .api_planning import router as planning_router
 from .api_repair import router as repair_router
+from .api_sources import router as sources_router
 from .api_tokens import router as tokens_router
 from .config import settings
 from .dav import DavClient
@@ -566,33 +567,7 @@ class RunIn(BaseModel):
 
 @app.post("/api/runs")
 def create_runs(body: RunIn):
-    jobs, errors = [], []
-    batch_id = None
-    for aid in body.account_ids:
-        a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
-        if a is None:
-            errors.append({"account_id": aid, "msg": "unknown mailbox"})
-            continue
-        if not a["password_enc"] and not a["target_kind"]:
-            errors.append({"account_id": aid, "msg": "password missing"})
-            continue
-        problem = source_problem(a)
-        if problem:
-            errors.append({"account_id": aid, "msg": problem})
-            continue
-        active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
-                       "ORDER BY id DESC LIMIT 1", (aid,))
-        if active:
-            jobs.append(repo.job_view(active))
-            continue
-        if body.name and body.name.strip() and batch_id is None:
-            batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",
-                             (body.name.strip(), time.time())).lastrowid
-        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at) "
-                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?)",
-                    (aid, db.jdump(repo.empty_progress()), body.mode, batch_id, body.priority, time.time()))
-        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if body.mode == "delta" else ""))
-        jobs.append(repo.get_job(cur.lastrowid))
+    jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})
     for e in errors:
@@ -774,6 +749,7 @@ app.include_router(connectors_router)  # before the /api catch-all below
 app.include_router(planning_router)
 app.include_router(repair_router)
 app.include_router(tokens_router)
+app.include_router(sources_router)
 
 
 # ======================================================================= static SPA

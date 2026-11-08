@@ -49,6 +49,34 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `{ok:true,script,converted:[name],partial:[{name,dropped:[...]}],not_converted:[{name,reasons:[...]}],warnings:[...],uploaded,activated,upload_error:{error_kind,msg}|null}`,
   `{ok:false,error_kind,msg}` if the source refuses. `managesieve` uploads the script (default host, login and password: those of the account);
   it is not activated unless `activate` is true. **422** if the source cannot read rules.
+  Fields gain `scope:'mailbox'|'connection'` and connectors `directory:bool` (true: they can be a source connection).
+  An account source gains `connection:{id,name}|null` (absent for a PST); `has_secret` is then that of the connection.
+  `PUT /api/accounts/{id}/source {connection_id,config}` reads the source through that connection: `config` carries the
+  mailbox fields only (others **422**, so do `secrets`); a `PUT` without `connection_id` drops the link.
+  The CSV export writes the merged settings of a linked account (never the secret); importing them back keeps the link,
+  other settings replace it.
+- Source connections (one credential for many accounts, v1: a Microsoft 365 tenant, see [Exchange](exchange.md)):
+  `GET /api/source-connections` → `[Connection]`, `POST` `{name,kind,config,secrets,notes?}` → 201 Connection,
+  `GET/PUT/DELETE /api/source-connections/{id}`. Connection = `{id,name,kind,config,has_secret,notes,last_test,last_test_result,accounts,created_at}`
+  (`accounts`: linked count, never a secret). `config` holds the kind's `connection` fields only (others **422**), the kind
+  needs a directory. `PUT`: fields omitted are kept, `secrets` as for accounts; changing a connection field or the secret
+  clears the last test. **409** when changing `tenant_id` or `cloud`, or deleting, while accounts are linked
+  (`detail:{msg,accounts}` on delete).
+  `POST /api/source-connections/test {kind,config,secrets?,id?}` (unsaved; `id` fills omitted secrets) and
+  `POST /api/source-connections/{id}/test` (stored, saves the result) → `{ok,checks:[{key,ok,level:'required'|'optional',msg,missing?}],tenant_name?}`;
+  a refusal is an answer, not an HTTP error.
+  `GET /api/source-connections/{id}/mailboxes?refresh=0|1` → `{fetched_at,purpose_checked,mailboxes:[{id,display_name,mail,upn,aliases,kind,enabled,licensed,guess?}],hidden:{guests,no_mailbox}}`,
+  kept 5 minutes in memory (`refresh=1` reads again); **502** when the tenant refuses.
+  `GET /api/source-connections/{id}/match?server_id=N&refresh=0|1` (no `server_id`: the server with the most matches) →
+  `{connection:{id,name},server:{id,name,dav_enabled,caldav_ok,carddav_ok},rows,counts,fetched_at,purpose_checked,hidden}`,
+  row = `{state:'ready'|'linked'|'no_target'|'no_source'|'other_source'|'conflict',mailbox|null,account:{id,email,status,last_test,last_test_result,source_kind,source_connection_id}|null,`
+  `matched_by:'mail'|'upn'|'alias'|null,matched_address|null,conflict_with?,coverage:{mail,calendar,contacts,tasks},last_job:{id,status}|null}`,
+  coverage values `on|off|no_dav|failed|unknown|no_permission`.
+  `POST /api/source-connections/{id}/link {server_id,links:[{account_id,mailbox_id}],include_tasks?,start?,mode?,batch_name?}`
+  → `{linked:[account_id],errors:[{account_id,msg}],jobs:[Job],batch_id}`. Per account: on that server, no active job, no
+  other source (a PST without a valid file is none); others go on. An account already linked, or configured alone for the same
+  tenant, keeps its `mailbox` value: same migration state, no duplicates. `include_tasks` omitted: the last test's tasks
+  check (true if never tested). `start` queues the jobs as `POST /api/runs` does. **409** `detail:{msg,errors}` when none is linked.
 - PST upload (resumable):
   `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
   `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 `{n,ok}` / 422 if wrong hash

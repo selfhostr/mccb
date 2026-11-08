@@ -9,6 +9,8 @@ from typing import Any, Callable
 from .base import ConnectorError, Source, Target
 
 FIELD_TYPES = ("text", "password", "number", "boolean", "select", "url")
+# "mailbox": set per account; "connection": shared by the accounts linked to a source connection (e.g. a tenant)
+FIELD_SCOPES = ("mailbox", "connection")
 
 
 @dataclass(frozen=True)
@@ -21,10 +23,11 @@ class Field:
     default: Any = None
     options: tuple[str, ...] = ()  # type "select"
     help: str = ""
+    scope: str = "mailbox"        # one of FIELD_SCOPES
 
     def view(self) -> dict:
         out = {"name": self.name, "label": self.label, "type": self.type, "required": self.required,
-               "secret": self.secret, "default": self.default}
+               "secret": self.secret, "default": self.default, "scope": self.scope}
         if self.options:
             out["options"] = list(self.options)
         if self.help:
@@ -54,11 +57,15 @@ class ConnectorSpec:
     description: str = ""
     source: Role | None = None
     target: Role | None = None
+    # lists the mailboxes behind a source connection of this kind: check(config, secrets) -> dict,
+    # list_mailboxes(config, secrets) -> dict (connection-scoped config and secrets only)
+    directory: Any = None
 
     def view(self) -> dict:
         return {"kind": self.kind, "label": self.label, "description": self.description,
                 "source": self.source.view() if self.source else None,
-                "target": self.target.view() if self.target else None}
+                "target": self.target.view() if self.target else None,
+                "directory": self.directory is not None}
 
 
 _REGISTRY: dict[str, ConnectorSpec] = {}
@@ -87,6 +94,11 @@ def role_of(kind: str, role: str) -> Role:
     if r is None:
         raise ConnectorError(f"unknown {role} connector '{kind}'", ConnectorError.CONFIG)
     return r
+
+
+def split_fields(role: Role, scope: str) -> tuple[Field, ...]:
+    """Fields of `role` in `scope` ("mailbox" or "connection"), secrets included."""
+    return tuple(f for f in role.fields if f.scope == scope)
 
 
 def make_source(kind: str, config: dict, secrets: dict, ctx: dict | None = None) -> Source:

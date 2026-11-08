@@ -56,6 +56,25 @@ const CATALOGUE = [
 		source: { items: ['mail'], capabilities: ['folders'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] },
 		target: { items: ['mail'], capabilities: ['parallel'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] }
 	},
+	{
+		kind: 'm365_graph',
+		label: 'Microsoft 365 (Graph)',
+		description: 'Read mailboxes, calendars, contacts and tasks from Microsoft 365 through the Graph API.',
+		directory: true,
+		source: {
+			items: ['mail', 'calendar', 'contacts'],
+			capabilities: ['folders'],
+			fields: [
+				field('tenant_id', 'Tenant ID', 'text', { required: true, scope: 'connection' }),
+				field('client_id', 'Client ID', 'text', { required: true, scope: 'connection' }),
+				field('client_secret', 'Client secret', 'password', { required: true, secret: true, scope: 'connection' }),
+				field('cloud', 'Cloud', 'select', { options: ['global', 'usgov', 'china'], default: 'global', scope: 'connection' }),
+				field('mailbox', 'Mailbox', 'text', { required: true, scope: 'mailbox' }),
+				field('include_tasks', 'Include tasks', 'boolean', { default: true, scope: 'mailbox' })
+			]
+		},
+		target: null
+	},
 	{ kind: 'pst', label: 'PST file', description: 'A Personal Folders file.', source: { items: ['mail', 'calendar', 'contacts'], capabilities: ['folders'], fields: [] }, target: null }
 ];
 
@@ -138,6 +157,13 @@ export function reset(options = {}) {
 		plans: new Map(),
 		compares: new Map(),
 		batches: new Map(),
+		sourceConnections: new Map(),
+		tenantOn: false,
+		sourceTests: [],
+		linkCalls: [],
+		tenantNext: 2,
+		// set: what the tenant answers on listing its mailboxes (HTTP 502), as when Microsoft refuses
+		tenantFail: options.tenantFail ?? null,
 		policies: { server: new Map(), account: new Map() },
 		tokens: [],
 		reorderCalls: [],
@@ -148,6 +174,7 @@ export function reset(options = {}) {
 		demo: options.demo === true
 	};
 	if (options.demo) seedDemo();
+	else if (options.tenant) seedTenant();
 }
 reset();
 
@@ -159,7 +186,7 @@ function accountView(a) {
 	const job = [...state.jobs.values()].filter((j) => j.account_id === a.id).sort((x, y) => y.id - x.id)[0] ?? null;
 	const { srcSecrets, tgtSecrets, ...rest } = a;
 	const source = a.source ?? { kind: 'pst', config: { pst_id: a.pst_id }, has_secret: false };
-	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
+	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
 }
 
 /** Same rules as registry.normalize_config and merge_secrets. Returns [config, secrets] or throws a message. */
@@ -406,7 +433,7 @@ export async function control(path, body) {
 		reset(body);
 		return send(200, { ok: true });
 	}
-	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
 	if (path === '/__mock/inbox') {
 		state.inbox = body.files ?? [];
 		return send(200, { ok: true });
@@ -508,7 +535,13 @@ export async function handle(req) {
 		if (r) return r;
 	}
 
-	if (path === '/connectors' && m === 'GET') return send(200, CATALOGUE);
+	if (parts[0] === 'source-connections') {
+		const r = handleTenants(parts.slice(1), m, json, url.searchParams);
+		if (r) return r;
+	}
+
+	// The tenant connector is only offered once a tenant is seeded: other specs list the source kinds.
+	if (path === '/connectors' && m === 'GET') return send(200, state.tenantOn ? CATALOGUE : CATALOGUE.filter((c) => c.kind !== 'm365_graph'));
 	if (parts[0] === 'connectors' && parts[2] === 'test' && m === 'POST') {
 		const body = json();
 		const spec = CATALOGUE.find((c) => c.kind === parts[1]);
@@ -635,6 +668,14 @@ export async function handle(req) {
 				account.target = { kind: null, config: {}, has_secret: false };
 				account[key] = {};
 			} else {
+				if (role === 'source' && body.connection_id != null) {
+					const conn = state.sourceConnections.get(Number(body.connection_id));
+					if (!conn) return fail(404, 'unknown source connection');
+					account.source = { kind: body.kind, config: { mailbox: body.config?.mailbox, include_tasks: body.config?.include_tasks ?? true }, has_secret: false, connection: { id: conn.id, name: conn.name } };
+					account.srcSecrets = {};
+					publish('account', accountView(account));
+					return send(200, accountView(account));
+				}
 				try {
 					const same = account[role]?.kind === body.kind;
 					const [config, secrets] = checkEndpoint(body.kind, role, body.config, same ? account[key] : {}, body.secrets);
@@ -962,9 +1003,8 @@ function seedDemo() {
 	pace.set(waiting, { tick: 1000, frac: 0.002 });
 	timers.add(setTimeout(() => run(waiting), 45_000));
 
-	state.next.account = 11;
+	seedTenant();
 	state.next.pst = 11;
-	state.next.server = 3;
 	state.next2.batch = 2;
 }
 
@@ -1044,4 +1084,310 @@ function handleRepair(parts, m, json) {
 		return send(200, run);
 	}
 	return null;
+}
+
+// ---------------------------------------------------------------- Microsoft 365 tenants (fictional: "Contoso", no network, no secret kept)
+/** The fictional directory behind every tenant connection of the demo. */
+function tenantDirectory() {
+	const u = (n, first, last, over = {}) => {
+		const slug = `${first}.${last}`.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+		const mail = `${slug}@contoso.example`;
+		return { id: `3f2a${String(n).padStart(4, '0')}-0c1d-4e5f-8a9b-${String(n).padStart(12, '0')}`, display_name: `${first} ${last}`, mail, upn: mail, aliases: [mail], kind: 'user', enabled: true, licensed: true, ...over };
+	};
+	const shared = (n, name, local) => {
+		const mail = `${local}@contoso.example`;
+		return { id: `7c9e${String(n).padStart(4, '0')}-6b2a-4d3c-9e1f-${String(n).padStart(12, '0')}`, display_name: name, mail, upn: mail, aliases: [mail], kind: 'shared', enabled: false, licensed: false };
+	};
+	const mailboxes = [
+		u(1, 'Camille', 'Dupont'),
+		u(2, 'Hugo', 'Martin'),
+		u(3, 'Lea', 'Bernard', { display_name: 'Léa Bernard' }),
+		u(4, 'Nathan', 'Petit'),
+		u(5, 'Chloe', 'Robert', { display_name: 'Chloé Robert' }),
+		u(6, 'Louis', 'Richard'),
+		u(7, 'Emma', 'Durand'),
+		u(8, 'Jules', 'Moreau'),
+		u(9, 'Manon', 'Simon'),
+		u(10, 'Arthur', 'Laurent', { mail: 'a.laurent@contoso.example', upn: 'a.laurent@contoso.example', aliases: ['a.laurent@contoso.example', 'arthur@contoso.example'] }),
+		u(11, 'Ines', 'Garcia', { display_name: 'Inès Garcia', mail: 'ines@contoso.example', upn: 'ines.garcia@contoso.example', aliases: ['ines@contoso.example', 'ines.garcia@contoso.example'] }),
+		u(12, 'Paul', 'Roux'),
+		u(13, 'Marc', 'Fabre', { enabled: false }),
+		u(14, 'Alice', 'Martin'),
+		u(15, 'Theo', 'Blanc', { display_name: 'Théo Blanc', aliases: ['theo.blanc@contoso.example', 'alice.martin@contoso.example'] }),
+		shared(16, 'Support', 'support'),
+		shared(17, 'Accounting', 'accounting'),
+		{ ...shared(18, 'Meeting room Paris', 'room.paris'), kind: 'room' },
+		{ ...shared(19, 'Projector kit', 'projector'), kind: 'equipment' }
+	];
+	return { mailboxes, hidden: { guests: 1, no_mailbox: 2 } };
+}
+
+function tenantCheck(config, secrets) {
+	const secret = secrets?.client_secret ?? '';
+	if (!secret) return { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'No client secret given.' }] };
+	if (secret.startsWith('wrong')) return { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'Wrong or expired client secret (AADSTS7000215).' }] };
+	const checks = [{ key: 'token', ok: true, level: 'required', msg: 'Token obtained for the tenant.' }];
+	const roles = (label, key, level, ok, role, extra = {}) => checks.push({ key, ok, level, msg: ok ? `${label} permission granted.` : `${label} permission missing: grant ${role} and admin consent.`, ...(ok ? {} : { missing: [role] }), ...extra });
+	roles('Directory', 'directory', 'required', true, 'User.Read.All');
+	roles('Mail', 'mail', 'required', true, 'Mail.Read');
+	roles('Calendars', 'calendars', 'required', true, 'Calendars.Read');
+	roles('Contacts', 'contacts', 'required', true, 'Contacts.Read');
+	roles('Mailbox settings', 'settings', 'required', true, 'MailboxSettings.Read');
+	roles('Tasks', 'tasks', 'optional', secret.startsWith('full'), 'Tasks.Read.All');
+	checks.push({ key: 'probe_directory', ok: true, level: 'required', msg: 'The directory can be read.' });
+	checks.push({ key: 'probe_mailbox', ok: true, level: 'required', msg: 'Exchange accepts the application on a mailbox.' });
+	return { ok: true, checks, tenant_name: 'Contoso' };
+}
+
+function tenantView(c) {
+	const accounts = [...state.accounts.values()].filter((a) => a.source?.connection?.id === c.id).length;
+	return { id: c.id, name: c.name, kind: c.kind, config: c.config, has_secret: Object.keys(c.secrets).length > 0, notes: c.notes, last_test: c.last_test, last_test_result: c.last_test_result, accounts, created_at: c.created_at };
+}
+
+function tenantConfig(body) {
+	const fields = CATALOGUE.find((x) => x.kind === 'm365_graph').source.fields;
+	const conn = fields.filter((f) => f.scope === 'connection');
+	for (const k of Object.keys(body.config ?? {})) if (!conn.some((f) => f.name === k && !f.secret)) throw new Error(`unknown field '${k}'`);
+	const config = {};
+	for (const f of conn.filter((x) => !x.secret)) {
+		const v = String(body.config?.[f.name] ?? '').trim() || f.default;
+		if (!v) throw new Error(`'${f.name}' is required`);
+		config[f.name] = v;
+	}
+	return config;
+}
+
+function tenantSecrets(current, given) {
+	let secrets = { ...current };
+	if (given !== undefined) {
+		if (!Object.keys(given).length) secrets = {};
+		else for (const [k, v] of Object.entries(given)) {
+			if (k !== 'client_secret') throw new Error(`unknown secret '${k}'`);
+			if (v) secrets[k] = v;
+			else delete secrets[k];
+		}
+	}
+	return secrets;
+}
+
+function matchAccount(a) {
+	return { id: a.id, email: a.email, status: a.status, last_test: a.last_test, last_test_result: a.last_test_result, source_kind: a.source?.kind ?? (a.pst_id ? 'pst' : null), source_connection_id: a.source?.connection?.id ?? null };
+}
+
+/** Pure matching, same states as app/server/tenant_match.py. */
+function tenantMatch(conn, server) {
+	const { mailboxes, hidden } = tenantDirectory();
+	const accounts = [...state.accounts.values()].filter((a) => a.server_id === server.id);
+	const byEmail = new Map(accounts.map((a) => [a.email.toLowerCase(), a]));
+	const claims = new Map();
+	for (const mb of mailboxes) {
+		const keys = [[mb.mail, 'mail'], [mb.upn, 'upn'], ...mb.aliases.map((x) => [x, 'alias'])];
+		const hit = keys.find(([addr]) => byEmail.has(addr.toLowerCase()));
+		if (!hit) continue;
+		const account = byEmail.get(hit[0].toLowerCase());
+		const list = claims.get(account.id) ?? [];
+		list.push({ mb, by: hit[1] });
+		claims.set(account.id, list);
+	}
+	const tasksOk = !!conn.last_test_result?.checks?.find((c) => c.key === 'tasks')?.ok;
+	const coverage = (a) => {
+		const tested = a.last_test_result;
+		const dav = (kind, opt) => (!server.dav_enabled ? 'no_dav' : a.options?.[opt] === false ? 'off' : !tested ? 'unknown' : tested[kind]?.ok === false ? 'failed' : 'on');
+		return { mail: a.options?.mail === false ? 'off' : 'on', calendar: dav('caldav', 'calendar'), contacts: dav('carddav', 'contacts'), tasks: !server.dav_enabled ? 'no_dav' : !tasksOk ? 'no_permission' : a.options?.calendar === false ? 'off' : dav('caldav', 'calendar') };
+	};
+	const lastJob = (a) => {
+		const j = [...state.jobs.values()].filter((x) => x.account_id === a.id).sort((x, y) => y.id - x.id)[0];
+		return j ? { id: j.id, status: j.status } : null;
+	};
+	const rows = [];
+	const used = new Set();
+	for (const mb of mailboxes) {
+		const found = [...claims.entries()].find(([, list]) => list.some((c) => c.mb === mb));
+		if (!found) {
+			rows.push({ state: 'no_target', mailbox: mb, account: null, matched_by: null, matched_address: null, coverage: { mail: 'unknown', calendar: 'unknown', contacts: 'unknown', tasks: 'unknown' }, last_job: null });
+			continue;
+		}
+		const account = state.accounts.get(found[0]);
+		const list = found[1];
+		const mine = list.find((c) => c.mb === mb);
+		const winner = [...list].sort((x, y) => (x.by === 'mail' ? 0 : 1) - (y.by === 'mail' ? 0 : 1))[0];
+		const view = matchAccount(account);
+		let st;
+		if (list.length > 1 && winner.mb !== mb) st = 'conflict';
+		else if (account.source?.connection?.id === conn.id) st = 'linked';
+		else if (account.source?.kind || (account.pst_id && state.psts.get(account.pst_id)?.status === 'valid')) st = 'other_source';
+		else st = 'ready';
+		if (st !== 'conflict') used.add(account.id);
+		rows.push({ state: st, mailbox: mb, account: view, matched_by: mine.by, matched_address: mine.by === 'mail' ? null : account.email.toLowerCase(), ...(st === 'conflict' ? { conflict_with: winner.mb.mail } : {}), coverage: coverage(account), last_job: st === 'linked' ? lastJob(account) : null });
+	}
+	for (const a of accounts) if (!claims.has(a.id)) rows.push({ state: 'no_source', mailbox: null, account: matchAccount(a), matched_by: null, matched_address: null, coverage: coverage(a), last_job: null });
+	const counts = {};
+	for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
+	const t = server.last_test_result;
+	return { connection: { id: conn.id, name: conn.name }, server: { id: server.id, name: server.name, dav_enabled: !!server.dav_enabled, caldav_ok: t ? !!t.caldav?.ok : null, carddav_ok: t ? !!t.carddav?.ok : null }, rows, counts, fetched_at: Date.now() / 1000 - 120, purpose_checked: true, hidden };
+}
+
+function handleTenants(parts, m, json, query) {
+	const C = state.sourceConnections;
+	if (!parts.length) {
+		if (m === 'GET') return send(200, [...C.values()].map(tenantView));
+		const body = json();
+		let config;
+		let secrets;
+		try {
+			if (body.kind !== 'm365_graph') throw new Error('this connector has no directory');
+			config = tenantConfig(body);
+			secrets = tenantSecrets({}, body.secrets);
+			if (!secrets.client_secret) throw new Error("'client_secret' is required");
+			if (!String(body.name ?? '').trim()) throw new Error("'name' is required");
+		} catch (error) {
+			return fail(422, error.message);
+		}
+		const conn = { id: state.tenantNext++, name: body.name.trim(), kind: body.kind, config, secrets, notes: body.notes ?? null, last_test: null, last_test_result: null, created_at: Date.now() / 1000 };
+		C.set(conn.id, conn);
+		return send(201, tenantView(conn));
+	}
+	if (parts[0] === 'test' && m === 'POST') {
+		const body = json();
+		const stored = body.id != null ? C.get(Number(body.id)) : null;
+		let result;
+		try {
+			tenantConfig(body);
+			result = tenantCheck(body.config, tenantSecrets(stored?.secrets ?? {}, body.secrets));
+		} catch (error) {
+			result = { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: error.message }] };
+		}
+		state.sourceTests.push({ id: body.id ?? null, kind: body.kind, config: body.config, has_secret: !!(body.secrets && Object.keys(body.secrets).length) });
+		return send(200, result);
+	}
+	const conn = C.get(Number(parts[0]));
+	if (!conn) return fail(404, 'unknown source connection');
+	if (parts[1] === 'test' && m === 'POST') {
+		const result = tenantCheck(conn.config, conn.secrets);
+		state.sourceTests.push({ id: conn.id, kind: conn.kind, config: conn.config, has_secret: true });
+		conn.last_test = Date.now() / 1000;
+		conn.last_test_result = result;
+		return send(200, result);
+	}
+	if ((parts[1] === 'mailboxes' || parts[1] === 'match') && m === 'GET' && state.tenantFail) return fail(502, state.tenantFail);
+	if (parts[1] === 'mailboxes' && m === 'GET') {
+		const { mailboxes, hidden } = tenantDirectory();
+		return send(200, { fetched_at: Date.now() / 1000 - (query.get('refresh') === '1' ? 0 : 120), purpose_checked: true, mailboxes, hidden });
+	}
+	if (parts[1] === 'match' && m === 'GET') {
+		const server = state.servers.get(Number(query.get('server_id')));
+		if (!server) return fail(404, 'unknown server');
+		return send(200, tenantMatch(conn, server));
+	}
+	if (parts[1] === 'link' && m === 'POST') {
+		const body = json();
+		state.linkCalls.push(body);
+		const server = state.servers.get(Number(body.server_id));
+		if (!server) return fail(404, 'unknown server');
+		const tasksOk = !!conn.last_test_result?.checks?.find((c) => c.key === 'tasks')?.ok;
+		const include_tasks = (body.include_tasks ?? true) && tasksOk;
+		const linked = [];
+		const errors = [];
+		for (const l of body.links ?? []) {
+			const account = state.accounts.get(Number(l.account_id));
+			if (!account || account.server_id !== server.id) errors.push({ account_id: l.account_id, msg: 'not a mailbox of this server' });
+			else if ([...state.jobs.values()].some((j) => j.account_id === account.id && ['queued', 'running', 'paused', 'stopping'].includes(j.status))) errors.push({ account_id: account.id, msg: 'a job is active for this mailbox' });
+			else {
+				account.source = { kind: 'm365_graph', config: { mailbox: l.mailbox_id, include_tasks }, has_secret: false, connection: { id: conn.id, name: conn.name } };
+				account.srcSecrets = {};
+				account.pst_id = null;
+				linked.push(account.id);
+				publish('account', accountView(account));
+			}
+		}
+		if (errors.length && !linked.length) return fail(409, { msg: 'no mailbox linked', errors });
+		let batch = null;
+		const jobs = [];
+		if (body.start && linked.length) {
+			if (body.batch_name) {
+				batch = { id: state.next2.batch++, name: body.batch_name, created_at: Date.now() / 1000 };
+				state.batches.set(batch.id, batch);
+			}
+			for (const id of linked) {
+				const job = startJob(state.accounts.get(id));
+				if (batch) job.batch_id = batch.id;
+				if (body.mode) job.mode = body.mode;
+				publish('job', job);
+				jobs.push(job);
+			}
+		}
+		return send(200, { linked, errors, jobs: jobs.map((j) => ({ ...j })), batch_id: batch?.id ?? null });
+	}
+	if (parts.length === 1) {
+		if (m === 'GET') return send(200, tenantView(conn));
+		if (m === 'PUT') {
+			const body = json();
+			try {
+				const config = tenantConfig({ config: { ...conn.config, ...(body.config ?? {}) } });
+				const linked = tenantView(conn).accounts;
+				if (linked && (config.tenant_id !== conn.config.tenant_id || config.cloud !== conn.config.cloud)) return fail(409, 'mailboxes are linked to this tenant: create another tenant');
+				const secrets = tenantSecrets(conn.secrets, body.secrets);
+				const changed = JSON.stringify(config) !== JSON.stringify(conn.config) || JSON.stringify(secrets) !== JSON.stringify(conn.secrets);
+				Object.assign(conn, { config, secrets, name: body.name?.trim() || conn.name, notes: 'notes' in body ? body.notes : conn.notes });
+				if (changed) Object.assign(conn, { last_test: null, last_test_result: null });
+			} catch (error) {
+				return fail(422, error.message);
+			}
+			return send(200, tenantView(conn));
+		}
+		if (m === 'DELETE') {
+			const n = tenantView(conn).accounts;
+			if (n) return fail(409, { msg: `${n} account(s) are linked to this connection`, accounts: n });
+			C.delete(conn.id);
+			return send(200, { ok: true });
+		}
+	}
+	return null;
+}
+
+/** A tenant already registered, a server for it, and target mailboxes covering every match state. */
+function seedTenant() {
+	const now = Date.now() / 1000;
+	const ago = (minutes) => now - minutes * 60;
+	const dir = tenantDirectory().mailboxes;
+	const by = (local) => dir.find((x) => x.mail.startsWith(`${local}@`));
+	const checks = tenantCheck({}, { client_secret: 'seed' });
+	state.sourceConnections = new Map([[1, { id: 1, name: 'Contoso', kind: 'm365_graph', config: { tenant_id: '8d1f3c52-4a7e-4b60-9c2d-5e0a1b7f6d34', client_id: 'c4b2a9e1-7d3f-4a58-b6c0-2f9e8d1a0b57', cloud: 'global' }, secrets: { client_secret: 'seed' }, notes: 'Fictional demo tenant.', last_test: ago(35), last_test_result: checks, created_at: ago(2000) }]]);
+	state.tenantNext = 2;
+	state.tenantOn = true;
+	state.servers.set(3, makeServer(3, 'Yeti (Contoso)', 'mail.contoso.example', { caldav_url: 'https://dav.contoso.example/', carddav_url: 'https://dav.contoso.example/', last_test: ago(40), last_test_result: { imap: { ok: true, msg: 'IMAP server reachable', capabilities: [] }, caldav: { ok: true, msg: 'reachable (HTTP 207)' }, carddav: { ok: true, msg: 'reachable (HTTP 207)' } } }));
+	const tested = (over = {}) => ({ status: 'ok', last_test: ago(30), last_test_result: { imap: { ok: true, msg: 'IMAP connection successful', quota: null }, caldav: { ok: true, msg: 'CalDAV reachable' }, carddav: { ok: true, msg: 'CardDAV reachable' } }, ...over });
+	const conn = { id: 1, name: 'Contoso' };
+	const linkedSource = (mb) => ({ kind: 'm365_graph', config: { mailbox: mb.id, include_tasks: false }, has_secret: false, connection: conn });
+	let id = Math.max(0, ...state.accounts.keys()) + 1;
+	const add = (email, over = {}, serverId = 3) => {
+		const a = makeAccount(id, email, serverId, { ...tested(), ...over });
+		state.accounts.set(id++, a);
+		return a;
+	};
+	// ready
+	for (const l of ['camille.dupont', 'louis.richard', 'emma.durand', 'manon.simon', 'paul.roux', 'marc.fabre', 'support', 'accounting']) add(`${l}@contoso.example`);
+	add('alice.martin@contoso.example');
+	add('arthur@contoso.example'); // matched by alias
+	add('ines.garcia@contoso.example', { last_test: null, last_test_result: null, status: 'new' }); // matched by UPN, never tested
+	add('chloe.robert@contoso.example', { options: { mail: true, calendar: false, contacts: true } });
+	// linked, one with a finished job
+	const hugo = add('hugo.martin@contoso.example', { source: linkedSource(by('hugo.martin')) });
+	const lea = add('lea.bernard@contoso.example', { source: linkedSource(by('lea.bernard')), last_test_result: { imap: { ok: true, msg: 'IMAP connection successful' }, caldav: { ok: false, msg: 'CalDAV: 401 Unauthorized' }, carddav: { ok: true, msg: 'CardDAV reachable' } } });
+	// other source: a PST and an IMAP source
+	add('nathan.petit@contoso.example', { pst_id: 1 });
+	// target without source mailbox
+	add('stagiaire@contoso.example');
+	add('scanner@contoso.example');
+	// the same account on the DAV-less server, to show the banner
+	for (const l of ['camille.dupont', 'hugo.martin', 'emma.durand']) add(`${l}@contoso.example`, {}, 2);
+	for (const [a, started] of [[hugo, 90], [lea, 85]]) {
+		const jid = state.next.job++;
+		const progress = emptyProgress();
+		for (const k of Object.keys(progress)) progress[k] = { done: 100, total: 100, errors: 0 };
+		state.jobs.set(jid, { id: jid, account_id: a.id, status: 'done', phase: 'verify', progress, current_folder: null, rate: null, rate_bytes: null, eta: 0, started_at: ago(started), finished_at: ago(started - 20), error: null, mode: 'full', created_at: ago(started + 1), tuning: null, priority: 0, batch_id: null, pause_reason: null });
+		state.logs.set(jid, []);
+	}
+	state.next.account = Math.max(state.next.account, ...state.accounts.keys()) + 1;
+	state.next.server = Math.max(state.next.server, 4);
 }

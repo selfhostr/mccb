@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Iterator
 from urllib.parse import quote
@@ -76,12 +78,17 @@ def _odata(value: str) -> str:
 class GraphClient:
     """One thread. The token source and the limit on concurrent requests are shared by the sessions of a target."""
 
-    def __init__(self, config: dict, secrets: dict, token: oauth.OAuthToken, gate: threading.BoundedSemaphore):
+    def __init__(self, config: dict, secrets: dict, token: oauth.OAuthToken, gate: threading.BoundedSemaphore,
+                 tenant: bool = False):
         self.root = CLOUDS.get(config.get("cloud") or "global", CLOUDS["global"])[1]
         self.mailbox = str(config.get("mailbox") or "").strip()
-        if not self.mailbox:
-            raise ConnectorError("'mailbox' is required", ConnectorError.CONFIG)
-        self.user = f"/users/{quote(self.mailbox, safe='@')}"
+        if tenant:  # directory mode: paths are tenant-wide, no /users/{mailbox} prefix
+            self.mailbox = ""
+            self.user = ""
+        else:
+            if not self.mailbox:
+                raise ConnectorError("'mailbox' is required", ConnectorError.CONFIG)
+            self.user = f"/users/{quote(self.mailbox, safe='@')}"
         self.token = token
         self.gate = gate
         self.http = oauth.http_client(True, 300.0)
@@ -1037,16 +1044,208 @@ class GraphTarget(Target):
         return GraphSession(self)
 
 
+# ------------------------------------------------------------------ tenant directory (connection-level)
+# key -> (accepted application roles, level). Each requirement is met when any listed role is granted.
+DIRECTORY_ROLES = {
+    "directory": (("User.Read.All", "User.ReadWrite.All", "Directory.Read.All", "Directory.ReadWrite.All"), "required"),
+    "mail": (("Mail.Read", "Mail.ReadWrite"), "required"),
+    "calendars": (("Calendars.Read", "Calendars.ReadWrite"), "required"),
+    "contacts": (("Contacts.Read", "Contacts.ReadWrite"), "required"),
+    "settings": (("MailboxSettings.Read", "MailboxSettings.ReadWrite"), "required"),
+    "tasks": (("Tasks.Read.All", "Tasks.ReadWrite.All"), "optional"),
+}
+AADSTS = {"7000215": "Wrong or expired client secret.", "7000222": "Wrong or expired client secret.",
+          "700016": "Unknown client ID in this tenant.", "90002": "Unknown tenant ID.", "900023": "Unknown tenant ID."}
+PROBE_LIMIT = 500           # above this many candidates, mailboxSettings is not asked for each
+PURPOSES = {"user": "user", "linked": "user", "shared": "shared", "room": "room", "equipment": "equipment"}
+USER_FIELDS = "id,displayName,mail,userPrincipalName,proxyAddresses,accountEnabled,assignedLicenses,userType"
+
+
+def token_roles(token: str) -> list[str] | None:
+    """The `roles` claim of an access token, read without verification. None when the token is not a JWT."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    roles = claims.get("roles") or []
+    return [str(r) for r in roles] if isinstance(roles, list) else None
+
+
+def _aadsts_text(err: ConnectorError, secret: str) -> str:
+    text = str(err)
+    for code, plain in AADSTS.items():
+        if f"AADSTS{code}" in text:
+            return plain
+    if err.kind == ConnectorError.UNREACHABLE:
+        return "The Microsoft login service cannot be reached."
+    if secret:
+        text = text.replace(secret, "***")
+    return text[:300]
+
+
+def _addresses(u: dict) -> tuple[str, str, list[str]]:
+    mail = str(u.get("mail") or "").strip().lower()
+    upn = str(u.get("userPrincipalName") or "").strip().lower()
+    aliases: list[str] = []
+    for p in u.get("proxyAddresses") or []:
+        p = str(p)
+        if p[:5].lower() == "smtp:":
+            a = p[5:].strip().lower()
+            if a and a not in (mail, upn) and a not in aliases:
+                aliases.append(a)
+    return mail, upn, aliases
+
+
+class GraphDirectory:
+    """What a tenant holds: connection-scoped config only (tenant_id, client_id, cloud) and the client secret."""
+
+    @staticmethod
+    def _client(config: dict, secrets: dict) -> GraphClient:
+        return GraphClient(config, secrets, _shared_token(config, secrets), threading.BoundedSemaphore(MAX_CONCURRENT),
+                           tenant=True)
+
+    def check(self, config: dict, secrets: dict) -> dict:
+        checks: list[dict] = []
+
+        def add(key: str, ok: bool, msg: str, level: str = "required", missing: list[str] | None = None) -> None:
+            c = {"key": key, "ok": ok, "level": level, "msg": msg}
+            if missing:
+                c["missing"] = missing
+            checks.append(c)
+
+        secret = str(secrets.get("client_secret") or "")
+        try:
+            client = self._client(config, secrets)
+            tok = client.token.token()
+        except ConnectorError as e:
+            add("token", False, _aadsts_text(e, secret))
+            return {"ok": False, "checks": checks}
+        try:
+            add("token", True, "Token obtained.")
+            roles = token_roles(tok)
+            if roles is None:
+                add("permissions", False, "The application permissions could not be read from the access token.",
+                    "optional")
+            else:
+                for key, (accepted, level) in DIRECTORY_ROLES.items():
+                    if any(r in roles for r in accepted):
+                        add(key, True, "Granted.", level)
+                    elif not roles:
+                        add(key, False, "No application permission granted: grant admin consent.", level,
+                            [accepted[0]])
+                    else:
+                        add(key, False, f"Missing application permission {accepted[0]} (admin consent needed).",
+                            level, [accepted[0]])
+            first = self._probe_users(client, add)
+            if first:
+                try:
+                    client.get_json(f"/users/{quote(first, safe='')}/mailFolders/inbox", {"$select": "id"})
+                    add("mailbox", True, "A mailbox can be read.")
+                except ConnectorError as e:
+                    add("mailbox", False, f"Reading a mailbox failed: {_graph_text(e)}")
+            name = None
+            try:
+                org = client.get_json("/organization", {"$select": "displayName"}).get("value") or []
+                name = (org[0].get("displayName") if org else None) or None
+            except ConnectorError:
+                pass
+        finally:
+            client.close()
+        out = {"ok": all(c["ok"] for c in checks if c["level"] == "required"), "checks": checks}
+        if name:
+            out["tenant_name"] = name
+        return out
+
+    @staticmethod
+    def _probe_users(client: GraphClient, add) -> str | None:
+        """Lists a few users; returns the id of the first one with a mailbox."""
+        try:
+            rows = client.get_json("/users", {"$top": "10", "$select": "id,mail,userType"}).get("value") or []
+        except ConnectorError as e:
+            add("users", False, f"Listing users failed: {_graph_text(e)}")
+            return None
+        add("users", True, "The directory can be read.")
+        for u in rows:
+            if u.get("mail") and u.get("userType") != "Guest":
+                return str(u["id"])
+        add("mailbox", False, "No user with a mailbox among the first ones: mailbox access was not tested.", "optional")
+        return None
+
+    def list_mailboxes(self, config: dict, secrets: dict) -> dict:
+        client = self._client(config, secrets)
+        try:
+            hidden = {"guests": 0, "no_mailbox": 0}
+            cands: list[dict] = []
+            for u in client.all("/users", {"$select": USER_FIELDS, "$top": "999"}):
+                if u.get("userType") == "Guest":
+                    hidden["guests"] += 1
+                elif not str(u.get("mail") or "").strip():
+                    hidden["no_mailbox"] += 1
+                else:
+                    cands.append(u)
+            checked = len(cands) <= PROBE_LIMIT
+            purposes: dict[str, str | None] = {}
+            if checked and cands:
+                with ThreadPoolExecutor(MAX_CONCURRENT) as pool:
+                    for u, p in zip(cands, pool.map(lambda x: self._purpose(client, x["id"]), cands)):
+                        purposes[u["id"]] = p
+            out = []
+            for u in cands:
+                mail, upn, aliases = _addresses(u)
+                enabled = u.get("accountEnabled") is not False
+                licensed = bool(u.get("assignedLicenses"))
+                kind, guess = "unknown", None
+                if checked:
+                    p = purposes[u["id"]]
+                    if p == "none":
+                        hidden["no_mailbox"] += 1
+                        continue
+                    kind = PURPOSES.get(p or "", "unknown")
+                if kind == "unknown":
+                    guess = "user" if enabled and licensed else ("shared_or_resource" if not enabled and not licensed
+                                                                 else None)
+                row = {"id": str(u["id"]), "display_name": str(u.get("displayName") or ""), "mail": mail, "upn": upn,
+                       "aliases": aliases, "kind": kind, "enabled": enabled, "licensed": licensed}
+                if kind == "unknown":
+                    row["guess"] = guess
+                out.append(row)
+            return {"fetched_at": time.time(), "purpose_checked": checked, "mailboxes": out, "hidden": hidden}
+        finally:
+            client.close()
+
+    @staticmethod
+    def _purpose(client: GraphClient, uid: str) -> str | None:
+        """userPurpose, "none" for a user without mailbox, None when it cannot be told."""
+        try:
+            body = client.get_json(f"/users/{quote(uid, safe='')}/mailboxSettings", {"$select": "userPurpose"})
+        except GraphError as e:
+            return "none" if e.status == 404 else None
+        except ConnectorError:
+            return None
+        return str(body.get("userPurpose") or "") or None
+
+
+def _graph_text(e: ConnectorError) -> str:
+    code = getattr(e, "code", "")
+    return f"{code}: {e}" if code and code not in str(e) else str(e)
+
+
 def identity(config: dict) -> str:
     return f"{str(config.get('tenant_id', '')).lower()}:{str(config.get('mailbox', '')).lower()}"
 
 
 _FIELDS = (
-    registry.Field("tenant_id", "Tenant ID", required=True, help="Directory (tenant) ID of the Entra application."),
-    registry.Field("client_id", "Client ID", required=True, help="Application (client) ID."),
-    registry.Field("client_secret", "Client secret", "password", required=True, secret=True),
+    registry.Field("tenant_id", "Tenant ID", required=True, help="Directory (tenant) ID of the Entra application.",
+                   scope="connection"),
+    registry.Field("client_id", "Client ID", required=True, help="Application (client) ID.", scope="connection"),
+    registry.Field("client_secret", "Client secret", "password", required=True, secret=True, scope="connection"),
     registry.Field("mailbox", "Mailbox", required=True, help="User principal name or address of the mailbox, shared mailboxes too."),
-    registry.Field("cloud", "Cloud", "select", default="global", options=tuple(CLOUDS)),
+    registry.Field("cloud", "Cloud", "select", default="global", options=tuple(CLOUDS), scope="connection"),
     registry.Field("include_tasks", "Include tasks", "boolean", default=True,
                    help="Microsoft To Do. Turn off for a mailbox without To Do, or if Tasks.ReadWrite.All is not granted."),
 )
@@ -1071,4 +1270,5 @@ registry.register(registry.ConnectorSpec(
                          frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_RULES}),
                          _SOURCE_FIELDS, identity),
     target=registry.Role(GraphTarget, _ITEMS, GraphTarget.capabilities, _TARGET_FIELDS, identity),
+    directory=GraphDirectory(),
 ))

@@ -3,11 +3,12 @@
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import { m } from '#lib/paraglide/messages.js';
+	import { docsUrl } from '../lib/base.ts';
 	import Plate from '../lib/ui/Plate.svelte';
 
 	let { part }: { part: 'badge' | 'footer' } = $props();
 
-	const INSTALL = 'https://mccb.selfhostr.io/docs/install/';
+	const INSTALL = docsUrl('install');
 </script>
 
 {#if part === 'badge'}

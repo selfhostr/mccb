@@ -2,7 +2,16 @@
 
 ## Unreleased
 
+### Added
+- Microsoft 365 tenant as a source connection: one credential for many mailboxes, registered in Settings, Servers. See [Exchange](docs/exchange.md#migrate-a-microsoft-365-tenant).
+- Listing of the mailboxes of a tenant, with their type (user, shared, room, equipment).
+- Matching screen between the tenant and a target server: a state per mailbox (ready, linked, not on the server, no Microsoft 365 mailbox, other source, conflict), the coverage of mail, calendar, contacts and tasks for each, batch start and final resync from the same screen.
+- The Test of a tenant names the missing permissions, required or optional.
+- Mailboxes are linked by Entra object ID, so the final resync survives the removal of the domain from the tenant.
+- API routes `/api/source-connections`.
+
 ### Changed
+- Listing a tenant needs the application permission `User.Read.All` (or `Directory.Read.All`), with admin consent. Migrating a single mailbox does not.
 - The project moved to the selfhostr organisation: repository `github.com/selfhostr/mccb`, image `ghcr.io/selfhostr/mccb`, site and documentation on `mccb.selfhostr.io`. Old GitHub links redirect. To keep receiving updates, change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
 
 ## 2.0.0

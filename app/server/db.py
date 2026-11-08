@@ -203,6 +203,19 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     last_used_at REAL,
     revoked_at REAL
 );
+-- a credential reached by many accounts (accounts.source_connection_id), e.g. a Microsoft 365 tenant.
+-- config: JSON of the connection-scoped fields of `kind` (no secret); secret_enc: encrypted JSON of its secrets.
+CREATE TABLE IF NOT EXISTS source_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    secret_enc TEXT,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    last_test REAL,
+    last_test_result TEXT
+);
 CREATE TABLE IF NOT EXISTS notify_sent (
     kind TEXT NOT NULL,
     ref_id INTEGER NOT NULL,
@@ -300,7 +313,8 @@ def _migrate_job_trigger(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
     items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
-    accounts.source_* / target_* (NULL: the PST of the account, written to its server), items.source_ref and the
+    accounts.source_* / target_* (NULL: the PST of the account, written to its server), accounts.source_connection_id,
+    items.source_ref and the
     planning columns: servers.policy / accounts.policy (JSON: folder mapping, filters, allowed hours, bandwidth),
     jobs.batch_id / jobs.priority / jobs.pause_reason (see docs/planning.md)."""
     _add_column(conn, "servers", "policy TEXT")
@@ -314,6 +328,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
                 "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
         _add_column(conn, "accounts", ddl)
+    # NULL: the source config and secrets are the account's own; set: they come from that source_connections row
+    # (no FK: deleting a connection that accounts use is refused by the API)
+    _add_column(conn, "accounts", "source_connection_id INTEGER")
     _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
