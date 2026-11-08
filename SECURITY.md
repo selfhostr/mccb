@@ -14,7 +14,7 @@ mccb holds the IMAP and DAV passwords of the mailboxes it migrates and reads the
 
 **Please do not open a public issue for a security problem.**
 
-Report it privately through GitHub's private vulnerability reporting: open the repository's **Security** tab, then **Report a vulnerability** (<https://github.com/yetysw/mccb/security/advisories/new>).
+Report it privately through GitHub's private vulnerability reporting: open the repository's **Security** tab, then **Report a vulnerability** (<https://github.com/selfhostr/mccb/security/advisories/new>).
 
 Include what you can of: the affected component, steps to reproduce or a proof of concept, the impact as you understand it, and the version or commit you tested.
 

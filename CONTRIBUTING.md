@@ -7,7 +7,7 @@ Bug reports, fixes and improvements are welcome. If you are not sure something i
 Everything runs in Docker. No Python toolchain is needed on the host.
 
 ```bash
-git clone https://github.com/yetysw/mccb.git && cd mccb
+git clone https://github.com/selfhostr/mccb.git && cd mccb
 docker compose up -d --build        # UI on http://localhost:22362
 docker compose logs web             # the generated admin password
 ```

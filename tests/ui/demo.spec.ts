@@ -59,7 +59,7 @@ const row = (page: Page, email: string) => page.locator('li.acct-row').filter({ 
 test('opens signed in, with the badge, the install link and fictional data only', async ({ page }) => {
 	await open(page);
 	await expect(page.getByTestId('demo-badge')).toContainText('Demo, fictional data');
-	await expect(page.getByTestId('demo-install')).toHaveAttribute('href', 'https://mccb.open.yety.ch/docs/install/');
+	await expect(page.getByTestId('demo-install')).toHaveAttribute('href', 'https://mccb.selfhostr.io/docs/install/');
 	await expect(row(page, 'amelie.fontaine@example.com')).toBeVisible();
 	const text = await page.locator('main').innerText();
 	const addresses = text.match(/[\w.+-]+@[\w.-]+/g) ?? [];
