@@ -13,7 +13,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { ApiError, errorText } from '../../lib/api/client.ts';
-	import type { ProvisionFlow, ProvisionState, ProvisionStep } from '../../lib/api/types.ts';
+	import type { ProvisionErrorCode, ProvisionFlow, ProvisionState, ProvisionStep } from '../../lib/api/types.ts';
 	import { router } from '../../lib/router.svelte.ts';
 	import { sources } from '../../lib/stores/sources.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
@@ -45,9 +45,30 @@
 		remove: () => m.provision_step_remove()
 	};
 
+	// The server's error_code, said in the language of the UI; the server's English text stays below as the details.
+	const REASONS: Record<ProvisionErrorCode, () => string> = {
+		not_admin: () => m.provision_error_not_admin(),
+		consent_refused: () => m.provision_error_consent_refused(),
+		expired: () => m.provision_expired(),
+		step_refused: () => m.provision_error_step_refused(),
+		propagation_timeout: () => m.provision_pending(),
+		login_refused: () => m.provision_error_login_refused(),
+		unreachable: () => m.provision_error_unreachable(),
+		other_tenant: () => m.provision_error_other_tenant(),
+		cancelled: () => m.provision_error_cancelled(),
+		unexpected: () => m.provision_error_unexpected()
+	};
+
+	/** mccb itself did not answer (restarted, network down): fetch rejects with a TypeError. */
+	function unreachable(error: unknown): boolean {
+		return error instanceof TypeError || (error instanceof Error && /failed to fetch|networkerror|load failed/i.test(error.message));
+	}
+
 	let flow = $state.raw<ProvisionFlow | null>(null);
-	let current = $state.raw<ProvisionState>({ status: 'waiting', step: 'signin', error: null, connection: null });
+	let current = $state.raw<ProvisionState>({ status: 'waiting', step: 'signin', error: null, error_code: null, connection: null });
 	let startError = $state<string | null>(null);
+	// The flow was lost: mccb stopped answering, or answers 404 for it (restarted: flows live in memory).
+	let lost = $state(false);
 	let run = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let active: string | null = null;
@@ -56,8 +77,10 @@
 	// Done with an error: the app exists but the permissions are not active yet. Retry would create a second app.
 	const pending = $derived(finished && !remove && !!current.error);
 	let testing = $state(false);
-	const failed = $derived(!!startError || current.status === 'error' || current.status === 'expired');
-	const message = $derived(startError ?? current.error ?? (current.status === 'expired' ? m.provision_expired() : ''));
+	const failed = $derived(lost || !!startError || current.status === 'error' || current.status === 'expired');
+	const reason = (s: ProvisionState) => (s.error_code && REASONS[s.error_code] ? REASONS[s.error_code]() : null);
+	const summary = $derived(lost ? m.provision_lost() : startError ? null : (reason(current) ?? (current.status === 'expired' ? m.provision_expired() : null)));
+	const details = $derived(lost ? null : (startError ?? current.error));
 	const stepIndex = $derived(current.step ? STEPS.indexOf(current.step) : 0);
 
 	function stepState(i: number): 'done' | 'current' | 'failed' | 'pending' {
@@ -72,12 +95,16 @@
 		clearTimeout(timer);
 		flow = null;
 		startError = null;
-		current = { status: 'waiting', step: 'signin', error: null, connection: null };
+		lost = false;
+		current = { status: 'waiting', step: 'signin', error: null, error_code: null, connection: null };
 		let started: ProvisionFlow;
 		try {
 			started = await start();
 		} catch (error) {
-			if (mine === run) startError = errorText(error);
+			if (mine === run) {
+				if (unreachable(error)) lost = true;
+				else startError = errorText(error);
+			}
 			return;
 		}
 		if (mine !== run) {
@@ -103,8 +130,10 @@
 				}
 			} catch (error) {
 				if (mine !== run) return;
-				// The flow is gone (cancelled, or older than the server keeps it): nothing more to say.
-				if (error instanceof ApiError && error.status === 404) {
+				// No answer, or the flow is unknown (a cancel stops the polling first, so a 404 here means mccb restarted
+				// or forgot it): it cannot go on, say so.
+				if (unreachable(error) || (error instanceof ApiError && error.status === 404)) {
+					lost = true;
 					active = null;
 					return;
 				}
@@ -147,9 +176,9 @@
 	onDestroy(stop);
 </script>
 
-<div class="flex flex-col gap-3" data-testid="provision-panel" data-status={startError ? 'error' : current.status}>
+<div class="flex flex-col gap-3" data-testid="provision-panel" data-status={startError || lost ? 'error' : current.status} data-error-code={lost ? 'lost' : (current.error_code ?? undefined)}>
 	{#if failed}
-		<ErrorNotice title={m.provision_failed()} message={message} />
+		<ErrorNotice title={m.provision_failed()} {summary} message={details} />
 		<div class="flex flex-wrap gap-2">
 			<Button onclick={begin} data-testid="provision-retry">{m.common_retry()}</Button>
 			{#if onmanual}<Button variant="ghost" onclick={onmanual} data-testid="provision-manual">{m.provision_manual_instead()}</Button>{/if}
@@ -157,7 +186,10 @@
 		</div>
 	{:else if finished}
 		{#if pending}
-			<Notice><p class="m-0" data-testid="provision-pending">{m.provision_pending()} {current.error}</p></Notice>
+			<Notice>
+				<p class="m-0" data-testid="provision-pending">{reason(current) ?? m.provision_pending()}</p>
+				{#if current.error}<p class="m-0 mt-1 font-mono text-xs text-ink-2" data-testid="provision-pending-details">{current.error}</p>{/if}
+			</Notice>
 		{:else}
 			<p class="m-0 font-medium" data-testid="provision-done">{remove ? m.provision_removed() : m.provision_done()}</p>
 		{/if}

@@ -84,7 +84,10 @@ test.describe('Microsoft 365 tenants', () => {
 		await page.getByTestId('source-add').click();
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
-		await expect(dialog.getByRole('alert')).toContainText('not an administrator', { timeout: 20_000 });
+		// a translated sentence from error_code, the server's text below as the details
+		await expect(dialog.getByTestId('error-summary')).toContainText('not an administrator', { timeout: 20_000 });
+		await expect(dialog.getByTestId('provision-panel')).toHaveAttribute('data-error-code', 'not_admin');
+		await expect(dialog.getByTestId('error-details')).toContainText('Graph 403 Authorization_RequestDenied');
 		await mock(page.request, 'provision', { fail: null });
 		await dialog.getByTestId('provision-retry').click();
 		await expect(dialog.getByTestId('provision-code')).toBeVisible();
@@ -92,10 +95,26 @@ test.describe('Microsoft 365 tenants', () => {
 		await expect(dialog.getByTestId('provision-connect')).toBeVisible();
 		await mock(page.request, 'provision', { fail: 'expired' });
 		await dialog.getByTestId('provision-connect').click();
-		await expect(dialog.getByRole('alert')).toContainText('expired', { timeout: 20_000 });
+		await expect(dialog.getByTestId('error-summary')).toHaveText('The code expired. Start again.', { timeout: 20_000 });
 		await dialog.getByTestId('provision-manual').click();
 		await expect(dialog.locator('[data-field="tenant_id"]')).toBeVisible();
 		await expect(dialog.getByTestId('provision-panel')).toHaveCount(0);
+	});
+
+	test('Connect with Microsoft: a flow lost to a restart (404) or no answer at all says mccb no longer responds', async ({ page }) => {
+		await mock(page.request, 'provision', { fail: 'lost' });
+		await ready(page, '/servers');
+		await page.getByTestId('source-add').click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByTestId('provision-connect').click();
+		await expect(dialog.getByTestId('error-summary')).toHaveText('mccb no longer responds (restarted?). Start again.', { timeout: 20_000 });
+		await expect(dialog.getByTestId('error-details')).toHaveCount(0);
+		await mock(page.request, 'provision', { fail: null });
+		await page.route('**/api/source-connections/provision/*', (route) => (route.request().method() === 'GET' ? route.abort('connectionrefused') : route.fallback()));
+		await dialog.getByTestId('provision-retry').click();
+		await expect(dialog.getByTestId('provision-code')).toBeVisible();
+		await expect(dialog.getByTestId('error-summary')).toHaveText('mccb no longer responds (restarted?). Start again.', { timeout: 20_000 });
+		await expect(dialog.getByRole('alert')).not.toContainText('Failed to fetch');
 	});
 
 	test('Connect with Microsoft: permissions still propagating is a warning with Test again, not Retry', async ({ page }) => {
@@ -105,6 +124,7 @@ test.describe('Microsoft 365 tenants', () => {
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
 		await expect(dialog.getByTestId('provision-pending')).toContainText('still activating', { timeout: 20_000 });
+		await expect(dialog.getByTestId('provision-pending-details')).toContainText('run Test again later');
 		await expect(dialog.getByTestId('provision-retry')).toHaveCount(0);
 		await expect(dialog.locator('[data-check="token"]')).toBeVisible();
 		await dialog.getByTestId('provision-test-again').click();

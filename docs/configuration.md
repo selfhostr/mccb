@@ -42,13 +42,14 @@ when mccb is only reachable on a LAN), then creates the tenant's Entra app with 
 through a public client app named by `M365_BOOTSTRAP_CLIENT_ID`.
 
 By default this is Microsoft's own **Microsoft Graph Command Line Tools** app (`14d82eec-204b-4c2f-b7e8-296a70dab67e`),
-present in every tenant: the consent screen shows that name. mccb asks it for the delegated permissions
-`Application.ReadWrite.All` and `AppRoleAssignment.ReadWrite.All` only. Microsoft does not officially intend this app for
+present in every tenant: the consent screen shows that name. mccb asks it for the delegated permissions `User.Read`
+(to read the tenant's name), `Application.ReadWrite.All` and `AppRoleAssignment.ReadWrite.All` only. Microsoft does not officially intend this app for
 third-party tools; it is used until selfhostr registers its own. To use your own bootstrap app instead, register in Entra:
 
 1. a new app registration, supported account types **Accounts in any organizational directory (multitenant)**;
 2. Authentication: **Allow public client flows: Yes**, no redirect URI;
-3. API permissions: Microsoft Graph, **delegated** `Application.ReadWrite.All` and `AppRoleAssignment.ReadWrite.All`;
+3. API permissions: Microsoft Graph, **delegated** `User.Read`, `Application.ReadWrite.All` and
+   `AppRoleAssignment.ReadWrite.All`;
 4. no client secret.
 
 Then set `M365_BOOTSTRAP_CLIENT_ID` to its Application (client) ID. Set it to an empty string to turn the feature off.

@@ -856,5 +856,14 @@
 	"provision_field_cloud_help": "租户所属的 Microsoft 云。",
 	"provision_notice": "Microsoft 页面会显示“Microsoft Graph Command Line Tools”，并请求允许创建和管理应用。这是正常的：mccb 仅用它在此租户中创建“mccb migration”应用。",
 	"provision_pending": "应用已创建，但 Microsoft 仍在启用其权限。请几分钟后再次测试。",
-	"provision_test_again": "再次测试"
+	"provision_test_again": "再次测试",
+	"provision_error_not_admin": "Microsoft 拒绝了此步骤：登录的帐户不是具有足够权限的租户管理员。请使用客户租户的全局管理员（或应用程序管理员）登录。",
+	"provision_error_consent_refused": "未接受权限。请重新开始并接受 Microsoft 请求的权限。",
+	"provision_error_step_refused": "Microsoft 拒绝了连接的某个步骤。下方详细信息说明了是哪一步以及原因。",
+	"provision_error_login_refused": "Microsoft 登录未成功。请重新开始，并使用客户租户的工作帐户登录。",
+	"provision_error_unreachable": "目前无法连接 Microsoft。请几分钟后重试。",
+	"provision_error_other_tenant": "登录的帐户属于另一个租户。请使用此连接所属租户的管理员登录。",
+	"provision_error_cancelled": "连接已取消。",
+	"provision_error_unexpected": "意外错误中断了连接。请重新开始；如果再次发生，下方详细信息有助于报告问题。",
+	"provision_lost": "mccb 不再响应（已重启？）。请重新开始。"
 }

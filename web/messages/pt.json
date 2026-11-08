@@ -856,5 +856,14 @@
 	"provision_field_cloud_help": "A cloud da Microsoft a que o tenant pertence.",
 	"provision_notice": "A página da Microsoft mostrará \"Microsoft Graph Command Line Tools\" e pedirá permissão para criar e gerir aplicações. É normal: o mccb usa-a apenas para criar a aplicação \"mccb migration\" neste tenant.",
 	"provision_pending": "A aplicação foi criada, mas a Microsoft ainda está a ativar as respetivas permissões. Execute o teste novamente dentro de alguns minutos.",
-	"provision_test_again": "Testar de novo"
+	"provision_test_again": "Testar de novo",
+	"provision_error_not_admin": "A Microsoft recusou este passo: a conta com sessão iniciada não é um administrador do tenant com direitos suficientes. Inicie sessão com um administrador global (ou administrador de aplicações) do tenant do cliente.",
+	"provision_error_consent_refused": "As permissões não foram aceites. Recomece e aceite as permissões pedidas pela Microsoft.",
+	"provision_error_step_refused": "A Microsoft recusou um passo da ligação. Os detalhes abaixo indicam qual e porquê.",
+	"provision_error_login_refused": "O início de sessão Microsoft não foi concluído. Recomece e inicie sessão com uma conta profissional do tenant do cliente.",
+	"provision_error_unreachable": "Não é possível contactar a Microsoft neste momento. Tente novamente daqui a alguns minutos.",
+	"provision_error_other_tenant": "A conta com sessão iniciada pertence a outro tenant. Inicie sessão com um administrador do tenant desta ligação.",
+	"provision_error_cancelled": "A ligação foi cancelada.",
+	"provision_error_unexpected": "Um erro inesperado interrompeu a ligação. Recomece; se voltar a acontecer, os detalhes abaixo ajudam a comunicá-lo.",
+	"provision_lost": "O mccb deixou de responder (reiniciado?). Recomece."
 }

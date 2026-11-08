@@ -601,10 +601,24 @@ export interface ProvisionFlow {
 export type ProvisionStatus = 'waiting' | 'working' | 'done' | 'error' | 'expired';
 export type ProvisionStep = 'signin' | 'app' | 'consent' | 'secret' | 'propagation' | 'test' | 'remove';
 
+/** Why a flow failed (or ended with a warning), stable: the UI translates it, `error` stays the English details. */
+export type ProvisionErrorCode =
+	| 'not_admin'
+	| 'consent_refused'
+	| 'expired'
+	| 'step_refused'
+	| 'propagation_timeout'
+	| 'login_refused'
+	| 'unreachable'
+	| 'other_tenant'
+	| 'cancelled'
+	| 'unexpected';
+
 export interface ProvisionState {
 	status: ProvisionStatus;
 	step: ProvisionStep | null;
 	error: string | null;
+	error_code: ProvisionErrorCode | null;
 	connection: SourceConnection | null;
 }
 

@@ -8,13 +8,17 @@ credentials work. The delegated token lives in memory for the flow only: never s
 Flows are kept in an in-process dict (single worker process, like the other in-memory caches of the app)."""
 from __future__ import annotations
 
+import base64
+import json
+import logging
 import os
 import secrets as _secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import quote
 
 import httpx
@@ -28,7 +32,8 @@ from .m365 import CLOUDS, MAX_CONCURRENT, GraphClient, GraphDirectory, GraphErro
 # (your own multi-tenant public client app); an empty string disables "Connect with Microsoft".
 DEFAULT_BOOTSTRAP_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
-DELEGATED_SCOPES = ("Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All")
+# User.Read: GET /organization (the name of the tenant); the other two: create the app and grant its admin consent
+DELEGATED_SCOPES = ("User.Read", "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All")
 APP_ROLES = ("User.Read.All", "Mail.Read", "Calendars.Read", "Contacts.Read", "MailboxSettings.Read", "Tasks.Read.All")
 APP_NAME = "mccb migration"
 SECRET_NAME = "mccb"
@@ -38,6 +43,11 @@ PROPAGATION_SECONDS = 180.0   # new credentials and role assignments take 10 s t
 PROPAGATION_INTERVAL = 10.0
 FLOW_KEEP = 900.0             # a finished flow can still be read this long
 STEPS = ("signin", "app", "consent", "secret", "propagation", "test", "remove")
+# error_code of a flow, translated by the UI (the English `error` text stays as the details)
+ERROR_CODES = ("not_admin", "consent_refused", "expired", "step_refused", "propagation_timeout", "login_refused",
+               "unreachable", "other_tenant", "cancelled", "unexpected")
+
+log = logging.getLogger("mccb.provision")
 
 
 def _wait(event: threading.Event, seconds: float) -> bool:
@@ -57,11 +67,15 @@ def scrub(text: str, *values: str) -> str:
 
 
 class ProvisionError(Exception):
-    """A message meant for the user. `expired`: the device code expired."""
+    """A message meant for the user, with its error_code (one of ERROR_CODES)."""
 
-    def __init__(self, msg: str, expired: bool = False):
+    def __init__(self, msg: str, code: str = "step_refused"):
         super().__init__(msg)
-        self.expired = expired
+        self.code = code
+
+    @property
+    def expired(self) -> bool:
+        return self.code == "expired"
 
 
 class Cancelled(Exception):
@@ -76,13 +90,15 @@ def hosts(cloud: str) -> tuple[str, str]:
 
 # ------------------------------------------------------------------ device code (login endpoints)
 SIGNIN_ERRORS = {
-    "65004": "Consent was refused: sign in again and accept the permissions asked.",
-    "90094": "An administrator must sign in: use a Global Administrator account of the client tenant.",
-    "90095": "An administrator must sign in: use a Global Administrator account of the client tenant.",
-    "700016": "The bootstrap application is unknown in this cloud: check M365_BOOTSTRAP_CLIENT_ID.",
-    "7000218": "The bootstrap application does not allow public client flows: check M365_BOOTSTRAP_CLIENT_ID.",
-    "50020": "This account is not in a Microsoft Entra tenant: sign in with a work account of the client tenant.",
-    "50076": "Multi-factor authentication is required: complete it in the browser.",
+    "65004": ("consent_refused", "Consent was refused: sign in again and accept the permissions asked."),
+    "90094": ("not_admin", "An administrator must sign in: use a Global Administrator account of the client tenant."),
+    "90095": ("not_admin", "An administrator must sign in: use a Global Administrator account of the client tenant."),
+    "700016": ("login_refused", "The bootstrap application is unknown in this cloud: check M365_BOOTSTRAP_CLIENT_ID."),
+    "7000218": ("login_refused", "The bootstrap application does not allow public client flows: check "
+                                 "M365_BOOTSTRAP_CLIENT_ID."),
+    "50020": ("login_refused", "This account is not in a Microsoft Entra tenant: sign in with a work account of the "
+                               "client tenant."),
+    "50076": ("login_refused", "Multi-factor authentication is required: complete it in the browser."),
 }
 
 
@@ -91,7 +107,8 @@ def _login_post(url: str, form: dict) -> tuple[int, dict]:
         with oauth.http_client(True, 60.0) as c:
             r = c.post(url, data=form, headers={"Accept": "application/json"})
     except httpx.HTTPError as e:
-        raise ProvisionError(f"The Microsoft login service cannot be reached ({type(e).__name__}).") from e
+        raise ProvisionError(f"The Microsoft login service cannot be reached ({type(e).__name__}).",
+                             "unreachable") from e
     try:
         body = r.json()
     except ValueError:
@@ -102,16 +119,16 @@ def _login_post(url: str, form: dict) -> tuple[int, dict]:
 def _signin_error(body: dict) -> ProvisionError:
     code = str(body.get("error") or "")
     desc = str(body.get("error_description") or "")
-    for num, plain in SIGNIN_ERRORS.items():
+    for num, (ecode, plain) in SIGNIN_ERRORS.items():
         if f"AADSTS{num}:" in desc or f"AADSTS{num} " in desc:
-            return ProvisionError(plain)
+            return ProvisionError(plain, ecode)
     if code in ("expired_token", "code_expired"):
-        return ProvisionError("The code expired before the sign-in: start again.", expired=True)
+        return ProvisionError("The code expired before the sign-in: start again.", "expired")
     if code == "authorization_declined":
-        return ProvisionError("The sign-in was declined.")
+        return ProvisionError("The sign-in was declined.", "login_refused")
     if code == "access_denied":
-        return ProvisionError("Access was refused: sign in again and accept the permissions asked.")
-    return ProvisionError(f"The sign-in failed ({code or 'unknown error'}).")
+        return ProvisionError("Access was refused: sign in again and accept the permissions asked.", "consent_refused")
+    return ProvisionError(f"The sign-in failed ({code or 'unknown error'}).", "login_refused")
 
 
 def start_device_code(cloud: str, client_id: str) -> dict:
@@ -181,7 +198,7 @@ class Admin:
     def organization(self) -> tuple[str, str]:
         rows = self._call("GET", "/organization", params={"$select": "id,displayName"}).get("value") or []
         if not rows or not rows[0].get("id"):
-            raise ProvisionError("The tenant of the signed-in account could not be read.")
+            raise ProvisionError("Microsoft Graph returned no organization for the signed-in account.")
         return str(rows[0]["id"]), str(rows[0].get("displayName") or "")
 
     def graph_roles(self) -> tuple[str, dict[str, str]]:
@@ -231,28 +248,78 @@ class Admin:
         return True
 
 
-GRAPH_REFUSED = {
-    "app": "Creating the application was refused: the account must be Global Administrator or Application "
-           "Administrator of the client tenant.",
-    "consent": "Granting admin consent was refused: the account must be Global Administrator (or Privileged Role "
-               "Administrator) of the client tenant.",
-    "secret": "Adding a client secret was refused: the account must be Global Administrator or Application "
-              "Administrator of the client tenant.",
-    "remove": "Removing the application was refused: the account must be Global Administrator or Application "
-              "Administrator of the client tenant.",
+ACTIONS = {
+    "organization": "Reading the organization of the tenant",
+    "roles": "Reading the permissions Microsoft Graph offers in the tenant",
+    "app": "Creating the application",
+    "sp": "Creating the service principal of the application",
+    "consent": "Granting admin consent",
+    "secret": "Adding a client secret",
+    "remove": "Removing the application",
+    "": "A Microsoft Graph request",
 }
+APP_ADMIN = "the account must be Global Administrator or Application Administrator of the client tenant"
+NEEDS = {"consent": "the account must be Global Administrator (or Privileged Role Administrator) of the client tenant"}
 
 
-def graph_text(e: ConnectorError, step: str | None) -> str:
-    status = getattr(e, "status", 0)
-    if status in (401, 403) and step in GRAPH_REFUSED:
-        return GRAPH_REFUSED[step]
+def graph_detail(e: ConnectorError) -> str:
+    """What Graph answered, e.g. "Graph 403 Authorization_RequestDenied: Insufficient privileges..."."""
+    status, code, text = getattr(e, "status", 0), getattr(e, "code", "") or "", getattr(e, "text", "") or ""
+    if not status:
+        return str(e)[:200]
+    return (f"Graph {status}{' ' + code if code else ''}{': ' + text if text else ''}")[:240]
+
+
+def graph_failure(e: ConnectorError, action: str) -> ProvisionError:
+    """The error of a Graph call made with the delegated token, labelled with the action that was running."""
+    status, code = getattr(e, "status", 0), getattr(e, "code", "") or ""
+    what = ACTIONS.get(action, ACTIONS[""])
+    log.warning("Connect with Microsoft: %s failed (HTTP %s %s)", what.lower(), status or "-", code or "-")
+    detail = graph_detail(e)
     if status in (401, 403):
-        return "Microsoft Graph refused the request: sign in with a Global Administrator of the client tenant."
-    code = getattr(e, "code", "") or ""
+        return ProvisionError(f"{what} was refused: {NEEDS.get(action, APP_ADMIN)} ({detail}).", "not_admin")
     if e.kind in (ConnectorError.UNREACHABLE, ConnectorError.TRANSIENT):
-        return "Microsoft Graph cannot be reached right now: try again in a few minutes."
-    return f"Microsoft Graph refused the request (HTTP {status or '?'}{' ' + code if code else ''})."
+        return ProvisionError(f"{what} failed: Microsoft Graph cannot be reached right now, try again in a few "
+                              f"minutes ({detail}).", "unreachable")
+    return ProvisionError(f"{what} failed ({detail}).", "step_refused")
+
+
+@contextmanager
+def graph_step(action: str) -> Iterator[None]:
+    try:
+        yield
+    except ConnectorError as e:
+        raise graph_failure(e, action) from e
+
+
+def token_claims(token: str) -> dict:
+    """The claims of an access token, read without verification (only to learn the tenant). {} when not a JWT."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def tenant_of(admin: "Admin", token: str) -> tuple[str, str]:
+    """(tenant id, name). The id comes from the `tid` claim of the token; the name from GET /organization, which must
+    not block the flow: failing that, the domain of the account signed in, then the tenant id."""
+    claims = token_claims(token)
+    tid, name = str(claims.get("tid") or ""), ""
+    try:
+        with graph_step("organization"):
+            org_id, name = admin.organization()
+        tid = tid or org_id
+    except ProvisionError:
+        if not tid:
+            raise
+    if not name:
+        account = str(claims.get("upn") or claims.get("preferred_username") or claims.get("unique_name") or "")
+        name = account.rpartition("@")[2] if "@" in account else ""
+    return tid, name or tid
 
 
 def wait_ready(config: dict, client_secret: str, cancel: threading.Event) -> tuple[dict, bool]:
@@ -289,13 +356,15 @@ class Flow:
     status: str = "waiting"
     step: str | None = "signin"
     error: str | None = None
+    error_code: str | None = None
     connection: dict | None = None
     cancel: threading.Event = field(default_factory=threading.Event)
     created: float = field(default_factory=time.time)
     finished: float | None = None
 
     def view(self) -> dict:
-        return {"status": self.status, "step": self.step, "error": self.error, "connection": self.connection}
+        return {"status": self.status, "step": self.step, "error": self.error, "error_code": self.error_code,
+                "connection": self.connection}
 
     def started(self) -> dict:
         d = self.device
@@ -353,15 +422,29 @@ def _signin(f: Flow) -> str:
         if _wait(f.cancel, interval):
             raise Cancelled()
         if time.time() > deadline:
-            raise ProvisionError("The code expired before the sign-in: start again.", expired=True)
+            raise ProvisionError("The code expired before the sign-in: start again.", "expired")
         token, extra = poll_token(f.cloud, f.client_id, f.device["device_code"])
         if token:
             return token
         interval += extra
 
 
-def _finish(f: Flow, status: str, error: str | None = None) -> None:
-    f.status, f.error, f.finished = status, error, time.time()
+def _finish(f: Flow, status: str, error: str | None = None, code: str | None = None) -> None:
+    f.status, f.error, f.error_code, f.finished = status, error, code, time.time()
+
+
+def _fail(f: Flow, e: BaseException, *values: str) -> None:
+    """Ends a flow on an exception, with a message that carries no token nor secret."""
+    if isinstance(e, Cancelled):
+        _finish(f, "error", "Cancelled.", "cancelled")
+        return
+    if isinstance(e, ConnectorError):
+        e = graph_failure(e, "")
+    if isinstance(e, ProvisionError):
+        _finish(f, "expired" if e.expired else "error", scrub(str(e), *values), e.code)
+        return
+    log.warning("Connect with Microsoft: unexpected %s", type(e).__name__)
+    _finish(f, "error", scrub(f"Unexpected error ({type(e).__name__}).", *values), "unexpected")
 
 
 def _run_provision(f: Flow, save: Saver) -> None:
@@ -372,17 +455,22 @@ def _run_provision(f: Flow, save: Saver) -> None:
         f.status = "working"
         admin = Admin(f.cloud, token)
         f.step = "app"
-        tenant_id, org_name = admin.organization()
+        tenant_id, org_name = tenant_of(admin, token)
         f.name = f.name or org_name or "Microsoft 365"
-        graph_sp, role_ids = admin.graph_roles()
+        with graph_step("roles"):
+            graph_sp, role_ids = admin.graph_roles()
         if f.cancel.is_set():
             raise Cancelled()
-        app_object_id, app_id = admin.create_app(role_ids)
-        sp = admin.create_sp(app_id)
+        with graph_step("app"):
+            app_object_id, app_id = admin.create_app(role_ids)
+        with graph_step("sp"):
+            sp = admin.create_sp(app_id)
         f.step = "consent"
-        admin.grant(graph_sp, sp, role_ids)
+        with graph_step("consent"):
+            admin.grant(graph_sp, sp, role_ids)
         f.step = "secret"
-        secret = admin.add_password(app_object_id)
+        with graph_step("secret"):
+            secret = admin.add_password(app_object_id)
         f.step = "propagation"
         config = {"tenant_id": tenant_id, "client_id": app_id, "cloud": f.cloud}
         check, ready = wait_ready(config, secret, f.cancel)
@@ -391,20 +479,14 @@ def _run_provision(f: Flow, save: Saver) -> None:
             f.connection = save(f, config, secret, _provisioned(app_object_id, sp), check)
             saved = True
             _finish(f, "done", "The new credentials do not work yet (Microsoft can take a few minutes to propagate "
-                               "them). The tenant is saved: run Test again later.")
+                               "them). The tenant is saved: run Test again later.", "propagation_timeout")
             return
         f.step = "test"
         f.connection = save(f, config, secret, _provisioned(app_object_id, sp), check)
         saved = True
         _finish(f, "done")
-    except Cancelled:
-        _finish(f, "error", "Cancelled.")
-    except ProvisionError as e:
-        _finish(f, "expired" if e.expired else "error", scrub(str(e), token, secret))
-    except ConnectorError as e:
-        _finish(f, "error", scrub(graph_text(e, f.step), token, secret))
     except Exception as e:  # noqa: BLE001 - the flow must end, with a message that carries no secret
-        _finish(f, "error", scrub(f"Unexpected error ({type(e).__name__}).", token, secret))
+        _fail(f, e, token, secret)
     finally:
         if app_object_id and not saved and admin is not None:
             try:  # best effort: do not leave a half-made application in the tenant
@@ -427,23 +509,18 @@ def _run_deprovision(f: Flow, clear: Clearer) -> None:
         f.status = "working"
         f.step = "remove"
         admin = Admin(f.cloud, token)
-        tenant_id, _ = admin.organization()
+        tenant_id, _ = tenant_of(admin, token)
         if f.tenant_id and tenant_id.lower() != f.tenant_id.lower():
             raise ProvisionError("The account signed in belongs to another tenant: sign in with an administrator of "
-                                 "the tenant of this connection.")
+                                 "the tenant of this connection.", "other_tenant")
         if f.cancel.is_set():
             raise Cancelled()
-        admin.delete_app(f.app_object_id)  # only the application mccb created, nothing else
+        with graph_step("remove"):
+            admin.delete_app(f.app_object_id)  # only the application mccb created, nothing else
         f.connection = clear(f)
         _finish(f, "done")
-    except Cancelled:
-        _finish(f, "error", "Cancelled.")
-    except ProvisionError as e:
-        _finish(f, "expired" if e.expired else "error", scrub(str(e), token))
-    except ConnectorError as e:
-        _finish(f, "error", scrub(graph_text(e, f.step), token))
-    except Exception as e:  # noqa: BLE001
-        _finish(f, "error", scrub(f"Unexpected error ({type(e).__name__}).", token))
+    except Exception as e:  # noqa: BLE001 - the flow must end, with a message that carries no token
+        _fail(f, e, token)
     finally:
         if admin is not None:
             admin.close()

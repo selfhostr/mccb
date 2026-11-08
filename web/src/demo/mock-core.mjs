@@ -442,7 +442,8 @@ export async function control(path, body) {
 	}
 	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, provisionCalls: state.provisionCalls, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
 	if (path === '/__mock/provision') {
-		// How the next "Connect with Microsoft" flows end: null, 'admin' (not an administrator) or 'expired' (code expired).
+		// How the next "Connect with Microsoft" flows end: null, 'admin' (not an administrator), 'expired' (code expired),
+		// 'propagation' (saved, permissions not active yet) or 'lost' (404 from the second poll, as after a restart).
 		state.provisionFail = body.fail ?? null;
 		return send(200, { ok: true });
 	}
@@ -1243,18 +1244,18 @@ function tenantMatch(conn, server) {
 const PROVISION_STEPS = ['signin', 'app', 'consent', 'propagation', 'test'];
 function flowView(flow) {
 	flow.polls++;
-	if (flow.fail === 'expired' && flow.polls > 1) return { status: 'expired', step: null, error: 'The code expired before the sign-in. Start again.', connection: null };
-	if (flow.fail === 'admin' && flow.polls > 2) return { status: 'error', step: 'signin', error: 'This account is not an administrator of the tenant (AADSTS65004). Sign in with a Global Administrator.', connection: null };
+	if (flow.fail === 'expired' && flow.polls > 1) return { status: 'expired', step: null, error: 'The code expired before the sign-in: start again.', error_code: 'expired', connection: null };
+	if (flow.fail === 'admin' && flow.polls > 2) return { status: 'error', step: 'app', error: 'Creating the application was refused: the account must be Global Administrator or Application Administrator of the client tenant (Graph 403 Authorization_RequestDenied: Insufficient privileges to complete the operation.).', error_code: 'not_admin', connection: null };
 	if (flow.remove) {
-		if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, connection: null };
-		if (flow.polls === 2) return { status: 'working', step: 'remove', error: null, connection: null };
+		if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, error_code: null, connection: null };
+		if (flow.polls === 2) return { status: 'working', step: 'remove', error: null, error_code: null, connection: null };
 		const conn = state.sourceConnections.get(flow.connectionId);
 		if (conn) conn.provisioned = null;
-		return { status: 'done', step: 'remove', error: null, connection: conn ? tenantView(conn) : null };
+		return { status: 'done', step: 'remove', error: null, error_code: null, connection: conn ? tenantView(conn) : null };
 	}
-	if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, connection: null };
+	if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, error_code: null, connection: null };
 	const step = PROVISION_STEPS[Math.min(flow.polls - 1, PROVISION_STEPS.length - 1)];
-	if (flow.polls <= PROVISION_STEPS.length) return { status: 'working', step, error: null, connection: null };
+	if (flow.polls <= PROVISION_STEPS.length) return { status: 'working', step, error: null, error_code: null, connection: null };
 	if (!flow.connectionId) {
 		const conn = { id: state.tenantNext++, name: flow.name || 'Fabrikam', kind: 'm365_graph', config: { tenant_id: '3c9e7a10-5b42-4d18-8f6a-1e2d4c7b9a05', client_id: 'a7d5e2b4-9c18-4f03-b6a1-8e0d3f5c2b79', cloud: flow.cloud || 'global' }, secrets: { client_secret: 'full-provisioned' }, notes: null, last_test: Date.now() / 1000, last_test_result: tenantCheck({}, { client_secret: 'full-provisioned' }), provisioned: { app_object_id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b', sp_object_id: '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', created_at: Date.now() / 1000 }, created_at: Date.now() / 1000 };
 		state.sourceConnections.set(conn.id, conn);
@@ -1264,9 +1265,9 @@ function flowView(flow) {
 	if (flow.fail === 'propagation' && !conn.healed) {
 		// The permissions are not active yet: saved, last check failing.
 		conn.last_test_result = { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'Microsoft has not activated the new credentials yet.' }], tenant_name: conn.name };
-		return { status: 'done', step: 'propagation', error: 'Microsoft did not activate the permissions in time.', connection: tenantView(conn) };
+		return { status: 'done', step: 'propagation', error: 'The new credentials do not work yet (Microsoft can take a few minutes to propagate them). The tenant is saved: run Test again later.', error_code: 'propagation_timeout', connection: tenantView(conn) };
 	}
-	return { status: 'done', step: 'test', error: null, connection: tenantView(conn) };
+	return { status: 'done', step: 'test', error: null, error_code: null, connection: tenantView(conn) };
 }
 
 function startFlow(extra) {
@@ -1290,7 +1291,8 @@ function handleTenants(parts, m, json, query) {
 			flow.cancelled = true;
 			return send(200, { ok: true });
 		}
-		if (m === 'GET') return flow.cancelled ? fail(404, 'unknown flow') : send(200, flowView(flow));
+		// 'lost': mccb restarted meanwhile, the flow is no longer known
+		if (m === 'GET') return flow.cancelled || (flow.fail === 'lost' && flow.polls++ > 0) ? fail(404, 'unknown flow') : send(200, flowView(flow));
 	}
 	if (!parts.length) {
 		if (m === 'GET') return send(200, [...C.values()].map(tenantView));

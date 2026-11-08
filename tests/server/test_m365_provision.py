@@ -32,7 +32,7 @@ def entra(monkeypatch):
 
 
 def secrets_of(fake):
-    return [fake.DELEGATED, *fake.passwords.values()]
+    return [*fake.delegated, *fake.passwords.values()]
 
 
 def clean(fake, r):
@@ -67,9 +67,11 @@ def test_happy_path_end_to_end(client, entra):
     asked = entra.device_requests[0]
     assert asked["client_id"] == BOOT
     assert "Application.ReadWrite.All" in asked["scope"] and "AppRoleAssignment.ReadWrite.All" in asked["scope"]
+    assert "https://graph.microsoft.com/User.Read" in asked["scope"].split()  # GET /organization needs it
 
     res = wait_flow(client, entra, f["flow_id"])
-    assert res["status"] == "done" and res["error"] is None, res
+    assert res["status"] == "done" and res["error"] is None and res["error_code"] is None, res
+    assert entra.refused == []
     conn = res["connection"]
     assert conn["name"] == "Contoso Ltd" and conn["kind"] == "m365_graph" and conn["has_secret"] is True
     (app,) = entra.applications.values()
@@ -108,31 +110,69 @@ def test_unknown_cloud_is_422(client, entra):
     assert client.post("/api/source-connections/provision", json={"cloud": "mars"}).status_code == 422
 
 
-def test_not_admin_is_a_human_error_and_nothing_saved(client, entra):
+def test_not_admin_is_a_human_error_and_nothing_saved(client, entra, caplog):
     entra.admin = False
     res = wait_flow(client, entra, start(client, entra)["flow_id"])
     assert res["status"] == "error" and res["step"] == "app" and res["connection"] is None
+    assert res["error_code"] == "not_admin"
+    assert res["error"].startswith("Creating the application was refused")
     assert "Global Administrator or Application Administrator" in res["error"]
+    assert "(Graph 403 Authorization_RequestDenied: Insufficient privileges" in res["error"]
     assert client.get("/api/source-connections").json() == []
+    logged = [r for r in caplog.records if r.levelname == "WARNING" and "403" in r.getMessage()]
+    assert logged and "Authorization_RequestDenied" in logged[0].getMessage()
+    assert all(t not in r.getMessage() for r in caplog.records for t in entra.delegated)
+
+
+def test_old_scope_list_is_refused_the_organization(client, entra, monkeypatch):
+    """The real-tenant bug: without User.Read, GET /organization is 403; the org name must not block the flow."""
+    from app.connectors import m365_provision as mp
+    monkeypatch.setattr(mp, "DELEGATED_SCOPES", ("Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All"))
+    res = wait_flow(client, entra, start(client, entra)["flow_id"])
+    assert ("GET", "/v1.0/organization", 403) in entra.refused
+    assert res["status"] == "done" and res["error"] is None, res
+    # tenant id from the `tid` claim of the token, name from the domain of the account signed in
+    assert res["connection"]["config"]["tenant_id"] == "tid-contoso"
+    assert res["connection"]["name"] == "contoso.test"
+
+
+def test_organization_refused_falls_back_to_the_tid(client, entra):
+    entra.org_forbidden, entra.upn = True, ""
+    res = wait_flow(client, entra, start(client, entra)["flow_id"])
+    assert res["status"] == "done" and res["connection"]["name"] == "tid-contoso"
+    assert res["connection"]["config"]["tenant_id"] == "tid-contoso"
+
+
+def test_missing_scope_names_the_step_running(client, entra, monkeypatch):
+    from app.connectors import m365_provision as mp
+    monkeypatch.setattr(mp, "DELEGATED_SCOPES", ("User.Read", "Application.ReadWrite.All"))
+    res = wait_flow(client, entra, start(client, entra)["flow_id"])
+    assert res["status"] == "error" and res["step"] == "consent" and res["error_code"] == "not_admin", res
+    assert res["error"].startswith("Granting admin consent was refused")
+    assert "Graph 403 Authorization_RequestDenied" in res["error"]
+    assert entra.applications == {}
 
 
 def test_consent_assignment_forbidden_removes_the_app(client, entra):
     entra.consent_forbidden = True
     res = wait_flow(client, entra, start(client, entra)["flow_id"])
     assert res["status"] == "error" and res["step"] == "consent" and "Global Administrator" in res["error"]
+    assert res["error_code"] == "not_admin"
     assert entra.applications == {} and len(entra.deleted) == 1
     assert client.get("/api/source-connections").json() == []
 
 
-@pytest.mark.parametrize("error,desc,words", [
-    ("access_denied", "AADSTS65004: User declined to consent to access the app.", "refused"),
-    ("invalid_grant", "AADSTS90094: Admin consent is required for the permissions requested.", "administrator"),
-    ("authorization_declined", "AADSTS70000: The user declined.", "declined"),
+@pytest.mark.parametrize("error,desc,words,code", [
+    ("access_denied", "AADSTS65004: User declined to consent to access the app.", "refused", "consent_refused"),
+    ("invalid_grant", "AADSTS90094: Admin consent is required for the permissions requested.", "administrator",
+     "not_admin"),
+    ("authorization_declined", "AADSTS70000: The user declined.", "declined", "login_refused"),
 ])
-def test_signin_refused(client, entra, error, desc, words):
+def test_signin_refused(client, entra, error, desc, words, code):
     entra.device_error = (error, desc)
     res = wait_flow(client, entra, start(client, entra)["flow_id"])
     assert res["status"] == "error" and res["step"] == "signin" and words in res["error"].lower(), res
+    assert res["error_code"] == code
     assert "AADSTS" not in res["error"]
     assert entra.applications == {}
 
@@ -141,6 +181,7 @@ def test_expired_code(client, entra):
     entra.device_error = ("expired_token", "AADSTS70020: The device code has expired.")
     res = wait_flow(client, entra, start(client, entra)["flow_id"])
     assert res["status"] == "expired" and res["error"] and res["connection"] is None
+    assert res["error_code"] == "expired"
 
 
 def test_cancel(client, entra):
@@ -165,6 +206,7 @@ def test_propagation_timeout_saves_the_connection_flagged(client, entra, monkeyp
     entra.propagation = 10 ** 6
     res = wait_flow(client, entra, start(client, entra)["flow_id"])
     assert res["status"] == "done" and res["step"] == "propagation" and "Test" in res["error"]
+    assert res["error_code"] == "propagation_timeout"
     conn = res["connection"]
     assert conn["last_test_result"]["ok"] is False and conn["provisioned"]["app_object_id"] in entra.applications
     assert len(entra.token_requests) == 3
@@ -190,6 +232,7 @@ def test_deprovision_of_another_tenant_is_refused(client, entra):
     entra.tenant_id = "tid-other"
     res = wait_flow(client, entra, client.post(f"/api/source-connections/{conn['id']}/deprovision").json()["flow_id"])
     assert res["status"] == "error" and res["step"] == "remove" and entra.deleted == []
+    assert res["error_code"] == "other_tenant"
     assert client.get(f"/api/source-connections/{conn['id']}").json()["provisioned"] is not None
 
 

@@ -65,10 +65,11 @@ _sleep = time.sleep  # replaced in the tests
 
 
 class GraphError(ConnectorError):
-    def __init__(self, msg: str, kind: str, status: int, code: str = ""):
+    def __init__(self, msg: str, kind: str, status: int, code: str = "", text: str = ""):
         super().__init__(msg, kind)
         self.status = status
         self.code = code
+        self.text = text  # the message of Graph's error body
 
 
 def _odata(value: str) -> str:
@@ -166,7 +167,7 @@ class GraphClient:
             kind = ConnectorError.UNREACHABLE if connecting else ConnectorError.TRANSIENT
         else:
             kind = ConnectorError.REJECTED
-        return GraphError(msg, kind, st, code)
+        return GraphError(msg, kind, st, code, text)
 
     def get_json(self, path_or_url: str, params: dict | None = None, connecting: bool = False) -> dict:
         url = path_or_url if path_or_url.startswith("https://") else self.url(path_or_url)

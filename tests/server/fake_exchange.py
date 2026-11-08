@@ -671,10 +671,28 @@ GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 
+# the delegated scopes each endpoint needs (any one of them), as Microsoft Graph enforces them on the `scp` claim
+ADMIN_SCOPES = {
+    ("GET", "organization"): ("User.Read", "Organization.Read.All", "Directory.Read.All"),
+    ("GET", "servicePrincipals"): ("Application.Read.All", "Application.ReadWrite.All"),
+    ("POST", "applications"): ("Application.ReadWrite.All",),
+    ("POST", "servicePrincipals"): ("Application.ReadWrite.All",),
+    ("POST", "addPassword"): ("Application.ReadWrite.All",),
+    ("DELETE", "applications"): ("Application.ReadWrite.All",),
+    ("POST", "appRoleAssignedTo"): ("AppRoleAssignment.ReadWrite.All",),
+    ("POST", "appRoleAssignments"): ("AppRoleAssignment.ReadWrite.All",),
+}
+
+
+def _jwt(claims: dict, signature: str) -> str:
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.{signature}"
+
+
 class FakeEntra(FakeGraph):
-    """FakeGraph plus what "Connect with Microsoft" uses: the device code flow of the bootstrap app (delegated token),
-    the application objects of the tenant, and a propagation delay of the new credentials."""
-    DELEGATED = "delegated-token-XYZ"
+    """FakeGraph plus what "Connect with Microsoft" uses: the device code flow of the bootstrap app (delegated token:
+    a JWT whose `scp` holds the scopes asked at the devicecode endpoint, enforced per endpoint), the application
+    objects of the tenant, and a propagation delay of the new credentials."""
 
     def __init__(self, mailbox: str = "me@contoso.test"):
         super().__init__(mailbox)
@@ -683,6 +701,11 @@ class FakeEntra(FakeGraph):
         self.pending = 2               # authorization_pending answers before the sign-in completes
         self.device_error: tuple[str, str] | None = None   # (error, error_description) instead of the token
         self.device_requests: list[dict] = []
+        self.scopes: list[str] = []    # the delegated scopes asked at the devicecode endpoint, resource prefix removed
+        self.delegated: list[str] = []  # the delegated tokens issued
+        self.upn = "admin@contoso.test"
+        self.org_forbidden = False     # True: GET /organization is 403 whatever the scopes
+        self.refused: list[tuple[str, str, int]] = []   # (method, path, status) of the delegated calls refused
         self.admin = True              # False: POST /applications is 403 (not an administrator)
         self.consent_forbidden = False  # True: the app role assignments are 403
         self.propagation = 2           # client-credential tokens of a new app refused before it works
@@ -700,12 +723,28 @@ class FakeEntra(FakeGraph):
     def role_value(self, role_id: str) -> str:
         return next(r["value"] for r in self.graph_sp["appRoles"] if r["id"] == role_id)
 
+    @property
+    def DELEGATED(self) -> str:  # noqa: N802 - the last delegated token issued
+        return self.delegated[-1] if self.delegated else "delegated-token-none"
+
+    def _delegated_token(self) -> str:
+        tok = _jwt({"tid": self.tenant_id, "upn": self.upn, "scp": " ".join(self.scopes)},
+                   f"delegated-token-XYZ{len(self.delegated)}")
+        self.delegated.append(tok)
+        return tok
+
+    def _scp(self, request: httpx.Request) -> set[str]:
+        claims = json.loads(base64.urlsafe_b64decode(
+            request.headers["authorization"].split()[1].split(".")[1] + "=="))
+        return set(claims.get("scp", "").split())
+
     def __call__(self, request: httpx.Request) -> httpx.Response:
         url = request.url
         if url.host.startswith("login."):
             form = dict(urllib.parse.parse_qsl(request.content.decode()))
             if url.path.endswith("/devicecode"):
                 self.device_requests.append(form)
+                self.scopes = [x.rsplit("/", 1)[-1] for x in form.get("scope", "").split()]
                 return httpx.Response(200, json={
                     "device_code": self.device_code, "user_code": "ABCD-EFGH",
                     "verification_uri": "https://microsoft.com/devicelogin", "expires_in": 900, "interval": 5,
@@ -722,7 +761,7 @@ class FakeEntra(FakeGraph):
                 if self.device_error:
                     return httpx.Response(400, json={"error": self.device_error[0],
                                                      "error_description": self.device_error[1]})
-                return httpx.Response(200, json={"access_token": self.DELEGATED, "token_type": "Bearer",
+                return httpx.Response(200, json={"access_token": self._delegated_token(), "token_type": "Bearer",
                                                  "expires_in": 3599})
             app = next((a for a in self.applications.values() if a["appId"] == form.get("client_id")), None)
             if app is not None:
@@ -737,10 +776,25 @@ class FakeEntra(FakeGraph):
                 self.last_token = self._access_token()
                 return httpx.Response(200, json={"access_token": self.last_token, "expires_in": 3599})
             return super().__call__(request)
-        if request.headers.get("authorization") == f"Bearer {self.DELEGATED}":
+        if request.headers.get("authorization", "").removeprefix("Bearer ") in self.delegated:
             self.requests.append(request)
-            return self._admin(request, urllib.parse.unquote(url.path), dict(url.params.multi_items()))
+            path = urllib.parse.unquote(url.path)
+            r = self._scope_check(request, path) or self._admin(request, path, dict(url.params.multi_items()))
+            if r.status_code in (401, 403):
+                self.refused.append((request.method, path, r.status_code))
+            return r
         return super().__call__(request)
+
+    def _scope_check(self, request: httpx.Request, path: str) -> httpx.Response | None:
+        parts = path.strip("/").split("/")
+        key = (request.method, parts[-1] if parts[-1] in ("addPassword", "appRoleAssignedTo", "appRoleAssignments") else parts[1])
+        needed = ADMIN_SCOPES.get(key)
+        assert needed, f"delegated scope of {key} not simulated"
+        if not self._scp(request) & set(needed):
+            return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+        if key == ("GET", "organization") and self.org_forbidden:
+            return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+        return None
 
     def _admin(self, request: httpx.Request, path: str, params: dict) -> httpx.Response:
         method = request.method

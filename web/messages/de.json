@@ -856,5 +856,14 @@
 	"provision_field_cloud_help": "Die Microsoft-Cloud, zu der der Tenant gehört.",
 	"provision_notice": "Die Microsoft-Seite zeigt „Microsoft Graph Command Line Tools“ und bittet um die Erlaubnis, Anwendungen zu erstellen und zu verwalten. Das ist normal: mccb nutzt dies nur, um die Anwendung „mccb migration“ in diesem Tenant anzulegen.",
 	"provision_pending": "Die App wurde angelegt, aber Microsoft aktiviert ihre Berechtigungen noch. Führen Sie den Test in einigen Minuten erneut aus.",
-	"provision_test_again": "Erneut testen"
+	"provision_test_again": "Erneut testen",
+	"provision_error_not_admin": "Microsoft hat diesen Schritt abgelehnt: Das angemeldete Konto ist kein Administrator des Tenants mit ausreichenden Rechten. Melden Sie sich mit einem globalen Administrator (oder Anwendungsadministrator) des Kunden-Tenants an.",
+	"provision_error_consent_refused": "Die Berechtigungen wurden nicht akzeptiert. Starten Sie neu und akzeptieren Sie die von Microsoft angeforderten Berechtigungen.",
+	"provision_error_step_refused": "Microsoft hat einen Schritt der Verbindung abgelehnt. Die Details unten nennen den Schritt und den Grund.",
+	"provision_error_login_refused": "Die Microsoft-Anmeldung ist fehlgeschlagen. Starten Sie neu und melden Sie sich mit einem Geschäftskonto des Kunden-Tenants an.",
+	"provision_error_unreachable": "Microsoft ist derzeit nicht erreichbar. Versuchen Sie es in einigen Minuten erneut.",
+	"provision_error_other_tenant": "Das angemeldete Konto gehört zu einem anderen Tenant. Melden Sie sich mit einem Administrator des Tenants dieser Verbindung an.",
+	"provision_error_cancelled": "Die Verbindung wurde abgebrochen.",
+	"provision_error_unexpected": "Ein unerwarteter Fehler hat die Verbindung abgebrochen. Starten Sie neu; tritt er erneut auf, helfen die Details unten bei der Meldung.",
+	"provision_lost": "mccb antwortet nicht mehr (neu gestartet?). Bitte neu starten."
 }

@@ -88,8 +88,11 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `POST /api/source-connections/{id}/deprovision` → same answer: a new sign-in, then only the application mccb created is
   deleted and `provisioned` cleared (the connection stays; `DELETE` it if wanted). **409** if not provisioned or turned off.
   `GET /api/source-connections/provision/{flow_id}` → `{status:'waiting'|'working'|'done'|'error'|'expired',
-  step:null|'signin'|'app'|'consent'|'secret'|'propagation'|'test'|'remove',error:null|string,connection:Connection|null}`
-  (poll every `interval` seconds; `connection` set on `done`). Done with `step:'propagation'` and an `error`: the credentials
+  step:null|'signin'|'app'|'consent'|'secret'|'propagation'|'test'|'remove',error:null|string,
+  error_code:null|'not_admin'|'consent_refused'|'expired'|'step_refused'|'propagation_timeout'|'login_refused'|'unreachable'|
+  'other_tenant'|'cancelled'|'unexpected',connection:Connection|null}` (poll every `interval` seconds; `connection` set
+  on `done`). `error_code` is stable, for the UI to translate; `error` is the English text, with what Graph answered
+  (e.g. `Graph 403 Authorization_RequestDenied: …`). Done with `step:'propagation'` and an `error`: the credentials
   did not work in time, the connection is saved all the same, run its Test again later. A failure before saving removes the
   half-made application. **404** unknown or expired flow (kept 15 minutes after the end).
   `DELETE /api/source-connections/provision/{flow_id}` cancels (204, also for an unknown flow). The delegated token stays in

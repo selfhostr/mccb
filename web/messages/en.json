@@ -856,5 +856,14 @@
 	"provision_field_cloud_help": "The Microsoft cloud the tenant belongs to.",
 	"provision_notice": "Microsoft's page will show \"Microsoft Graph Command Line Tools\" and ask to allow creating and managing applications. That is expected: mccb uses it only to create the \"mccb migration\" app in this tenant.",
 	"provision_pending": "The app was created, but Microsoft is still activating its permissions. Run the test again in a few minutes.",
-	"provision_test_again": "Test again"
+	"provision_test_again": "Test again",
+	"provision_error_not_admin": "Microsoft refused this step: the account signed in is not an administrator of the tenant with enough rights. Sign in with a Global Administrator (or Application Administrator) of the client tenant.",
+	"provision_error_consent_refused": "The permissions were not accepted. Start again and accept the permissions Microsoft asks for.",
+	"provision_error_step_refused": "Microsoft refused a step of the connection. The details below say which one and why.",
+	"provision_error_login_refused": "The Microsoft sign-in did not succeed. Start again and sign in with a work account of the client tenant.",
+	"provision_error_unreachable": "Microsoft cannot be reached right now. Try again in a few minutes.",
+	"provision_error_other_tenant": "The account signed in belongs to another tenant. Sign in with an administrator of the tenant of this connection.",
+	"provision_error_cancelled": "The connection was cancelled.",
+	"provision_error_unexpected": "An unexpected error stopped the connection. Start again; if it happens again, the details below help to report it.",
+	"provision_lost": "mccb no longer responds (restarted?). Start again."
 }

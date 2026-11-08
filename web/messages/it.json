@@ -856,5 +856,14 @@
 	"provision_field_cloud_help": "Il cloud Microsoft a cui appartiene il tenant.",
 	"provision_notice": "La pagina Microsoft mostrerà «Microsoft Graph Command Line Tools» e chiederà di consentire la creazione e la gestione di applicazioni. È normale: mccb lo usa solo per creare l'app «mccb migration» in questo tenant.",
 	"provision_pending": "L'app è stata creata, ma Microsoft sta ancora attivando i suoi permessi. Ripeti la verifica tra qualche minuto.",
-	"provision_test_again": "Verifica di nuovo"
+	"provision_test_again": "Verifica di nuovo",
+	"provision_error_not_admin": "Microsoft ha rifiutato questo passaggio: l'account connesso non è un amministratore del tenant con diritti sufficienti. Accedi con un amministratore globale (o amministratore delle applicazioni) del tenant del cliente.",
+	"provision_error_consent_refused": "Le autorizzazioni non sono state accettate. Ricomincia e accetta le autorizzazioni richieste da Microsoft.",
+	"provision_error_step_refused": "Microsoft ha rifiutato un passaggio della connessione. I dettagli qui sotto indicano quale e perché.",
+	"provision_error_login_refused": "L'accesso Microsoft non è riuscito. Ricomincia e accedi con un account aziendale del tenant del cliente.",
+	"provision_error_unreachable": "Al momento Microsoft non è raggiungibile. Riprova tra qualche minuto.",
+	"provision_error_other_tenant": "L'account connesso appartiene a un altro tenant. Accedi con un amministratore del tenant di questa connessione.",
+	"provision_error_cancelled": "La connessione è stata annullata.",
+	"provision_error_unexpected": "Un errore imprevisto ha interrotto la connessione. Ricomincia; se si ripete, i dettagli qui sotto aiutano a segnalarlo.",
+	"provision_lost": "mccb non risponde più (riavviato?). Ricomincia."
 }
