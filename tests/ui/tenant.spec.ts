@@ -327,6 +327,20 @@ test.describe('Microsoft 365 tenants', () => {
 		await expect(page).toHaveURL(/\/tenants\/1\/migrate/);
 	});
 
+	test('Servers: DAV answers while switched off -> offered, one click enables it', async ({ page }) => {
+		const made = await page.request.post('/api/servers', { data: { name: 'Yety', imap_host: 'dav.yety.test', dav_enabled: false } });
+		expect(made.ok()).toBeTruthy();
+		await ready(page, '/servers');
+		const row = page.locator('[data-server="Yety"]');
+		const found = row.getByTestId('server-dav-found');
+		await expect(found).toBeVisible();
+		await row.getByTestId('server-enable-dav').click();
+		await expect(found).toHaveCount(0);
+		await expect(row).toContainText('CalDAV and CardDAV enabled');
+		const servers = await (await page.request.get('/api/servers')).json();
+		expect(servers.find((x: { name: string }) => x.name === 'Yety').dav_enabled).toBe(true);
+	});
+
 	test('phone: no horizontal scroll', async ({ page }) => {
 		await page.setViewportSize({ width: 375, height: 800 });
 		await ready(page, MATCH);

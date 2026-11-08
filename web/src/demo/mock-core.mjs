@@ -526,14 +526,16 @@ export async function handle(req) {
 		}
 		if (parts[2] === 'test') {
 			// Stored like the real server does: the list shows the verdict after a reload.
-			const result = { imap: { ok: true, msg: `IMAP server reachable (${server.imap_host}:${server.imap_port})`, capabilities: [] }, caldav: { ok: server.dav_enabled, msg: server.dav_enabled ? 'reachable (HTTP 207)' : 'DAV disabled for this server' }, carddav: { ok: false, msg: 'https://dav.example.com/ unreachable: timeout' } };
+			const result = { imap: { ok: true, msg: `IMAP server reachable (${server.imap_host}:${server.imap_port})`, capabilities: [] }, caldav: server.dav_enabled ? { ok: true, msg: 'reachable (HTTP 207)' } : { ok: true, found: server.imap_host.includes('dav'), msg: server.imap_host.includes('dav') ? 'DAV is off, but https://' + server.imap_host + '/.well-known/caldav answers (HTTP 401)' : 'DAV disabled for this server' }, carddav: server.dav_enabled ? { ok: false, msg: 'https://dav.example.com/ unreachable: timeout' } : { ok: true, found: false, msg: 'DAV disabled for this server' } };
 			server.last_test = Date.now() / 1000;
 			server.last_test_result = result;
 			return send(200, result);
 		}
 		if (m === 'GET') return send(200, server);
 		if (m === 'PUT') {
+			const before = server.dav_enabled;
 			Object.assign(server, json(), { id: server.id });
+			if (before !== server.dav_enabled) Object.assign(server, { last_test: null, last_test_result: null });
 			return send(200, server);
 		}
 		if (m === 'DELETE') {

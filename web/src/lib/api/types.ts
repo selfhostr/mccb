@@ -25,6 +25,8 @@ export interface ProbeResult {
 	ok: boolean;
 	msg: string;
 	quota?: unknown;
+	/** Server test with DAV switched off: true when the CalDAV/CardDAV entry point answers anyway. */
+	found?: boolean;
 }
 
 export interface TestResult {

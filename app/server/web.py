@@ -272,23 +272,35 @@ def test_server(sid: int):
 
 
 def _probe_dav(r, kind: str, template: str | None) -> dict:
-    """Test without credentials: does the DAV entry point respond (401/207/200...)?"""
+    """Test without credentials: does the DAV entry point respond (401/207/200...)?
+    With DAV switched off nothing fails, but the entry point is still looked up so that the verdict can say
+    `found` (DAV answers here yet is off): a green "DAV disabled" alone hid a working CalDAV/CardDAV."""
     import httpx
-    if not r["dav_enabled"]:
-        return {"ok": True, "msg": "DAV disabled for this server"}
-    if template and "{" in template:
+    enabled = bool(r["dav_enabled"])
+    if enabled and template and "{" in template:
         return {"ok": True, "msg": "template URL: checked when each mailbox is tested"}
-    urls = [template] if template else [f"https://{r['imap_host']}/.well-known/{kind}"]
+    urls = [template] if template and "{" not in template else [f"https://{r['imap_host']}/.well-known/{kind}"]
+    err = "no URL"
     for url in urls:
         try:
-            with httpx.Client(verify=bool(r["verify_tls"]), timeout=15, follow_redirects=True) as c:
+            with httpx.Client(verify=bool(r["verify_tls"]), timeout=15 if enabled else 8, follow_redirects=True) as c:
                 resp = c.request("PROPFIND", url, headers={"Depth": "0"})
-            if resp.status_code < 500 and resp.status_code != 404:
+            reachable = resp.status_code < 500 and resp.status_code != 404
+            if not enabled:
+                if reachable:
+                    return {"ok": True, "found": True, "msg": f"DAV is off, but {url} answers (HTTP {resp.status_code})"}
+                err = ""
+                break
+            if reachable:
                 return {"ok": True, "msg": f"{url} reachable (HTTP {resp.status_code})"}
             return {"ok": False, "msg": f"{url}: HTTP {resp.status_code}"}
         except Exception as e:
-            return {"ok": False, "msg": f"{url} unreachable: {e}"}
-    return {"ok": False, "msg": "no URL"}
+            if enabled:
+                return {"ok": False, "msg": f"{url} unreachable: {e}"}
+            err = ""
+    if not enabled:
+        return {"ok": True, "found": False, "msg": "DAV disabled for this server"}
+    return {"ok": False, "msg": err}
 
 
 # ======================================================================= accounts
