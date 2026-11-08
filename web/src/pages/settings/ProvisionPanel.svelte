@@ -209,7 +209,7 @@
 			<div class="flex flex-wrap items-center gap-2 rounded-card border border-line bg-surface-2 p-3">
 				<div class="min-w-0 flex-1">
 					<p class="m-0 text-xs text-ink-3">{m.provision_code()}</p>
-					<p class="m-0 font-mono text-3xl font-semibold tracking-widest select-all" data-testid="provision-code">{flow.user_code}</p>
+					<p class="m-0 font-mono text-4xl font-semibold tracking-widest select-all [user-select:all] break-all" data-testid="provision-code">{flow.user_code}</p>
 				</div>
 				<CopyButton text={flow.user_code} label={m.provision_copy_code()} />
 				<Button variant="primary" icon={ExternalLink} onclick={() => window.open(flow?.verification_uri, '_blank', 'noopener,noreferrer')} data-testid="provision-open">{m.provision_open()}</Button>
