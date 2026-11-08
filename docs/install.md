@@ -32,7 +32,7 @@ Open `http://<host>:22362` and sign in with the printed password. It is shown on
 
 ## Pin a version
 
-The image is tagged `X.Y.Z`, `X.Y` and `latest`. To pin a version, replace `latest` with the tag in `docker-compose.yml`, for example `1.1.2`.
+The image is tagged `X.Y.Z`, `X.Y` and `latest`. To pin a version, replace `latest` with the tag in `docker-compose.yml`, for example `2.0.0`.
 
 ## Build from source
 
