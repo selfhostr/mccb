@@ -81,7 +81,7 @@ More in [known limitations](docs/limits.md).
 
 ## Status
 
-Version 1.1.x. Every change is listed in the [changelog](CHANGELOG.md).
+Version 2.0.x. Every change is listed in the [changelog](CHANGELOG.md).
 
 ## Contributing
 
