@@ -60,7 +60,7 @@ App-only: one Entra application and one secret reach every mailbox of the tenant
 
 The quickest way, and the one to try first. In **Settings**, **Servers**, add a Microsoft 365 tenant and press **Connect with Microsoft**.
 
-1. mccb shows a code. Open `microsoft.com/devicelogin`, enter it and sign in with a **Global Administrator** of the tenant. (Granting application permissions also works for an account that holds both Application Administrator and Privileged Role Administrator, but Global Administrator is the safe choice.)
+1. mccb shows a code. Open `microsoft.com/devicelogin`, enter it and sign in with a **Global Administrator** or a **Privileged Role Administrator** of the tenant: granting Microsoft Graph application permissions requires one of these two roles.
 2. Accept the consent screen. It is named **Microsoft Graph Command Line Tools**, the public Microsoft application mccb uses once to sign you in and create the migration application. It is not an mccb application, and mccb keeps no access to it afterwards.
 3. mccb creates the **mccb migration** application with the exact application permissions listed below, grants admin consent, and creates a client secret valid for one year.
 4. Microsoft takes a few minutes to activate a new application and its consent. mccb waits for it, then runs the test of the tenant. The tenant is then ready, with its directory ID, client ID and secret filled in.

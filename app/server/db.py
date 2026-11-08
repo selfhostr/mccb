@@ -214,7 +214,8 @@ CREATE TABLE IF NOT EXISTS source_connections (
     notes TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     last_test REAL,
-    last_test_result TEXT
+    last_test_result TEXT,
+    provisioned TEXT  -- JSON {app_object_id, sp_object_id, created_at}: created by "Connect with Microsoft"
 );
 CREATE TABLE IF NOT EXISTS notify_sent (
     kind TEXT NOT NULL,
@@ -259,8 +260,11 @@ DEFAULT_WORKERS_LEGACY = (2, 4)
 
 
 def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
+    """Adds a column to an existing table. A table that does not exist yet is left alone: SCHEMA creates it with
+    the column (a table newer than the database being migrated, e.g. source_connections on a 1.0.0 database)."""
     name = ddl.split()[0]
-    if name in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if not cols or name in cols:
         return
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
@@ -331,7 +335,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # NULL: the source config and secrets are the account's own; set: they come from that source_connections row
     # (no FK: deleting a connection that accounts use is refused by the API)
     _add_column(conn, "accounts", "source_connection_id INTEGER")
-    # JSON {app_object_id, sp_object_id, created_at}: the Entra app was created by "Connect with Microsoft" (not secret)
+    # JSON {app_object_id, sp_object_id, created_at}: the Entra app was created by "Connect with Microsoft" (not secret).
+    # Only for a source_connections table created before the column (SCHEMA has it).
     _add_column(conn, "source_connections", "provisioned TEXT")
     _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)

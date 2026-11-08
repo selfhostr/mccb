@@ -34,6 +34,36 @@ def test_old_database_gains_source_connections(env):
     assert db.q1("SELECT COUNT(*) n FROM source_connections")["n"] == 0
 
 
+def test_migrate_before_schema_leaves_missing_tables_to_the_schema(env):
+    """_migrate on a 1.0.0 database (no source_connections yet) must not fail: the table comes from SCHEMA."""
+    from app.server import db
+    env.db_path.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(env.db_path, isolation_level=None)
+    c.executescript(SCHEMA_100.read_text())
+    db._migrate(c)
+    assert not c.execute("PRAGMA table_info(source_connections)").fetchall()
+    c.executescript(db.SCHEMA)
+    assert CONNECTION_COLS <= {r[1] for r in c.execute("PRAGMA table_info(source_connections)")}
+    c.close()
+
+
+def test_source_connections_without_provisioned_gains_it(env):
+    """A database created before "Connect with Microsoft": source_connections without the provisioned column."""
+    from app.server import db
+    env.db_path.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(env.db_path)
+    c.executescript(SCHEMA_100.read_text())
+    c.execute("CREATE TABLE source_connections (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+              "kind TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}', secret_enc TEXT, notes TEXT NOT NULL DEFAULT '', "
+              "created_at REAL NOT NULL, last_test REAL, last_test_result TEXT)")
+    c.execute("INSERT INTO source_connections(name, kind, created_at) VALUES ('Contoso', 'm365_graph', 1)")
+    c.commit()
+    c.close()
+    db.reset()
+    assert CONNECTION_COLS <= {r[1] for r in db.q("PRAGMA table_info(source_connections)")}
+    assert db.q1("SELECT provisioned FROM source_connections")["provisioned"] is None
+
+
 def test_source_connection_row_roundtrip(env):
     from app.server import db
     cid = db.ex("INSERT INTO source_connections(name, kind, config, secret_enc, created_at) VALUES (?,?,?,?,?)",
