@@ -18,7 +18,7 @@ A mailbox has one source and one target of its own. The server of the mailbox co
 
 - **Exchange to IMAP, CalDAV and CardDAV on one server:** source `exchange_ews` or `m365_graph`, no target of its own. Mail goes to the IMAP server of the mailbox, calendars and contacts to its DAV addresses if DAV is enabled on the server, tasks to a CalDAV calendar that accepts `VTODO`.
 - **Exchange to a separate CalDAV or CardDAV server:** set the target of the mailbox to `caldav` or `carddav`. It serves its own kinds, the server of the mailbox covers the rest.
-- **To Exchange:** one MCCB mailbox per source, as a source reads one protocol. For a mailbox on IMAP and DAV, that is up to three MCCB mailboxes with the same Exchange target: source `imap` for mail, `caldav` for calendars and tasks, `carddav` for contacts. `email` is unique per server: create a second server entry if the same address must appear twice.
+- **To Exchange:** one mccb mailbox per source, as a source reads one protocol. For a mailbox on IMAP and DAV, that is up to three mccb mailboxes with the same Exchange target: source `imap` for mail, `caldav` for calendars and tasks, `carddav` for contacts. `email` is unique per server: create a second server entry if the same address must appear twice.
 - **Exchange to Exchange:** source and target are both Exchange, every kind goes through.
 
 Tasks have no option of their own: they follow the calendar option of the mailbox.
@@ -42,8 +42,8 @@ Exchange Server 2013, 2016 and 2019 use the default `server_version`. For Exchan
 One service account can migrate every mailbox with impersonation. In the Exchange Management Shell:
 
 ```powershell
-New-ManagementScope -Name "MCCB" -RecipientRestrictionFilter "MemberOfGroup -eq 'CN=Migration,OU=Groups,DC=example,DC=com'"
-New-ManagementRoleAssignment -Name "MCCB" -Role ApplicationImpersonation -User svc-migration -CustomRecipientWriteScope "MCCB"
+New-ManagementScope -Name "mccb" -RecipientRestrictionFilter "MemberOfGroup -eq 'CN=Migration,OU=Groups,DC=example,DC=com'"
+New-ManagementRoleAssignment -Name "mccb" -Role ApplicationImpersonation -User svc-migration -CustomRecipientWriteScope "mccb"
 ```
 
 Without a scope, the role reaches every mailbox of the organisation. For a shared mailbox, `delegate` needs full access:
@@ -92,7 +92,7 @@ Graph has no way to import a message with everything intact.
 
 Microsoft documents a limit of 4 MB for S/MIME payloads and none for other MIME content. A larger message may be refused with HTTP 413: it is reported as an error for this item, the others go on.
 
-**If you need the received dates, write mail with `imap_oauth2`.** A mailbox has one target, so this takes two MCCB mailboxes for the same source: one with the target `imap_oauth2`, the other with the target `m365_graph` and the mail option off. `email` is unique per server: create a second server entry for the second mailbox.
+**If you need the received dates, write mail with `imap_oauth2`.** A mailbox has one target, so this takes two mccb mailboxes for the same source: one with the target `imap_oauth2`, the other with the target `m365_graph` and the mail option off. `email` is unique per server: create a second server entry for the second mailbox.
 
 ### IMAP with OAuth2, app-only on Exchange Online
 
@@ -119,9 +119,9 @@ Every mailbox uses the same application. List the mailboxes, then create them th
 ```bash
 # cookies.txt holds the session cookie of POST /api/login
 for mailbox in $(cat mailboxes.txt); do
-  id=$(curl -sb cookies.txt -X POST "$MCCB/api/accounts" -H 'Content-Type: application/json' \
+  id=$(curl -sb cookies.txt -X POST "$mccb/api/accounts" -H 'Content-Type: application/json' \
        -d "{\"server_id\":1,\"email\":\"$mailbox\",\"password\":\"$TARGET_PASSWORD\"}" | jq .id)
-  curl -sb cookies.txt -X PUT "$MCCB/api/accounts/$id/source" -H 'Content-Type: application/json' \
+  curl -sb cookies.txt -X PUT "$mccb/api/accounts/$id/source" -H 'Content-Type: application/json' \
        -d "{\"kind\":\"m365_graph\",\"config\":{\"tenant_id\":\"$TENANT\",\"client_id\":\"$CLIENT\",\"mailbox\":\"$mailbox\"},
             \"secrets\":{\"client_secret\":\"$SECRET\"}}"
 done
@@ -200,7 +200,7 @@ The body of a Sieve rule needs the `body` extension, flags `imap4flags`, copies 
 
 ### Archive mailboxes
 
-- **`m365_graph` does not migrate archive mailboxes.** Graph's mail API, which reads MIME, does not expose them. Graph has separate [import and export APIs](https://learn.microsoft.com/en-us/graph/mailbox-import-export-concept-overview) that reach archives, but they export an opaque stream that can only be imported back into Exchange Online: nothing to give to IMAP or DAV. MCCB does not use them. To migrate an archive, move its content to the primary mailbox first.
+- **`m365_graph` does not migrate archive mailboxes.** Graph's mail API, which reads MIME, does not expose them. Graph has separate [import and export APIs](https://learn.microsoft.com/en-us/graph/mailbox-import-export-concept-overview) that reach archives, but they export an opaque stream that can only be imported back into Exchange Online: nothing to give to IMAP or DAV. mccb does not use them. To migrate an archive, move its content to the primary mailbox first.
 - `exchange_ews` reads the online archive with `include_archive`. Whether an archive on a separate database answers on the same URL is not verified.
 - IMAP does not expose archive mailboxes either.
 

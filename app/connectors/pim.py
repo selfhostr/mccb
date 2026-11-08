@@ -14,7 +14,7 @@ from .base import ConnectorError
 
 DAYS = ("SU", "MO", "TU", "WE", "TH", "FR", "SA")
 UTC = timezone.utc
-PRODID = "-//yety//MCCB//EN"
+PRODID = "-//yety//mccb//EN"
 
 
 @dataclass

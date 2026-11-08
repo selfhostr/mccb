@@ -1,35 +1,59 @@
 # Changelog
 
-## Unreleased
-- The interface, messages and documentation say "mailbox" everywhere. The API routes and fields and the `mccb accounts` command keep their names. CSV downloads are now named `mailboxes.csv` and `mailboxes-export.csv`.
-- Planning (see [Plan, filter and control a migration](docs/planning.md)): dry run (`POST /api/runs/plan`), folder mapping with built-in names in nine languages, per-server and per-account policy (folder rules, excluded folders, date range, maximum size), allowed hours and a bandwidth limit per server, named batches with group actions, queue order, comparison of source and target (CSV, in the report), final resync (`mode: "delta"`) and a clear report of messages the target refuses for their size.
-- Mailboxes CSV: optional columns (PST file name, content toggles, source settings) and an export that never contains a password. Old three-column files are read as before.
-- API tokens and the `mccb` command line (upload with resume, run, watch, plan), see [Command line and API tokens](docs/cli.md).
-- Auto mode can use far more of a large machine: up to 32 mailboxes at once (more while cores stay idle), 32 builders and 32 connections per mailbox. `.env.example` no longer pins `WORKER_CONCURRENCY`: remove that line from an existing `.env` to get the auto mode. See [Tune](docs/tuning.md).
-- Costs that grew with the mailbox: the progress is recounted less often on large mailboxes, the average size no longer reads the whole table at each update, item results are written in batches.
-- One network error no longer limits a job for good: the connection ceiling, the plateau and the fallback all recover with time.
-- A server error now holds all the connections of the job and stops growth for every mailbox on that server. Servers answering "too many connections" with a plain NO are handled as overload. CalDAV and CardDAV honour `Retry-After`.
-- Memory guard: builds go one at a time when memory is short. File cache no longer counts as used inside a container.
-- Resume checks many items of a folder with one search. Final folder checks run once, no longer twice.
-- Upload: `PUT` of a chunk no longer returns the list of received chunks, the `upload` event carries `received_count` instead, and hashing no longer blocks the web process.
+## 2.0.0
+mccb 2.0.0 grows from a PST migrator into a mailbox, calendar and contact migration tool: Exchange (EWS and Microsoft Graph), JMAP, Google and file sources join IMAP and CalDAV/CardDAV, with planning, a command line and a new web UI. A Repair tab detects and fixes damaged messages in mailboxes. It also scales much further on large machines. Read "Upgrading from 1.x" below before updating.
+
+### Highlights
+- Repair tab, see [Repair a damaged mailbox](docs/repair.md): its own list of mailboxes (by hand or CSV), an analysis that only reads, then a repair of the damage other migration tools leave (accents replaced by U+FFFD, mojibake, attachments without a real name, detached signature images). Each repaired message is checked before it is written, the originals are kept in the mailbox and can be restored.
+- New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
 - Exchange in both directions: `exchange_ews` for Exchange on premises, `m365_graph` for Exchange Online, with mail, calendar, contacts and tasks. Tested against simulated servers, not real Exchange: see docs/exchange.md.
+- Planning (see [Plan, filter and control a migration](docs/planning.md)): dry run (`POST /api/runs/plan`), folder mapping with built-in names in nine languages, per-server and per-account policy (folder rules, excluded folders, date range, maximum size), allowed hours and a bandwidth limit per server, named batches with group actions, queue order, comparison of source and target (CSV, in the report), final resync (`mode: "delta"`) and a clear report of messages the target refuses for their size.
+- API tokens and the `mccb` command line (upload with resume, run, watch, plan), see [Command line and API tokens](docs/cli.md).
+- Files as a source: mbox, Maildir (zipped), `.eml`, `.msg`, `.ics`, `.vcf` and zip files, uploaded like a PST.
+- JMAP (mail and contacts, as source and target) and Google (Gmail, Calendar, People, as source) connectors. Tested against simulated servers only, JMAP calendars are not carried: see [Protocols and file formats](docs/protocols.md).
+- Server-side intake: a drop folder, and fetch over HTTP(S), SFTP or S3, see [Server-side intake](docs/server-intake.md). Notifications by ntfy, webhook or e-mail, see [Notifications](docs/notifications.md).
+- Auto mode can use far more of a large machine: up to 32 mailboxes at once (more while cores stay idle), 32 builders and 32 connections per mailbox. `.env.example` no longer pins `WORKER_CONCURRENCY`: remove that line from an existing `.env` to get the auto mode. See [Tune](docs/tuning.md).
+
+### Added
+- Servers keep their last connection test (`last_test`, `last_test_result`) and show Verified or Check failed; each mailbox shows a check, a cross or a circle next to its address, with counters that filter the list. Mailboxes imported from a CSV are tested at once.
+- Mailboxes CSV: optional columns (PST file name, content toggles, source settings) and an export that never contains a password. Old three-column files are read as before.
 - One credential for many mailboxes: EWS impersonation, Graph app-only, Dovecot-style master user on IMAP. OAuth2 on IMAP (`imap_oauth2`).
 - CalDAV and CardDAV can be sources. Tasks are carried to targets that can hold them.
-- JMAP (mail and contacts, as source and target) and Google (Gmail, Calendar, People, as source) connectors. Tested against simulated servers only, JMAP calendars are not carried: see [Protocols and file formats](docs/protocols.md).
-- Files as a source: mbox, Maildir (zipped), `.eml`, `.msg`, `.ics`, `.vcf` and zip files, uploaded like a PST.
-- Server-side intake: a drop folder, and fetch over HTTP(S), SFTP or S3, see [Server-side intake](docs/server-intake.md). Notifications by ntfy, webhook or e-mail, see [Notifications](docs/notifications.md).
 - Exchange inbox rules converted to Sieve, best effort, uploaded over ManageSieve or offered as a script.
-- New web UI: three pages (Migrations, Files, Settings) instead of six, job details in a side panel with their own URL. Old links redirect.
+- Static demo of the interface, built with `npm run build:demo`: the real UI with a simulated API in the browser, fictional data only, nothing sent anywhere.
+- README and documentation describe every source and target, not only PST files.
+
+### Changed
+- The interface, messages and documentation say "mailbox" everywhere. The API routes and fields and the `mccb accounts` command keep their names. CSV downloads are now named `mailboxes.csv` and `mailboxes-export.csv`.
 - Live events update only what changed, at most once per frame. Rows are keyed and long lists are windowed, so clicks are not lost and open selects stay open during imports.
 - Selection is explicit: what a filter hides is counted, shown and left out of any action. The selection bar is fixed and shifts nothing.
 - Connection tests show a running state, cannot start twice, report IMAP, CalDAV and CardDAV, and stay visible after a reload.
 - Upload queue: one file at a time by default (setting), order chosen when adding several files, reorder, pause, resume, cancel. Hashing no longer blocks the page.
 - Dark and light themes, density, visible columns, mask addresses, nine languages, stored in the browser.
-- Static demo of the interface, built with `npm run build:demo`: the real UI with a simulated API in the browser, fictional data only, nothing sent anywhere.
-- README and documentation describe every source and target, not only PST files.
+- Costs that grew with the mailbox: the progress is recounted less often on large mailboxes, the average size no longer reads the whole table at each update, item results are written in batches.
+- Memory guard: builds go one at a time when memory is short. File cache no longer counts as used inside a container.
+- Resume checks many items of a folder with one search. Final folder checks run once, no longer twice.
+- Upload: `PUT` of a chunk no longer returns the list of received chunks, the `upload` event carries `received_count` instead, and hashing no longer blocks the web process.
+
+### Fixed
+- One network error no longer limits a job for good: the connection ceiling, the plateau and the fallback all recover with time.
+- A server error now holds all the connections of the job and stops growth for every mailbox on that server. Servers answering "too many connections" with a plain NO are handled as overload. CalDAV and CardDAV honour `Retry-After`.
+
+### Upgrading from 1.x
+- Back up `./data` first, then `docker compose pull && docker compose up -d`, see [Upgrade mccb](docs/upgrading.md).
+- `WORKER_CONCURRENCY` is no longer pinned in `.env.example`: remove that line from an existing `.env` to get the auto mode (up to 32 mailboxes at once).
+- Servers created by earlier versions become Auto tuning when `workers` was a default; any other value stays Manual, see [Tune](docs/tuning.md).
+- The web UI is reorganised: old links redirect, and view preferences (theme, density, columns, language) are stored in the browser.
+- CSV downloads are now named `mailboxes.csv` and `mailboxes-export.csv`. Old three-column mailbox CSV files are read as before.
+- API routes and fields and the `mccb accounts` command keep their names. `PUT` of an upload chunk no longer returns the list of received chunks: use `received_count` in the `upload` event.
+- The session cookie was renamed in 1.1.2: if you come from 1.1.1 or earlier, everyone signs in again once.
+
+### Dependencies
+- cryptography 50.0.0, python-multipart 0.0.31.
+- Tests: pytest 9.0.3.
 
 ## 1.1.2
-- The product is now MCCB (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.
+- The product is now mccb (Mail Contact Calendrier Bridge): tab title, sidebar, login screen, logs, image title and the PRODID of exported vCards and events.
 - The session cookie is renamed: everyone signs in again once after the upgrade.
 - README and documentation restructured per the yety guidelines (docs/ pages, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, issue templates).
 

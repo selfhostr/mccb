@@ -2,7 +2,7 @@
 
 Always refused: link-local (169.254.0.0/16, fe80::/10, includes the cloud metadata address), well-known metadata
 addresses, unspecified, multicast and reserved ranges. Private ranges (10/8, 172.16/12, 192.168/16, loopback, ULA)
-are allowed by default because MCCB is self-hosted and sources are often on the LAN; FETCH_BLOCK_PRIVATE=1 refuses
+are allowed by default because mccb is self-hosted and sources are often on the LAN; FETCH_BLOCK_PRIVATE=1 refuses
 them too. FETCH_ALLOW_LINK_LOCAL=1 lifts the link-local refusal (not recommended)."""
 from __future__ import annotations
 

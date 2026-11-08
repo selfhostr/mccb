@@ -13,9 +13,11 @@ import Pause from '@lucide/svelte/icons/pause';
 import Play from '@lucide/svelte/icons/play';
 import ScanSearch from '@lucide/svelte/icons/scan-search';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+import Undo2 from '@lucide/svelte/icons/undo-2';
 import Upload from '@lucide/svelte/icons/upload';
+import Wrench from '@lucide/svelte/icons/wrench';
 import { m } from '#lib/paraglide/messages.js';
-import type { AccountStatus, Job, JobStatus, Pst } from './api/types.ts';
+import type { AccountStatus, Job, JobStatus, Pst, RepairBox } from './api/types.ts';
 import type { TestPhase } from './logic/testrun.ts';
 import type { UploadStatus } from './upload/queue.ts';
 import type { Tone } from './ui/Plate.svelte';
@@ -108,4 +110,25 @@ export function uploadLook(status: UploadStatus): StatusLook {
 		default:
 			return { tone: 'signal', icon: CircleCheck, label: m.status_upload_done() };
 	}
+}
+
+/** A repair mailbox: what runs now, else what the last run found. */
+export function repairLook(box: Pick<RepairBox, 'active_run' | 'last_scan'>): StatusLook {
+	const run = box.active_run;
+	if (run) {
+		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.repair_state_queued() };
+		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
+		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.repair_state_scanning() };
+		if (run.mode === 'repair') return { tone: 'info', icon: Wrench, label: m.repair_state_repairing() };
+		return { tone: 'info', icon: Undo2, label: m.repair_state_restoring() };
+	}
+	const last = box.last_scan;
+	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.repair_state_never() };
+	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed() };
+	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
+	if (last.mode === 'restore') return { tone: 'ghost', icon: Undo2, label: m.repair_state_restored() };
+	if (last.mode === 'repair') {
+		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.repair_state_repaired_errors() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_repaired() };
+	}
+	return last.progress.affected ? { tone: 'advisory', icon: TriangleAlert, label: m.repair_state_damaged() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_intact() };
 }

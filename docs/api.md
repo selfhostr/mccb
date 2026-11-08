@@ -9,6 +9,7 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   fresh session cookie is returned for the caller.
 - Servers: `GET/POST /api/servers`, `GET/PUT/DELETE /api/servers/{id}`, `POST /api/servers/{id}/test`
   Server = `{id,name,imap_host,imap_port,imap_security:'ssl'|'starttls'|'none',verify_tls,`
+  `last_test:float|null,last_test_result:{imap,caldav,carddav}|null,` (stored by the test, cleared when a connection setting changes)
   `root_folder:str|null,caldav_url:str|null,carddav_url:str|null,dav_enabled:bool,workers:int,notes,`
   `tuning:'auto'|'manual',builders:int|null}` (manual: `workers` IMAP connections, `builders` builder processes, null =
   machine default; `tuning` omitted on creation = `manual` if `workers` is not 2 or 4 (earlier defaults) else `auto`, omitted on update = unchanged)
@@ -19,6 +20,14 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
   Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
   `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
+- Repair (see [Repair a damaged mailbox](repair.md)), a list separate from the accounts:
+  `GET/POST /api/repair/boxes {server_id,email,password,login?}`, `PUT/DELETE /api/repair/boxes/{id}` (409 while a run is active),
+  `POST /api/repair/boxes/{id}/test` → `{imap:{ok,msg,quota,uidplus}}`, `POST /api/repair/boxes/import-csv` (multipart file + server_id)
+  → `{created,updated,errors,ids}`. Box = `{id,server_id,email,login,has_password,status,last_test,last_test_result,last_scan:Run|null,active_run:Run|null}`.
+  `POST /api/repair/runs {box_ids,mode:'scan'|'repair'|'restore',folder?}` → 202 `{runs:[Run],skipped_busy:[id]}`; `GET /api/repair/runs/{id}`
+  (with `report:{issues,folders,examples,errors,notes}`), `GET /api/repair/boxes/{id}/runs`, `POST /api/repair/runs/{id}/stop`.
+  Run = `{id,box_id,mode,status:'queued'|'running'|'stopping'|'stopped'|'done'|'done_with_errors'|'failed',folder,progress:{total,seen,affected,repaired,restored,skipped,errors,folder,folders_done,folders_total},error,issues}`.
+  `POST /api/repair/boxes/{id}/preview {folder,uid}` → `{issues,already,before:{subject,text,parts},after|null,fixes,left,error}` (reads only).
 - Connectors (see [Connectors](connectors.md)):
   `GET /api/connectors` → `[{kind,label,description,source:Role|null,target:Role|null}]`, with
   Role = `{items:[...],capabilities:[...],fields:[{name,label,type,required,secret,default,options?,help?}]}`.

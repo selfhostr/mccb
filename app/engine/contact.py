@@ -69,7 +69,7 @@ def build_contact(src, uid: str):
           or s((AD, mapi.LID_FILE_UNDER)) or company or (emails[0] if emails else "") or "Contact")
     fn = fn.strip()
 
-    lines = ["BEGIN:VCARD", "VERSION:3.0", "PRODID:-//yety//MCCB//EN",
+    lines = ["BEGIN:VCARD", "VERSION:3.0", "PRODID:-//yety//mccb//EN",
              "UID:" + _esc(uid), "FN:" + _esc(fn),
              "N:" + ";".join(_esc(x) for x in (surname, given, middle, prefix, suffix))]
     nick = s(mapi.PR_NICKNAME)

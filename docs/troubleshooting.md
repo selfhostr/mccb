@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Each entry gives a symptom and what to check. All of it comes from how MCCB behaves; see the linked pages for the details.
+Each entry gives a symptom and what to check. All of it comes from how mccb behaves; see the linked pages for the details.
 
 ## I lost the admin password
 
@@ -16,7 +16,7 @@ The error "password cannot be decrypted (SECRET_KEY changed?)" means the key dif
 
 ## Progress does not update in the browser
 
-Live updates use server-sent events on `/api/events`. Your proxy must not buffer them. See [Put MCCB behind a reverse proxy](reverse-proxy.md).
+Live updates use server-sent events on `/api/events`. Your proxy must not buffer them. See [Put mccb behind a reverse proxy](reverse-proxy.md).
 
 ## Uploads are slow or fail
 
@@ -24,7 +24,7 @@ The proxy must not buffer request bodies, must allow bodies of at least `UPLOAD_
 
 ## A PST is `invalid`
 
-The reason is shown on the Uploads page. A file without the `!BDN` signature is refused, and a crash of the native library during the scan gives "libpff crash during analysis". Encrypted or password-protected PSTs have no dedicated handling.
+The reason is shown on the Files page. A file without the `!BDN` signature is refused, and a crash of the native library during the scan gives "libpff crash during analysis". Encrypted or password-protected PSTs have no dedicated handling.
 
 ## A job fails with "The subprocess crashed N times"
 

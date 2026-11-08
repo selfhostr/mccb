@@ -252,7 +252,7 @@ def convert(rules: list[dict], delimiter: str = "/", root: str = "", trash: str 
             partial.append({"name": name, "dropped": dropped})
         else:
             converted.append(name)
-    head = "# Converted from Exchange inbox rules by MCCB. Best effort: read it before activating it.\n"
+    head = "# Converted from Exchange inbox rules by mccb. Best effort: read it before activating it.\n"
     if needs:
         head += f"require {'[' + ', '.join(_quote(n) for n in sorted(needs)) + ']'};\n"
     return {"script": head + "\n" + "\n".join(blocks), "converted": converted, "partial": partial,

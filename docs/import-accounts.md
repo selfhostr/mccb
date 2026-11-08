@@ -2,7 +2,7 @@
 
 By the end of this page you will have added many mailboxes to a server in one step.
 
-Import through the UI (Migrations page) or `POST /api/accounts/import-csv` (multipart: `file` +
+Import through the UI (**New migration**, then **Import a CSV file**) or `POST /api/accounts/import-csv` (multipart: `file` +
 `server_id`). A template can be downloaded via `GET /api/accounts/csv-template`.
 
 | column | required | content |

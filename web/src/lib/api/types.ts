@@ -463,3 +463,90 @@ export interface ApiToken {
 export interface CreatedToken extends ApiToken {
 	token: string;
 }
+
+// ---------------------------------------------------------------- repair tab (docs/repair.md)
+export type RepairIssue = 'replacement_chars' | 'mojibake' | 'attachment_names' | 'detached_images' | 'unreadable';
+export type RepairMode = 'scan' | 'repair' | 'restore';
+export type RepairRunStatus = 'queued' | 'running' | 'stopping' | 'stopped' | 'done' | 'done_with_errors' | 'failed';
+
+export interface RepairProgress {
+	total: number;
+	seen: number;
+	affected: number;
+	repaired: number;
+	restored: number;
+	skipped: number;
+	errors: number;
+	folder: string | null;
+	folders_done: number;
+	folders_total: number;
+}
+
+export interface RepairFolder {
+	seen: number;
+	affected: number;
+	repaired: number;
+	issues: Partial<Record<RepairIssue, number>>;
+}
+
+export interface RepairExample {
+	folder: string;
+	uid: string;
+	subject: string;
+	date: string;
+	issues: RepairIssue[];
+	fixed: RepairIssue[] | null;
+}
+
+export interface RepairReport {
+	issues: Partial<Record<RepairIssue, number>>;
+	folders: Record<string, RepairFolder>;
+	examples: RepairExample[];
+	errors: { folder: string; uid: string | null; msg: string }[];
+	notes: string[];
+}
+
+export interface RepairRun {
+	id: number;
+	box_id: number;
+	mode: RepairMode;
+	status: RepairRunStatus;
+	folder: string | null;
+	progress: RepairProgress;
+	error: string | null;
+	created_at: number;
+	started_at: number | null;
+	finished_at: number | null;
+	issues: Partial<Record<RepairIssue, number>>;
+	report?: RepairReport;
+}
+
+export interface RepairBox {
+	id: number;
+	server_id: number;
+	email: string;
+	login: string;
+	has_password: boolean;
+	status: AccountStatus;
+	last_test: number | null;
+	last_test_result: TestResult | null;
+	created_at: number;
+	last_scan: RepairRun | null;
+	active_run: RepairRun | null;
+}
+
+export interface RepairSummary {
+	subject: string;
+	text: string;
+	parts: { name: string; type: string; inline: boolean; size: number | null }[];
+}
+
+export interface RepairPreview {
+	issues: RepairIssue[];
+	already: boolean;
+	before: RepairSummary;
+	after: RepairSummary | null;
+	fixes: RepairIssue[];
+	left: RepairIssue[];
+	error: string | null;
+}

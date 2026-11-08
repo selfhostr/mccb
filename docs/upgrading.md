@@ -1,6 +1,6 @@
-# Upgrade MCCB
+# Upgrade mccb
 
-By the end of this page MCCB will run a newer image with your data intact.
+By the end of this page mccb will run a newer image with your data intact.
 
 ```bash
 docker compose pull && docker compose up -d
@@ -14,7 +14,7 @@ Back up `./data` first: see [Back up and restore](backup.md).
 
 The version is shown in the sidebar footer and on the login screen, returned by `GET /api/version` (public) and `GET /api/health`, and logged when `web` and `worker` start.
 
-It comes from `app/VERSION`. Docker builds can override it with `--build-arg VERSION=<tag>` (CI passes the tag) and `--build-arg GIT_SHA=<sha>`. Without `VERSION` the app shows `<file>+<sha>`, for example `1.1.1+<sha>`.
+It comes from `app/VERSION`. Docker builds can override it with `--build-arg VERSION=<tag>` (CI passes the tag) and `--build-arg GIT_SHA=<sha>`. Without `VERSION` the app shows `<file>+<sha>`, for example `2.0.0+<sha>`.
 
 ## Notes for older installs
 

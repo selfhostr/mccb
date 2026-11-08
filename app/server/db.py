@@ -147,6 +147,34 @@ CREATE TABLE IF NOT EXISTS batches (
     name TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS repair_boxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    login TEXT NOT NULL DEFAULT '',
+    password_enc TEXT,
+    status TEXT NOT NULL DEFAULT 'new',
+    last_test REAL,
+    last_test_result TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE (server_id, email)
+);
+CREATE TABLE IF NOT EXISTS repair_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    box_id INTEGER NOT NULL REFERENCES repair_boxes(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    folder TEXT,
+    progress TEXT,
+    report TEXT,
+    error TEXT,
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL,
+    heartbeat REAL
+);
+CREATE INDEX IF NOT EXISTS repair_runs_box ON repair_runs(box_id, id);
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL DEFAULT 'queued',

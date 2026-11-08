@@ -4,7 +4,7 @@ test.describe('at 390 px', () => {
 	test.use({ viewport: { width: 390, height: 844 } });
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
-	for (const url of ['/', '/files', '/servers', '/settings']) {
+	for (const url of ['/', '/files', '/servers', '/repair', '/settings']) {
 		test(`no horizontal overflow on ${url}`, async ({ page }) => {
 			await ready(page, url);
 			await noOverflow(page);

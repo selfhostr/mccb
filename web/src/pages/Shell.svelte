@@ -6,6 +6,7 @@
 	import Server from '@lucide/svelte/icons/server';
 	import Settings from '@lucide/svelte/icons/settings';
 	import Unplug from '@lucide/svelte/icons/unplug';
+	import Wrench from '@lucide/svelte/icons/wrench';
 	import Wifi from '@lucide/svelte/icons/wifi';
 	import type { Component } from 'svelte';
 	import { MediaQuery } from 'svelte/reactivity';
@@ -22,6 +23,7 @@
 	import FilesPage from './files/FilesPage.svelte';
 	import MigrationsPage from './migrations/MigrationsPage.svelte';
 	import ServersPage from './settings/ServersPage.svelte';
+	import RepairPage from './repair/RepairPage.svelte';
 	import SettingsPage from './settings/SettingsPage.svelte';
 
 	/** extra: only the static demo passes one (its badge); the product never does. */
@@ -36,6 +38,7 @@
 		{ page: 'migrations', href: '/', label: m.shell_nav_migrations(), icon: ArrowRightLeft, count: attention, alert: attention > 0 },
 		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: FolderOpen, count: data.psts.size, alert: false },
 		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length, alert: false },
+		{ page: 'repair', href: '/repair', label: m.shell_nav_repair(), icon: Wrench, count: 0, alert: false },
 		{ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false }
 	]);
 
@@ -137,6 +140,8 @@
 		<FilesPage />
 	{:else if router.route.page === 'servers'}
 		<ServersPage />
+	{:else if router.route.page === 'repair'}
+		<RepairPage />
 	{:else}
 		<SettingsPage />
 	{/if}
