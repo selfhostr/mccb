@@ -194,3 +194,17 @@ test.describe('settings', () => {
 		await expect(page.getByRole('heading', { level: 1 })).toHaveText('Migrations');
 	});
 });
+
+test('nav labels never break inside a word at 390 px', async ({ page, signedIn }) => {
+	await signedIn;
+	await page.setViewportSize({ width: 390, height: 800 });
+	await page.goto('/');
+	const links = page.locator('header nav a');
+	await expect(links.first()).toBeVisible();
+	for (const a of await links.all()) {
+		const { lines, h } = await a.evaluate((el) => ({ lines: el.getClientRects().length, h: el.getBoundingClientRect().height }));
+		expect(lines).toBe(1);
+		expect(h).toBeLessThan(48);
+	}
+	expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

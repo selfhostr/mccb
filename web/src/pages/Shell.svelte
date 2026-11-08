@@ -119,10 +119,10 @@
 				<img src={asset('favicon.svg')} alt="" width="28" height="28" />
 				<span class="text-[0.9375rem] font-semibold">mccb</span>
 			</a>
-			<nav class="order-last flex w-full gap-0.5 sm:order-none sm:ml-2 sm:w-auto" aria-label={m.shell_nav_label()}>
+			<nav class="order-last -mx-1 flex w-full gap-0.5 overflow-x-auto px-1 [scrollbar-width:none] sm:order-none sm:ml-2 sm:mx-0 sm:w-auto sm:overflow-visible sm:px-0 [&::-webkit-scrollbar]:hidden" aria-label={m.shell_nav_label()}>
 				{#each NAV as item (item.page)}
 					<a
-						class={`inline-flex min-h-10 items-center rounded-btn px-3 no-underline transition-colors duration-200 ${isCurrent(item.page) ? 'bg-surface-2 font-medium text-ink' : 'text-ink-2 hover:text-ink'}`}
+						class={`inline-flex min-h-10 shrink-0 items-center whitespace-nowrap rounded-btn px-3 no-underline transition-colors duration-200 ${isCurrent(item.page) ? 'bg-surface-2 font-medium text-ink' : 'text-ink-2 hover:text-ink'}`}
 						href={item.href}
 						aria-current={isCurrent(item.page) ? 'page' : undefined}
 					>
