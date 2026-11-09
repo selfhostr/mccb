@@ -159,6 +159,7 @@ describe('routes', () => {
 		expect(matchRoute('/')).toEqual({ page: 'migrations', jobId: null });
 		expect(matchRoute('/jobs/12')).toEqual({ page: 'migrations', jobId: 12 });
 		expect(matchRoute('/files/')).toEqual({ page: 'files', jobId: null });
+		expect(matchRoute('/duplicates/')).toEqual({ page: 'duplicates', jobId: null });
 		expect(matchRoute('/settings')).toEqual({ page: 'settings', jobId: null });
 		expect(matchRoute('/tenants/4/migrate')).toEqual({ page: 'tenant', jobId: null, tenantId: 4 });
 		expect(matchRoute('/tenants/4/migrate/')).toEqual({ page: 'tenant', jobId: null, tenantId: 4 });

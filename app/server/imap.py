@@ -579,6 +579,48 @@ class ImapConn:
             out.append((m.group(1).decode(), flags, when, d[1]))
         return out
 
+    DEDUP_FIELDS = "MESSAGE-ID DATE FROM SUBJECT"
+
+    def fetch_dedup(self, name: str, uids: list[str], readonly: bool = True
+                    ) -> list[tuple[str, int, list[str], bytes]]:
+        """[(uid, RFC822.SIZE, flags, header bytes)] for the duplicate search: only the four headers it compares
+        (BODY.PEEK: nothing is marked read), one UID FETCH. Messages flagged \\Deleted keep that flag in `flags`."""
+        if not uids:
+            return []
+        self.ensure_selected(name, readonly)
+        try:
+            typ, data = self._m().uid("FETCH", ",".join(uids),
+                                      f"(UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS ({self.DEDUP_FIELDS})])")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "FETCH")
+        data = list(data or [])
+        out = []
+        for i, d in enumerate(data):
+            if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
+                continue
+            head = d[0] if isinstance(d[0], bytes) else str(d[0]).encode()
+            # attribute order is free: UID, SIZE or FLAGS may come after the literal (next element of the list)
+            tail = data[i + 1] if i + 1 < len(data) and isinstance(data[i + 1], bytes) else b""
+            meta = head + b" " + tail
+            mu = re.search(rb"UID\s+(\d+)", meta)
+            ms = re.search(rb"RFC822\.SIZE\s+(\d+)", meta)
+            if not mu or not ms:
+                continue
+            mf = re.search(rb"FLAGS\s+\(([^)]*)\)", meta)
+            flags = mf.group(1).decode("utf-8", "replace").split() if mf else []
+            out.append((mu.group(1).decode(), int(ms.group(1)), flags, d[1]))
+        return out
+
+    def uidvalidity(self, name: str) -> str:
+        try:
+            typ, data = self._m().status(quote(name), "(UIDVALIDITY)")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        t = _text(self._check(typ, data, f"STATUS {name}"))
+        m = re.search(r"UIDVALIDITY\s+(\d+)", t, re.I)
+        return m.group(1) if m else ""
+
     def uid_copy(self, name: str, uids: list[str], dest: str) -> None:
         self.ensure_selected(name, False)
         try:

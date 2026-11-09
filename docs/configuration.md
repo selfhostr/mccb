@@ -11,6 +11,7 @@ All variables are optional. Set them in `.env` (see [`.env.example`](https://git
 | `WORKER_CONCURRENCY` | auto | Number of mailboxes migrated simultaneously by the worker. Unset or `0`: auto, from the usable cores (cgroup-aware), the free memory, the disk and the queue (2 cores and 512 MB per job, at most 32, at most the jobs waiting, more while cores stay idle). See [Tune](tuning.md). |
 | `REPAIR_BACKUP_FOLDER` | `_originaux_avant_reparation` | Folder of a repaired mailbox that keeps the originals, see [Repair a damaged mailbox](repair.md). Keep it constant: restore reads it. |
 | `REPAIR_PARALLEL` | `2` | Mailboxes analysed or repaired at the same time. |
+| `DEDUP_PARALLEL` | `2` | Mailboxes analysed or cleaned of duplicates at the same time, see [Remove duplicates](duplicates.md). |
 | `BUILD_PROCESSES` | per server tuning | When set, forces in both tuning modes the number of processes building MIME messages for one mailbox (each opens the PST read-only). A builder killed by a libpff crash marks its item "libpff crash" and is restarted; crashes count towards `MAX_CHILD_CRASHES`. `0` = build inside the job process (previous behaviour). Total CPU use is about `WORKER_CONCURRENCY` × `BUILD_PROCESSES`. |
 | `AUTOTUNE_BENCH_SECONDS` | `0.25` | Length of the build benchmark run at the start of an auto-tuned job (`0` = none). |
 | `AUTOTUNE_INTERVAL` | `5` | Seconds between two auto-tuning samples during the mail phase. |

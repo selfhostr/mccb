@@ -19,6 +19,7 @@ from ..connectors.wiring import items_key_of_account, sync_files_source
 from . import crash, csvaccounts, csvimport, db, planning, preview, repo, runs, tokens, uploads
 from .api_connectors import router as connectors_router
 from .api_planning import router as planning_router
+from .api_dedup import router as dedup_router
 from .api_repair import router as repair_router
 from .api_sources import router as sources_router
 from .api_tokens import router as tokens_router
@@ -760,6 +761,7 @@ async def _prune_events() -> None:
 app.include_router(connectors_router)  # before the /api catch-all below
 app.include_router(planning_router)
 app.include_router(repair_router)
+app.include_router(dedup_router)
 app.include_router(tokens_router)
 app.include_router(sources_router)
 
