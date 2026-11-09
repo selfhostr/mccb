@@ -154,6 +154,7 @@ export function reset(options = {}) {
 		runBodies: [],
 		hold: options.hold ?? false,
 		repair: { boxes: new Map(), runs: new Map(), next: { box: 1, run: 1 } },
+		dedup: { runs: new Map(), next: 1 },
 		planDelay: options.planDelay ?? 600,
 		plans: new Map(),
 		compares: new Map(),
@@ -547,6 +548,11 @@ export async function handle(req) {
 
 	if (parts[0] === 'repair') {
 		const r = handleRepair(parts.slice(1), m, json);
+		if (r) return r;
+	}
+
+	if (parts[0] === 'dedup') {
+		const r = handleDedup(parts.slice(1), m, json, url.searchParams);
 		if (r) return r;
 	}
 
@@ -1096,6 +1102,101 @@ function handleRepair(parts, m, json) {
 	if (parts[0] === 'runs' && parts[1]) {
 		const run = R.runs.get(Number(parts[1]));
 		if (!run) return fail(404, 'unknown run');
+		return send(200, run);
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------- duplicates tab (fictional: a run ends at once)
+const DEDUP_KINDS = ['mail', 'calendar', 'contacts'];
+const dedupFolders = (clean) => [
+	{ kind: 'mail', name: 'INBOX', items: 5200, groups: clean ? 0 : 300, duplicates: clean ? 0 : 440, refused: null },
+	{ kind: 'mail', name: 'Archive/2023', items: 3450, groups: clean ? 0 : 110, duplicates: clean ? 0 : 164, refused: null },
+	{ kind: 'mail', name: 'Shared', items: 12, groups: 0, duplicates: 0, refused: 'no_uidplus' },
+	{ kind: 'calendar', name: 'Calendar', items: 310, groups: clean ? 0 : 17, duplicates: clean ? 0 : 37, refused: null },
+	{ kind: 'contacts', name: 'Contacts', items: 96, groups: clean ? 0 : 6, duplicates: clean ? 0 : 12, refused: null }
+];
+
+function dedupBoxes() {
+	const boxes = [...state.accounts.values()].map((a) => ({ key: `account:${a.id}`, source: 'account', ref_id: a.id, server_id: a.server_id, email: a.email, login: a.login, status: a.status, has_password: a.has_password }));
+	for (const b of state.repair.boxes.values()) boxes.push({ key: `repair:${b.id}`, source: 'repair', ref_id: b.id, server_id: b.server_id, email: b.email, login: b.login, status: b.status, has_password: b.has_password });
+	return boxes;
+}
+
+function dedupView(box) {
+	const runs = [...state.dedup.runs.values()].filter((r) => r.box_key === box.key);
+	const bare = (r) => (r ? { ...r, report: undefined } : null);
+	const scans = runs.filter((r) => r.mode === 'scan');
+	const account = box.source === 'account' ? state.accounts.get(box.ref_id) : null;
+	const busy = account?.job && ['queued', 'running', 'paused', 'stopping'].includes(account.job.status) ? 'migration' : null;
+	const server = state.servers.get(box.server_id);
+	return {
+		key: box.key, source: box.source, ref_id: box.ref_id, server_id: box.server_id, email: box.email, login: box.login, status: box.status,
+		dav: !!server?.dav_enabled, usable: box.has_password, unusable_reason: box.has_password ? null : 'no_password', busy,
+		last_scan: bare(scans[scans.length - 1]), last_run: bare(runs[runs.length - 1]), active_run: null
+	};
+}
+
+function dedupRun(box, mode, kinds) {
+	const id = state.dedup.next++;
+	const clean = box.email.startsWith('clean');
+	const dav = !!state.servers.get(box.server_id)?.dav_enabled;
+	const used = kinds.filter((k) => k === 'mail' || dav);
+	const folders = dedupFolders(clean).filter((f) => used.includes(f.kind)).map((f) => ({ ...f, deleted: mode === 'dedup' ? f.duplicates : 0, skipped: 0 }));
+	const totals = {};
+	for (const k of used) {
+		const fs = folders.filter((f) => f.kind === k);
+		const sum = (key) => fs.reduce((n, f) => n + f[key], 0);
+		totals[k] = { items: sum('items'), groups: sum('groups'), duplicates: sum('duplicates'), deleted: sum('deleted'), skipped: 0 };
+	}
+	const all = Object.values(totals);
+	const total = (key) => all.reduce((n, t) => n + t[key], 0);
+	const now = Date.now() / 1000;
+	const examples = clean ? [] : [
+		{ kind: 'mail', folder: 'INBOX', label: 'Facture mars 2024', detail: 'Compta <compta@example.com>, 5 Mar 2024', copies: 3, keep: 'INBOX#412', remove: ['INBOX#977', 'INBOX#1310'] },
+		{ kind: 'calendar', folder: 'Calendar', label: 'Point hebdo', detail: 'Mon 3 Jun 2024 09:00 - 09:30', copies: 2, keep: 'evt-91.ics', remove: ['evt-91-1.ics'] },
+		{ kind: 'contacts', folder: 'Contacts', label: 'Camille Dupont', detail: 'camille@example.com, +33 1 23 45 67 89', copies: 2, keep: 'c-17.vcf', remove: ['c-17-1.vcf'] }
+	].filter((e) => used.includes(e.kind));
+	const report = {
+		folders, examples, errors: [],
+		notes: ['no_uidplus', ...(dav ? [] : ['dav_disabled'])],
+		log: [{ ts: now, level: 'info', msg: `${mode === 'scan' ? 'Analysis' : 'Removal'} of ${box.email}` }, { ts: now, level: 'warning', msg: 'Shared: no UIDPLUS, removal refused' }]
+	};
+	const run = {
+		id, box_key: box.key, email: box.email, mode, kinds: used, status: 'done', error: null, created_at: now, started_at: now, finished_at: now, totals,
+		progress: { phase: null, folder: null, folders_done: folders.length, folders_total: folders.length, seen: total('items'), total: total('items'), groups: total('groups'), duplicates: total('duplicates'), deleted: total('deleted'), skipped: 0, errors: 0 },
+		report
+	};
+	state.dedup.runs.set(id, run);
+	return run;
+}
+
+function handleDedup(parts, m, json, query) {
+	const D = state.dedup;
+	if (parts[0] === 'boxes' && parts.length === 1 && m === 'GET') return send(200, dedupBoxes().map(dedupView));
+	if (parts[0] === 'boxes' && parts[2] === 'runs' && m === 'GET') {
+		const limit = Number(query?.get?.('limit') ?? 20);
+		return send(200, [...D.runs.values()].filter((r) => r.box_key === parts[1]).reverse().slice(0, limit).map((r) => ({ ...r, report: undefined })));
+	}
+	if (parts[0] === 'runs' && parts.length === 1 && m === 'POST') {
+		const body = json();
+		if (body.mode === 'dedup' && body.confirm !== true) return fail(400, 'removal needs confirm: true');
+		const kinds = (body.kinds ?? DEDUP_KINDS).filter((k) => DEDUP_KINDS.includes(k));
+		const skipped = [];
+		const runs = [];
+		for (const key of body.box_keys ?? []) {
+			const box = dedupBoxes().find((b) => b.key === key);
+			if (!box) continue;
+			const view = dedupView(box);
+			if (view.busy || !view.usable) skipped.push(key);
+			else runs.push(dedupRun(box, body.mode, kinds));
+		}
+		return send(202, { runs: runs.map((r) => ({ ...r, report: undefined })), skipped_busy: skipped });
+	}
+	if (parts[0] === 'runs' && parts[1]) {
+		const run = D.runs.get(Number(parts[1]));
+		if (!run) return fail(404, 'unknown run');
+		if (parts[2] === 'stop' && m === 'POST') return send(200, { ...run, report: undefined });
 		return send(200, run);
 	}
 	return null;

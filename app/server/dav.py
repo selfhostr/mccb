@@ -438,3 +438,69 @@ class DavClient:
             if seg:
                 out.add(unquote(seg))
         return out
+
+    # ---- duplicate search (dedup_runs.py) -------------------------------
+    def etags(self, collection_url: str) -> dict[str, str]:
+        """{absolute href: etag ('' when the server gives none)} of the non-collection resources."""
+        url = _slash(collection_url)
+        out: dict[str, str] = {}
+        for href, p in self._propfind(url, [(NS_DAV, "resourcetype"), (NS_DAV, "getetag")], 1):
+            if _slash(href) == url:
+                continue
+            rt = p.get(_q(NS_DAV, "resourcetype"))
+            if rt is not None and rt.find(_q(NS_DAV, "collection")) is not None:
+                continue
+            et = p.get(_q(NS_DAV, "getetag"))
+            out[href] = (et.text or "").strip() if et is not None else ""
+        return out
+
+    def multiget(self, kind: str, collection_url: str, hrefs: list[str]) -> dict[str, tuple[str, str]]:
+        """{absolute href: (etag, data)} of these resources (calendar-multiget / addressbook-multiget, RFC 4791 and
+        6352). A resource gone since its listing is simply missing from the result."""
+        if not hrefs:
+            return {}
+        ns, report, data_name = ((NS_CAL, "calendar-multiget", "calendar-data") if kind == "caldav"
+                                 else (NS_CARD, "addressbook-multiget", "address-data"))
+        body = ET.Element(_q(ns, report))
+        prop = ET.SubElement(body, _q(NS_DAV, "prop"))
+        ET.SubElement(prop, _q(NS_DAV, "getetag"))
+        ET.SubElement(prop, _q(ns, data_name))
+        for h in hrefs:
+            ET.SubElement(body, _q(NS_DAV, "href")).text = httpx.URL(h).raw_path.decode("ascii")
+        resp = self._request("REPORT", _slash(collection_url), ok=(207,),
+                             content=ET.tostring(body, encoding="utf-8", xml_declaration=True),
+                             headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError as e:
+            raise DavError(f"REPORT {collection_url}: invalid XML ({e})") from e
+        base = str(resp.url)
+        out: dict[str, tuple[str, str]] = {}
+        for r in root.findall(_q(NS_DAV, "response")):
+            href = (r.findtext(_q(NS_DAV, "href")) or "").strip()
+            if not href:
+                continue
+            for ps in r.findall(_q(NS_DAV, "propstat")):
+                if " 200" not in (ps.findtext(_q(NS_DAV, "status")) or ""):
+                    continue
+                p = ps.find(_q(NS_DAV, "prop"))
+                if p is None:
+                    continue
+                d = p.find(_q(ns, data_name))
+                if d is None or not (d.text or "").strip():
+                    continue
+                out[urljoin(base, href)] = ((p.findtext(_q(NS_DAV, "getetag")) or "").strip(), d.text)
+        return out
+
+    def delete_if_match(self, href: str, etag: str) -> int:
+        """DELETE only when the resource still has this etag. The HTTP status: 2xx deleted, 412 changed since,
+        404 gone already; any other error raises."""
+        try:
+            resp = self._send("DELETE", href, headers={"If-Match": etag})
+        except httpx.HTTPError as e:
+            raise DavError(f"DELETE {href}: {e.__class__.__name__}: {e}", temporary=True) from e
+        sc = resp.status_code
+        if 200 <= sc < 300 or sc in (404, 412):
+            return sc
+        raise DavError(f"DELETE {href} -> HTTP {sc}", temporary=(sc >= 500 or sc == 429), status=sc,
+                       retry_after=_retry_after(resp))

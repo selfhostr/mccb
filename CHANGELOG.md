@@ -10,6 +10,7 @@
 - The Test of a tenant names the missing permissions, required or optional.
 - Mailboxes are linked by Entra object ID, so the final resync survives the removal of the domain from the tenant.
 - API routes `/api/source-connections`.
+- Duplicates tab: finds and removes duplicate messages, events and contacts in the mailboxes already known (migration accounts and repair mailboxes), on strict criteria, folder by folder, one copy of each kept. Analysis first (read-only), then a permanent removal after a confirmation; UID EXPUNGE only (refused without UIDPLUS), DELETE with If-Match for DAV. See [Remove duplicates](docs/duplicates.md). API routes `/api/dedup`.
 - Connect with Microsoft: a Global Administrator signs in with a device code and mccb creates the "mccb migration" application, grants admin consent, adds a one-year secret and tests the tenant. See [Exchange](docs/exchange.md#connect-with-microsoft).
 
 ### Changed

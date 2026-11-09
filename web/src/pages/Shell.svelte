@@ -1,5 +1,6 @@
 <script lang="ts">
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
+	import CopyX from '@lucide/svelte/icons/copy-x';
 	import FolderOpen from '@lucide/svelte/icons/folder-open';
 	import FolderUp from '@lucide/svelte/icons/folder-up';
 	import LogOut from '@lucide/svelte/icons/log-out';
@@ -23,6 +24,7 @@
 	import FilesPage from './files/FilesPage.svelte';
 	import MigrationsPage from './migrations/MigrationsPage.svelte';
 	import ServersPage from './settings/ServersPage.svelte';
+	import DuplicatesPage from './duplicates/DuplicatesPage.svelte';
 	import RepairPage from './repair/RepairPage.svelte';
 	import SettingsPage from './settings/SettingsPage.svelte';
 	import TenantPage from './tenant/TenantPage.svelte';
@@ -43,6 +45,7 @@
 		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: FolderOpen, count: data.psts.size, alert: false },
 		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length, alert: false },
 		{ page: 'repair', href: '/repair', label: m.shell_nav_repair(), icon: Wrench, count: 0, alert: false },
+		{ page: 'duplicates', href: '/duplicates', label: m.shell_nav_duplicates(), icon: CopyX, count: 0, alert: false },
 		{ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false }
 	]);
 
@@ -146,6 +149,8 @@
 		<ServersPage />
 	{:else if router.route.page === 'repair'}
 		<RepairPage />
+	{:else if router.route.page === 'duplicates'}
+		<DuplicatesPage />
 	{:else if router.route.page === 'tenant'}
 		<TenantPage />
 	{:else}

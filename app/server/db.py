@@ -175,6 +175,24 @@ CREATE TABLE IF NOT EXISTS repair_runs (
     heartbeat REAL
 );
 CREATE INDEX IF NOT EXISTS repair_runs_box ON repair_runs(box_id, id);
+CREATE TABLE IF NOT EXISTS dedup_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    box_key TEXT NOT NULL,
+    server_id INTEGER,
+    email TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    kinds TEXT NOT NULL DEFAULT '["mail","calendar","contacts"]',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress TEXT,
+    report TEXT,
+    error TEXT,
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL,
+    heartbeat REAL
+);
+CREATE INDEX IF NOT EXISTS dedup_runs_box ON dedup_runs(box_key, id);
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL DEFAULT 'queued',

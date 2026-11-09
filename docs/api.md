@@ -28,6 +28,15 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   (with `report:{issues,folders,examples,errors,notes}`), `GET /api/repair/boxes/{id}/runs`, `POST /api/repair/runs/{id}/stop`.
   Run = `{id,box_id,mode,status:'queued'|'running'|'stopping'|'stopped'|'done'|'done_with_errors'|'failed',folder,progress:{total,seen,affected,repaired,restored,skipped,errors,folder,folders_done,folders_total},error,issues}`.
   `POST /api/repair/boxes/{id}/preview {folder,uid}` → `{issues,already,before:{subject,text,parts},after|null,fixes,left,error}` (reads only).
+- Duplicates (see [Remove duplicates](duplicates.md)), on the mailboxes already known (IMAP-target accounts and repair mailboxes):
+  `GET /api/dedup/boxes` → `[Box]`, Box = `{key:'account:<id>'|'repair:<id>',source,ref_id,server_id,email,login,status,dav,usable,`
+  `unusable_reason:null|'no_password',busy:null|'migration'|'repair',last_scan:Run|null,last_run:Run|null,active_run:Run|null}`.
+  `POST /api/dedup/runs {box_keys,mode:'scan'|'dedup',kinds?:['mail','calendar','contacts'],confirm?}` → 202 `{runs:[Run],skipped_busy:[key]}`
+  (`dedup` deletes permanently and needs `confirm:true`, else 422; a mailbox a migration or repair writes to is skipped);
+  `GET /api/dedup/runs/{id}` (with `report:{folders:[{kind,name,items,groups,duplicates,deleted,skipped,refused}],examples,errors,notes,log}`),
+  `GET /api/dedup/boxes/{key}/runs`, `POST /api/dedup/runs/{id}/stop`.
+  Run = `{id,box_key,email,mode,kinds,status,progress:{phase,folder,folders_done,folders_total,seen,total,groups,duplicates,deleted,skipped,errors},`
+  `totals:{<kind>:{items,groups,duplicates,deleted,skipped}},error,created_at,started_at,finished_at}`.
 - Connectors (see [Connectors](connectors.md)):
   `GET /api/connectors` → `[{kind,label,description,source:Role|null,target:Role|null}]`, with
   Role = `{items:[...],capabilities:[...],fields:[{name,label,type,required,secret,default,options?,help?}]}`.

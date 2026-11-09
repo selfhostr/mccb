@@ -561,6 +561,92 @@ export interface RepairPreview {
 	error: string | null;
 }
 
+// ---------------------------------------------------------------- duplicates tab
+export type DedupKind = 'mail' | 'calendar' | 'contacts';
+export type DedupMode = 'scan' | 'dedup';
+export type DedupRunStatus = RepairRunStatus;
+
+export interface DedupProgress {
+	phase: DedupKind | null;
+	folder: string | null;
+	folders_done: number;
+	folders_total: number;
+	seen: number;
+	total: number;
+	groups: number;
+	duplicates: number;
+	deleted: number;
+	skipped: number;
+	errors: number;
+}
+
+export interface DedupTotal {
+	items: number;
+	groups: number;
+	duplicates: number;
+	deleted: number;
+	skipped: number;
+}
+
+export interface DedupFolder extends DedupTotal {
+	kind: DedupKind;
+	name: string;
+	/** 'no_uidplus', 'no_etag' or free text. */
+	refused: string | null;
+}
+
+export interface DedupExample {
+	kind: DedupKind;
+	folder: string;
+	label: string;
+	detail: string;
+	copies: number;
+	keep: string;
+	remove: string[];
+}
+
+export interface DedupReport {
+	folders: DedupFolder[];
+	examples: DedupExample[];
+	errors: { kind: DedupKind; folder: string; msg: string }[];
+	/** 'no_uidplus', 'dav_disabled'. */
+	notes: string[];
+	log: { ts: number; level: 'info' | 'warning' | 'error'; msg: string }[];
+}
+
+export interface DedupRun {
+	id: number;
+	box_key: string;
+	email: string;
+	mode: DedupMode;
+	kinds: DedupKind[];
+	status: DedupRunStatus;
+	progress: DedupProgress;
+	totals: Partial<Record<DedupKind, DedupTotal>>;
+	error: string | null;
+	created_at: number;
+	started_at: number | null;
+	finished_at: number | null;
+	report?: DedupReport;
+}
+
+export interface DedupBox {
+	key: string;
+	source: 'account' | 'repair';
+	ref_id: number;
+	server_id: number;
+	email: string;
+	login: string;
+	status: AccountStatus;
+	dav: boolean;
+	usable: boolean;
+	unusable_reason: null | 'no_password';
+	busy: null | 'migration' | 'repair';
+	last_scan: DedupRun | null;
+	last_run: DedupRun | null;
+	active_run: DedupRun | null;
+}
+
 /** Source connections (Microsoft 365 tenants). Secrets never come back. */
 export interface CheckItem {
 	key: string;
