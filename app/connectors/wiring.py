@@ -1,5 +1,6 @@
 """From an `accounts` row to its source and targets. An account without source_kind is a PST account, one without
-target_kind writes to its server (IMAP + DAV) with the account's credentials."""
+target_kind writes to its server (IMAP + DAV) with the account's credentials. An account with source_connection_id
+takes the connection-scoped fields and the secrets of its source from that `source_connections` row."""
 from __future__ import annotations
 
 import json
@@ -36,15 +37,44 @@ def dump_secrets(secrets: dict) -> str | None:
     return encrypt(json.dumps(secrets)) if secrets else None
 
 
+def _connection_id(acc) -> int | None:
+    if source_kind(acc) in (PST, FILES) or "source_connection_id" not in acc.keys():
+        return None
+    return acc["source_connection_id"]
+
+
+def connection_of(acc):
+    """The source_connections row the account's source is linked to (None: not linked, or the row is gone)."""
+    cid = _connection_id(acc)
+    return db.q1("SELECT * FROM source_connections WHERE id=?", (cid,)) if cid is not None else None
+
+
 def source_config(acc) -> dict:
     if source_kind(acc) == PST:
         return {"pst_id": acc["pst_id"]}
-    return db.jload(acc["source_config"], {}) or {}
+    own = db.jload(acc["source_config"], {}) or {}
+    if _connection_id(acc) is None:
+        return own
+    conn = connection_of(acc)
+    spec = registry.get(source_kind(acc))
+    if spec is not None and spec.source is not None:  # connection-scoped keys never come from the account
+        shared = {f.name for f in registry.split_fields(spec.source, "connection")}
+        own = {k: v for k, v in own.items() if k not in shared}
+    shared_config = (db.jload(conn["config"], {}) or {}) if conn is not None else {}
+    return {**own, **shared_config}
+
+
+def source_secrets(acc) -> dict:
+    """Secrets of the account's source: those of its connection when linked (none if the row is gone)."""
+    if _connection_id(acc) is None:
+        return load_secrets(acc["source_secret_enc"])
+    conn = connection_of(acc)
+    return load_secrets(conn["secret_enc"]) if conn is not None else {}
 
 
 def source_of_account(acc, ctx: dict | None = None) -> Source:
     kind = source_kind(acc)
-    return registry.make_source(kind, source_config(acc), load_secrets(acc["source_secret_enc"]), ctx)
+    return registry.make_source(kind, source_config(acc), source_secrets(acc), ctx)
 
 
 def sync_files_source(aid: int) -> None:
@@ -77,6 +107,8 @@ def items_key_of_account(acc) -> str | None:
         if not pid:
             return None
         return db.pst_key_of(db.q1("SELECT id, pst_sha FROM psts WHERE id=?", (pid,)))
+    if _connection_id(acc) is not None and connection_of(acc) is None:
+        return None  # see source_problem: without the connection the namespace is unknown
     try:
         return registry.namespace(source_kind(acc), "source", source_config(acc))
     except ConnectorError:
@@ -93,6 +125,8 @@ def source_problem(acc) -> str | None:
     spec = registry.get(kind)
     if spec is None or spec.source is None:
         return f"unknown source connector '{kind}'"
+    if _connection_id(acc) is not None and connection_of(acc) is None:
+        return "source connection missing"
     return None
 
 

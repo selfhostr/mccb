@@ -1,3 +1,4 @@
+import { davDetected } from '../../src/lib/logic/dav.ts';
 import { describe, expect, it } from 'vitest';
 import type { Account, Job, Pst } from '../../src/lib/api/types.ts';
 import { connectionCounts, connectionOf, currentResult, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
@@ -159,6 +160,9 @@ describe('routes', () => {
 		expect(matchRoute('/jobs/12')).toEqual({ page: 'migrations', jobId: 12 });
 		expect(matchRoute('/files/')).toEqual({ page: 'files', jobId: null });
 		expect(matchRoute('/settings')).toEqual({ page: 'settings', jobId: null });
+		expect(matchRoute('/tenants/4/migrate')).toEqual({ page: 'tenant', jobId: null, tenantId: 4 });
+		expect(matchRoute('/tenants/4/migrate/')).toEqual({ page: 'tenant', jobId: null, tenantId: 4 });
+		expect(matchRoute('/tenants/x/migrate')).toEqual({ page: 'migrations', jobId: null });
 		expect(matchRoute('/nope')).toEqual({ page: 'migrations', jobId: null });
 	});
 
@@ -301,5 +305,15 @@ describe('connection at a glance', () => {
 		expect(connectionOf({ status: 'error' })).toBe('failed');
 		const list = [{ status: 'ok' }, { status: 'ok' }, { status: 'auth_failed' }, { status: 'new' }] as const;
 		expect(connectionCounts(list)).toEqual({ ok: 2, failed: 1, untested: 1 });
+	});
+});
+
+describe('davDetected', () => {
+	const found = { imap: { ok: true, msg: '' }, caldav: { ok: true, found: true, msg: '' }, carddav: { ok: true, found: false, msg: '' } };
+	it('flags DAV that answers while the server has it off', () => {
+		expect(davDetected({ dav_enabled: false }, found)).toBe(true);
+		expect(davDetected({ dav_enabled: true }, found)).toBe(false);
+		expect(davDetected({ dav_enabled: false }, null)).toBe(false);
+		expect(davDetected({ dav_enabled: false }, { caldav: { ok: true, found: false, msg: '' } })).toBe(false);
 	});
 });

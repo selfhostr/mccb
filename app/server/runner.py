@@ -877,8 +877,17 @@ class JobRunner:
         if n_unfinished:
             err = f"{n_unfinished} unfinished item(s) (pending / in progress) — rerun the job"
             self.log(err, "error")
-        status = "done_with_errors" if (n_err or verify_ko or n_unfinished) else "done"
-        self.log(f"Finished: {status} ({n_err} error(s))", "warning" if status != "done" else "info")
+        n_verify = len(self.report["verify"].get("problems") or [])
+        n_folders = len(self.folder_errors)  # a folder not created on the target, even with nothing in it
+        status = "done_with_errors" if (n_err or verify_ko or n_unfinished or n_folders) else "done"
+        detail = [f"{n_err} item error(s)"] + ([f"{n_folders} folder error(s)"] if n_folders else []) \
+            + ([f"{n_verify} verification problem(s)"] if n_verify else []) \
+            + ([f"{n_unfinished} unfinished"] if n_unfinished else [])
+        total = n_err + n_folders + n_verify + n_unfinished
+        if n_folders and not err:
+            err = "; ".join(f"{k}: {v}" for k, v in self.folder_errors.items())[:2000]
+        self.log(f"Finished: {status} ({total} error(s)" + (f": {', '.join(detail)})" if total else ")"),
+                 "warning" if status != "done" else "info")
         self._finish(status, err)
 
     def _execute(self) -> None:

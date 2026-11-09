@@ -64,7 +64,8 @@ test('opens signed in, with the badge, the install link and fictional data only'
 	const text = await page.locator('main').innerText();
 	const addresses = text.match(/[\w.+-]+@[\w.-]+/g) ?? [];
 	expect(addresses.length).toBeGreaterThan(5);
-	for (const address of addresses) expect(address, 'only example.com').toMatch(/@example\.(com|org|net)$/);
+	// Reserved names only (RFC 2606): example.com/org/net, and the .example domain of the fictional tenant.
+	for (const address of addresses) expect(address, 'only reserved example domains').toMatch(/@(example\.(com|org|net)|[\w-]+\.example)$/);
 });
 
 test('shows running, finished and needs-attention mailboxes, and a batch', async ({ page }) => {
@@ -99,12 +100,13 @@ test('deep links load the app through 404.html, and navigation keeps the /demo p
 
 test('a write is accepted, and forgotten on reload', async ({ page }) => {
 	await open(page);
+	const before = (await api<unknown[]>(page, '/servers')).body.length;
 	const made = await api(page, '/servers', { method: 'POST', body: JSON.stringify({ name: 'Scratch', imap_host: 'imap.example.net' }) });
 	expect(made.status).toBe(201);
-	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(3);
+	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(before + 1);
 	await page.reload();
 	await expect(page.getByTestId('live')).toContainText('Live');
-	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(2);
+	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(before);
 });
 
 test('an upload is simulated and the file becomes valid', async ({ page }) => {

@@ -47,6 +47,8 @@ def test_server_test_is_stored_and_cleared_by_a_connection_change(client, monkey
     def refuse(*a, **k):
         raise OSError("connection refused")
     monkeypatch.setattr(imaplib, "IMAP4_SSL", refuse)
+    import httpx
+    monkeypatch.setattr(httpx, "Client", refuse)  # no network: nothing answers
     sid = client.post("/api/servers", json={**SRV, "dav_enabled": False}).json()["id"]
     res = client.post(f"/api/servers/{sid}/test").json()
     assert res["imap"]["ok"] is False and res["caldav"]["ok"] is True
@@ -58,6 +60,54 @@ def test_server_test_is_stored_and_cleared_by_a_connection_change(client, monkey
     # Another host: it no longer does
     s = client.put(f"/api/servers/{sid}", json={**SRV, "dav_enabled": False, "imap_host": "other.example.test"}).json()
     assert s["last_test"] is None and s["last_test_result"] is None
+
+
+def test_server_test_reports_dav_that_answers_while_disabled(client, monkeypatch):
+    """A server saved with DAV off must not get a plain green DAV verdict when CalDAV/CardDAV do answer."""
+    import httpx
+    import imaplib
+
+    class Imap:
+        capabilities = ("IMAP4REV1",)
+
+        def logout(self):
+            pass
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *a, **k: Imap())
+
+    class Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    class Http:
+        status = 401
+
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def request(self, *a, **k):
+            return Resp(Http.status)
+    monkeypatch.setattr(httpx, "Client", Http)
+    sid = client.post("/api/servers", json={**SRV, "carddav_url": None, "dav_enabled": False}).json()["id"]
+    res = client.post(f"/api/servers/{sid}/test").json()
+    assert res["caldav"]["found"] is True and res["carddav"]["found"] is True and "off" in res["caldav"]["msg"]
+    stored = client.get(f"/api/servers/{sid}").json()
+    assert stored["last_test_result"] == res and stored["dav_enabled"] is False
+    # Enabling DAV is a connection change: the stale verdict goes, and the next test is a real one
+    s = client.put(f"/api/servers/{sid}", json={**SRV, "carddav_url": None, "dav_enabled": True}).json()
+    assert s["dav_enabled"] is True and s["last_test_result"] is None
+    res = client.post(f"/api/servers/{sid}/test").json()
+    assert res["caldav"] == {"ok": True, "msg": "https://imap.example.test/.well-known/caldav reachable (HTTP 401)"}
+    # Nothing answers while DAV is off: plain "disabled", nothing found
+    Http.status = 404
+    client.put(f"/api/servers/{sid}", json={**SRV, "carddav_url": None, "dav_enabled": False})
+    res = client.post(f"/api/servers/{sid}/test").json()
+    assert res["caldav"] == {"ok": True, "found": False, "msg": "DAV disabled for this server"}
 
 
 def test_accounts_crud_and_password_encrypted(client, env):

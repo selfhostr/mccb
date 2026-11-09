@@ -2,26 +2,23 @@
 	import Check from '@lucide/svelte/icons/check';
 	import Copy from '@lucide/svelte/icons/copy';
 	import { m } from '#lib/paraglide/messages.js';
+	import { copyText } from '../clipboard.ts';
 	import IconButton from './IconButton.svelte';
+	import { toast } from './toast.svelte.ts';
 
 	let { text, label }: { text: string | (() => string); label?: string } = $props();
 	let done = $state(false);
+	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	async function copy() {
-		const value = typeof text === 'function' ? text() : text;
-		try {
-			await navigator.clipboard.writeText(value);
-		} catch {
-			// Plain HTTP has no clipboard API: the old way still works there.
-			const area = document.createElement('textarea');
-			area.value = value;
-			document.body.append(area);
-			area.select();
-			document.execCommand('copy');
-			area.remove();
+		const ok = await copyText(typeof text === 'function' ? text() : text);
+		if (!ok) {
+			toast(m.common_copy_failed(), 'warning');
+			return;
 		}
 		done = true;
-		setTimeout(() => (done = false), 1200);
+		clearTimeout(timer);
+		timer = setTimeout(() => (done = false), 2000);
 	}
 </script>
 

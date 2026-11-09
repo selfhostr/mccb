@@ -1,15 +1,18 @@
-export type Page = 'migrations' | 'files' | 'servers' | 'repair' | 'settings';
-
+export type Page = 'migrations' | 'files' | 'servers' | 'repair' | 'settings' | 'tenant';
 
 export interface Route {
 	page: Page;
 	jobId: number | null;
+	/** Only on the page 'tenant': the source connection being matched. */
+	tenantId?: number;
 }
 
 export function matchRoute(path: string): Route {
 	const clean = path.replace(/\/+$/, '') || '/';
 	const job = /^\/jobs\/(\d+)$/.exec(clean);
 	if (job) return { page: 'migrations', jobId: Number(job[1]) };
+	const tenant = /^\/tenants\/(\d+)\/migrate$/.exec(clean);
+	if (tenant) return { page: 'tenant', jobId: null, tenantId: Number(tenant[1]) };
 	if (clean === '/files') return { page: 'files', jobId: null };
 	if (clean === '/servers') return { page: 'servers', jobId: null };
 	if (clean === '/repair') return { page: 'repair', jobId: null };

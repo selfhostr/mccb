@@ -49,6 +49,59 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `{ok:true,script,converted:[name],partial:[{name,dropped:[...]}],not_converted:[{name,reasons:[...]}],warnings:[...],uploaded,activated,upload_error:{error_kind,msg}|null}`,
   `{ok:false,error_kind,msg}` if the source refuses. `managesieve` uploads the script (default host, login and password: those of the account);
   it is not activated unless `activate` is true. **422** if the source cannot read rules.
+  Fields gain `scope:'mailbox'|'connection'` and connectors `directory:bool` (true: they can be a source connection).
+  An account source gains `connection:{id,name}|null` (absent for a PST); `has_secret` is then that of the connection.
+  `PUT /api/accounts/{id}/source {connection_id,config}` reads the source through that connection: `config` carries the
+  mailbox fields only (others **422**, so do `secrets`); a `PUT` without `connection_id` drops the link.
+  The CSV export writes the merged settings of a linked account (never the secret); importing them back keeps the link,
+  other settings replace it.
+- Source connections (one credential for many accounts, v1: a Microsoft 365 tenant, see [Exchange](exchange.md)):
+  `GET /api/source-connections` → `[Connection]`, `POST` `{name,kind,config,secrets,notes?}` → 201 Connection,
+  `GET/PUT/DELETE /api/source-connections/{id}`. Connection = `{id,name,kind,config,has_secret,notes,last_test,last_test_result,accounts,created_at}`
+  (`accounts`: linked count, never a secret). `config` holds the kind's `connection` fields only (others **422**), the kind
+  needs a directory. `PUT`: fields omitted are kept, `secrets` as for accounts; changing a connection field or the secret
+  clears the last test. **409** when changing `tenant_id` or `cloud`, or deleting, while accounts are linked
+  (`detail:{msg,accounts}` on delete).
+  `POST /api/source-connections/test {kind,config,secrets?,id?}` (unsaved; `id` fills omitted secrets) and
+  `POST /api/source-connections/{id}/test` (stored, saves the result) → `{ok,checks:[{key,ok,level:'required'|'optional',msg,missing?}],tenant_name?}`;
+  a refusal is an answer, not an HTTP error.
+  `GET /api/source-connections/{id}/mailboxes?refresh=0|1` → `{fetched_at,purpose_checked,mailboxes:[{id,display_name,mail,upn,aliases,kind,enabled,licensed,guess?}],hidden:{guests,no_mailbox}}`,
+  kept 5 minutes in memory (`refresh=1` reads again); **502** when the tenant refuses.
+  `GET /api/source-connections/{id}/match?server_id=N&refresh=0|1` (no `server_id`: the server with the most matches) →
+  `{connection:{id,name},server:{id,name,dav_enabled,caldav_ok,carddav_ok},rows,counts,fetched_at,purpose_checked,hidden}`,
+  row = `{state:'ready'|'linked'|'no_target'|'no_source'|'other_source'|'conflict',mailbox|null,account:{id,email,status,last_test,last_test_result,source_kind,source_connection_id,free}|null,`
+  `matched_by:'mail'|'upn'|'alias'|'manual'|null,matched_address|null,conflict_with?,coverage:{mail,calendar,contacts,tasks},last_job:{id,status}|null}`,
+  coverage values `on|off|no_dav|failed|unknown|no_permission`. An account linked to the connection stays paired with the
+  mailbox it reads, whatever its address (`manual` when no address of the mailbox is its own; `ready` until a job has run).
+  `free`: no source of its own worth keeping, or already linked to this connection.
+  `POST /api/source-connections/{id}/link {server_id,links:[{account_id,mailbox_id,manual?}],include_tasks?,start?,mode?,batch_name?}`
+  → `{linked:[account_id],errors:[{account_id,msg}],jobs:[Job],batch_id}`. Per account: on that server, no active job, no
+  other source (a PST without a valid file is none); others go on. An account already linked, or configured alone for the same
+  tenant, keeps its `mailbox` value: same migration state, no duplicates. `include_tasks` omitted: the last test's tasks
+  check (true if never tested). `start` queues the jobs as `POST /api/runs` does. **409** `detail:{msg,errors}` when none is linked.
+  An account linked to another mailbox of the tenant is refused. `manual: true` (a destination chosen by hand): the other
+  accounts of the server linked to that mailbox go back to their own source (refused while one has an active job).
+  `PUT /api/accounts/{id}/source {}` undoes a link (back to automatic).
+  Connection gains `provisioned:{app_object_id,sp_object_id,created_at}|null` (set when made by Connect with Microsoft, not secret).
+- Connect with Microsoft (device code flow, see [Exchange](exchange.md)): the `m365_graph` entry of `GET /api/connectors`
+  gains `provision:bool` (`M365_BOOTSTRAP_CLIENT_ID` not empty).
+  `POST /api/source-connections/provision {cloud?,name?}` (cloud default `global`, name default the organisation's) →
+  201 `{flow_id,user_code,verification_uri,expires_in,interval,message}`: sign in at `verification_uri` with `user_code` as an
+  administrator of the client tenant. mccb then creates the app "mccb migration" with the read-only application permissions,
+  grants admin consent, adds a client secret (1 year), waits for propagation (about 3 minutes at most), saves the connection
+  and stores the check as a Test. **409** when turned off, **422** unknown cloud, **502** when the login service refuses.
+  `POST /api/source-connections/{id}/deprovision` → same answer: a new sign-in, then only the application mccb created is
+  deleted and `provisioned` cleared (the connection stays; `DELETE` it if wanted). **409** if not provisioned or turned off.
+  `GET /api/source-connections/provision/{flow_id}` → `{status:'waiting'|'working'|'done'|'error'|'expired',
+  step:null|'signin'|'app'|'consent'|'secret'|'propagation'|'test'|'remove',error:null|string,
+  error_code:null|'not_admin'|'consent_refused'|'expired'|'step_refused'|'propagation_timeout'|'login_refused'|'unreachable'|
+  'other_tenant'|'cancelled'|'unexpected',connection:Connection|null}` (poll every `interval` seconds; `connection` set
+  on `done`). `error_code` is stable, for the UI to translate; `error` is the English text, with what Graph answered
+  (e.g. `Graph 403 Authorization_RequestDenied: …`). Done with `step:'propagation'` and an `error`: the credentials
+  did not work in time, the connection is saved all the same, run its Test again later. A failure before saving removes the
+  half-made application. **404** unknown or expired flow (kept 15 minutes after the end).
+  `DELETE /api/source-connections/provision/{flow_id}` cancels (204, also for an unknown flow). The delegated token stays in
+  memory for the flow only; the secret is never returned.
 - PST upload (resumable):
   `POST /api/uploads {filename,size,last_modified}` → `{id,chunk_size,received:[n...]}` (same file = same upload, resume)
   `PUT /api/uploads/{id}/chunks/{n}` binary body, `X-Chunk-Sha256` header → 200 `{n,ok}` / 422 if wrong hash

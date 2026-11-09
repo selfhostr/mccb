@@ -1,6 +1,7 @@
 <script lang="ts">
 	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import { providerOf } from '../../lib/logic/providers.ts';
+	import { davDetected } from '../../lib/logic/dav.ts';
 	import Check from '@lucide/svelte/icons/check';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -14,7 +15,7 @@
 	import X from '@lucide/svelte/icons/x';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { m } from '#lib/paraglide/messages.js';
-	import { del, errorText, post } from '../../lib/api/client.ts';
+	import { del, errorText, post, put } from '../../lib/api/client.ts';
 	import type { Server, TestResult } from '../../lib/api/types.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
@@ -59,11 +60,12 @@
 		return value === 'ssl' ? m.settings_server_security_ssl() : value === 'starttls' ? m.settings_server_security_starttls() : m.settings_server_security_none();
 	}
 
-	async function test(server: Server) {
+	async function test(server: Server, quiet = false) {
 		if (testing.has(server.id)) return;
 		testing.add(server.id);
 		try {
-			results.set(server.id, await post<TestResult>(`/servers/${server.id}/test`));
+			const outcome = await post<TestResult>(`/servers/${server.id}/test`);
+			if (!quiet) results.set(server.id, outcome);
 			await data.reloadServers();
 		} catch (error) {
 			toast(errorText(error), 'warning');
@@ -71,6 +73,30 @@
 			testing.delete(server.id);
 		}
 	}
+
+	/** DAV answers but is off: one click switches it on (a connection change, so the server is checked again). */
+	async function enableDav(server: Server) {
+		try {
+			const { id: _id, last_test: _t, last_test_result: _r, ...rest } = server;
+			const saved = await put<Server>(`/servers/${server.id}`, { ...rest, dav_enabled: true });
+			results.delete(server.id);
+			await data.reloadServers();
+			toast(m.settings_server_saved({ name: server.name }), 'signal');
+			await test(saved);
+		} catch (error) {
+			toast(errorText(error), 'warning');
+		}
+	}
+
+	// A server saved with DAV off and never checked: look now, so that a working DAV is offered instead of silently ignored.
+	const looked = new Set<number>();
+	$effect(() => {
+		for (const server of data.servers) {
+			if (server.dav_enabled || server.last_test_result || looked.has(server.id)) continue;
+			looked.add(server.id);
+			void test(server, true);
+		}
+	});
 
 	async function remove(server: Server) {
 		try {
@@ -126,6 +152,12 @@
 								/>
 							</div>
 						</div>
+						{#if davDetected(server, results.get(server.id) ?? stored)}
+							<div class="mt-1 flex flex-wrap items-center gap-2 text-sm text-warning-ink" data-testid="server-dav-found">
+								<span class="min-w-0 flex-1 basis-56">{m.settings_server_dav_found()}</span>
+								<Button onclick={() => enableDav(server)} data-testid="server-enable-dav">{m.settings_server_dav_enable()}</Button>
+							</div>
+						{/if}
 						{#if result}
 							<ul class="m-0 mt-1 flex list-none flex-col gap-1 p-0" data-testid="server-test">
 								{#each PROTOCOLS as protocol (protocol.key)}

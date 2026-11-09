@@ -1,6 +1,6 @@
 # Exchange
 
-By the end of this page you will know which connector to use for Exchange, which rights to give it, how to migrate a whole tenant, and what does not survive.
+By the end of this page you will know which connector to use for Exchange, which rights to give it, how to migrate a whole Microsoft 365 tenant, and what does not survive.
 
 **These connectors have been tested against simulated servers, not real Exchange.** The tests run the code against fake EWS and Graph servers written from the Microsoft documentation. They prove the logic of the connectors, not that Exchange behaves as documented. Try one mailbox with few items first, and read [What to check on a first real test](#what-to-check-on-a-first-real-test).
 
@@ -56,7 +56,20 @@ Add-MailboxPermission -Identity shared@example.com -User svc-migration -AccessRi
 
 App-only: one Entra application and one secret reach every mailbox of the tenant. A shared mailbox is a mailbox like the others: give its address in `mailbox`.
 
-### Register the application
+### Connect with Microsoft
+
+The quickest way, and the one to try first. In **Settings**, **Servers**, add a Microsoft 365 tenant and press **Connect with Microsoft**.
+
+1. mccb shows a code. Open `microsoft.com/devicelogin`, enter it and sign in with a **Global Administrator** or a **Privileged Role Administrator** of the tenant: granting Microsoft Graph application permissions requires one of these two roles.
+2. Accept the consent screen. It is named **Microsoft Graph Command Line Tools**, the public Microsoft application mccb uses once to sign you in and create the migration application. It is not an mccb application, and mccb keeps no access to it afterwards.
+3. mccb creates the **mccb migration** application with the exact application permissions listed below, grants admin consent, and creates a client secret valid for one year.
+4. Microsoft takes a few minutes to activate a new application and its consent. mccb waits for it, then runs the test of the tenant. The tenant is then ready, with its directory ID, client ID and secret filled in.
+
+After the migration, remove the application: in the [Entra admin center](https://entra.microsoft.com), **App registrations**, **mccb migration**, **Delete**. Deleting it also removes its consent and secret. The secret expires by itself one year after its creation. To use another application as the sign-in application, or to turn this button off, set `M365_BOOTSTRAP_CLIENT_ID` (see [Configuration](configuration.md)).
+
+If your organisation does not allow this, register the application by hand.
+
+### Register the application by hand
 
 1. In the [Entra admin center](https://entra.microsoft.com), open **App registrations**, **New registration**. Any name, **Accounts in this organizational directory only**, no redirect URI.
 2. Note the **Application (client) ID** and the **Directory (tenant) ID**.
@@ -73,6 +86,13 @@ App-only: one Entra application and one secret reach every mailbox of the tenant
 | `Contacts.Read` or `Contacts.ReadWrite` | contacts, source or target |
 | `Tasks.Read.All` or `Tasks.ReadWrite.All` | tasks, source or target. Without it, turn off `include_tasks`. |
 | `MailboxSettings.Read` | reading inbox rules (source) |
+| `User.Read.All` | listing the mailboxes of the tenant, for [Migrate a Microsoft 365 tenant](#migrate-a-microsoft-365-tenant). `Directory.Read.All` also works. |
+
+`User.Read.All` is new: an application registered before that release needs it added, with admin consent, to list the tenant. Migrating a single mailbox does not need it.
+
+Required: the mail permission of the direction you migrate (`Mail.Read` for a source, `Mail.ReadWrite` for a target) and `User.Read.All` to list the tenant. Optional: calendars, contacts, tasks, `MailboxSettings.Read`, `Mail-Advanced.ReadWrite.All`. `Tasks.Read.All` is the one most often missing: without it, tasks are left out and the rest goes on.
+
+The **Test** button of a tenant in **Settings**, **Servers** reads the roles of the access token and lists every check. A missing permission is named (for example `Missing application permission User.Read.All (admin consent needed)`), marked required or optional. A missing optional permission turns the matching kind off in the coverage of the matching screen (`permission not granted by the tenant`). A token with no role at all means admin consent was not given.
 
 The token is asked for with the scope `https://graph.microsoft.com/.default`. These permissions reach every mailbox of the tenant. To limit them, use [RBAC for Applications](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac) in Exchange Online.
 
@@ -112,20 +132,26 @@ For a provider where each user consents, leave `client_secret` as the provider r
 
 On a Dovecot-style server one account reaches every mailbox: in the `imap` connector, `login` is the mailbox, `password` the password of the master, `master_user` its name. The connector logs in as `<login>*<master_user>`. `master_separator` changes the `*`, to match `auth_master_user_separator`.
 
-## Migrate a tenant
+## Migrate a Microsoft 365 tenant
 
-Every mailbox uses the same application. List the mailboxes, then create them through the [API](api.md):
+One credential covers many mailboxes: the tenant is registered once as a source connection, and each mailbox of the target server is linked to it. Nothing is typed per mailbox.
 
-```bash
-# cookies.txt holds the session cookie of POST /api/login
-for mailbox in $(cat mailboxes.txt); do
-  id=$(curl -sb cookies.txt -X POST "$mccb/api/accounts" -H 'Content-Type: application/json' \
-       -d "{\"server_id\":1,\"email\":\"$mailbox\",\"password\":\"$TARGET_PASSWORD\"}" | jq .id)
-  curl -sb cookies.txt -X PUT "$mccb/api/accounts/$id/source" -H 'Content-Type: application/json' \
-       -d "{\"kind\":\"m365_graph\",\"config\":{\"tenant_id\":\"$TENANT\",\"client_id\":\"$CLIENT\",\"mailbox\":\"$mailbox\"},
-            \"secrets\":{\"client_secret\":\"$SECRET\"}}"
-done
-```
+1. **Register the tenant.** In **Settings**, **Servers**, add a Microsoft 365 tenant and press [Connect with Microsoft](#connect-with-microsoft). Or fill in the name, directory (tenant) ID, client ID, secret and cloud after [registering the application by hand](#register-the-application-by-hand), then press **Test** and fix the permissions it names.
+2. **Create the target mailboxes.** On the server the mailboxes go to, [import them by CSV](import-accounts.md) (address and password of each). Turn on DAV on that server if calendars and contacts must be copied: without it, the coverage shows `no CalDAV/CardDAV on the server` and only mail is migrated.
+3. **Open the matching screen.** On the tenant, press **Migrate mailboxes** and pick the server. The mailboxes of the tenant (users, shared mailboxes, rooms and equipment, with their type) are shown next to the accounts of the server, paired by primary address, then user principal name, then alias.
+4. **Read the states.** `Ready`: paired, can start. `Linked`: already uses this tenant. `Not on <server>`: a mailbox of the tenant with no account on the server. `No Microsoft 365 mailbox`: an account with no mailbox in the tenant. `Has another source`: the account has a source of its own, it is not replaced. `Conflict`: two mailboxes want the same account, or one is a tie. Each row also shows what will be copied (mail, calendar, contacts, tasks) and why a kind is not.
+5. **Choose a different destination if needed.** On a row, **Choose a destination** (or **Change the destination**) sends the mailbox to another account of the server, whatever its address: pick it in the list, or type the address and password of a mailbox not imported yet (it is created as a CSV line would). The choice is kept, the row says `Chosen by hand`, and **Back to automatic** returns to the match by address. An account receives one mailbox only.
+6. **Tick and start.** Tick the `Ready` rows, give the batch a name (default: tenant, server, date) and start. The mailboxes are linked and queued in that batch, and the list of migrations opens on it.
+7. **Cutover.** Once the first copy is done, change the DNS (MX) records. This is done outside mccb.
+8. **Final resync.** Come back to the same screen and run the final resync on the linked mailboxes: only what changed since the last run is copied.
+
+An account is linked to the tenant by the Entra object ID of the mailbox, not by its address. If the domain is removed from the tenant after the cutover, the final resync still finds the mailbox. The migration state follows the mailbox: a rerun copies only what is new, and nothing is duplicated if an account was already configured alone for the same tenant.
+
+Like the rest of this page, this was tested against simulated servers, not a real tenant. Try one or two mailboxes first. Hidden from the list: guest users and users with no mailbox, counted on the screen. The list is kept 5 minutes; **Refresh** reads it again.
+
+Changing the secret or the application of the tenant keeps every state. The directory ID and the cloud cannot be changed while accounts are linked, and a tenant cannot be deleted then.
+
+To script it, see the `source-connections` routes in the [API](api.md). A mailbox can still be set up alone, with its own `m365_graph` source and `mailbox`, as before.
 
 The migration state follows the mailbox: changing the secret, the application or the service account keeps it, a rerun copies only what is new.
 
@@ -195,7 +221,8 @@ The body of a Sieve rule needs the `body` extension, flags `imap4flags`, copies 
 ### Folders
 
 - Calendars and contact folders are flat with `m365_graph`: `A / B` for a nested source folder.
-- Every folder of one kind goes to a single collection on a DAV target, as for a PST.
+- On a DAV target, the default calendar, address book and task list go to the default collection, each other one to its own collection, matched by name or created. See [DAV](dav.md).
+- Read-only calendars of Outlook (holidays, birthdays, subscriptions) are not migrated.
 - The inbox, sent items, drafts, deleted items and junk of the source go to the well-known folders of the target, whatever their language. The others go by name under `root_folder`.
 
 ### Archive mailboxes

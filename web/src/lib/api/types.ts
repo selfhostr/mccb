@@ -25,6 +25,8 @@ export interface ProbeResult {
 	ok: boolean;
 	msg: string;
 	quota?: unknown;
+	/** Server test with DAV switched off: true when the CalDAV/CardDAV entry point answers anyway. */
+	found?: boolean;
 }
 
 export interface TestResult {
@@ -188,6 +190,8 @@ export interface ConnectorField {
 	default: unknown;
 	options?: string[];
 	help?: string;
+	/** 'connection' fields live on a source connection (tenant), 'mailbox' ones on the account. */
+	scope?: 'mailbox' | 'connection';
 }
 
 export interface ConnectorRole {
@@ -202,6 +206,10 @@ export interface Connector {
 	description: string;
 	source: ConnectorRole | null;
 	target: ConnectorRole | null;
+	/** True when the connector can register a connection and list its mailboxes (m365_graph). */
+	directory?: boolean;
+	/** True when "Connect with Microsoft" is available (a bootstrap app is configured). */
+	provision?: boolean;
 }
 
 /** Source or own target of an account as the API shows it. Secrets never come back. */
@@ -209,6 +217,8 @@ export interface Endpoint {
 	kind: string | null;
 	config: Record<string, unknown>;
 	has_secret: boolean;
+	/** Set when the source is read through a source connection (tenant). */
+	connection?: { id: number; name: string } | null;
 }
 
 export interface EndpointInput {
@@ -549,4 +559,168 @@ export interface RepairPreview {
 	fixes: RepairIssue[];
 	left: RepairIssue[];
 	error: string | null;
+}
+
+/** Source connections (Microsoft 365 tenants). Secrets never come back. */
+export interface CheckItem {
+	key: string;
+	ok: boolean;
+	level: 'required' | 'optional';
+	msg: string;
+	missing?: string[];
+}
+
+export interface CheckResult {
+	ok: boolean;
+	checks: CheckItem[];
+	tenant_name?: string;
+}
+
+export interface SourceConnection {
+	id: number;
+	name: string;
+	kind: string;
+	config: Record<string, unknown>;
+	has_secret: boolean;
+	notes: string | null;
+	last_test: number | null;
+	last_test_result: CheckResult | null;
+	accounts: number;
+	/** Set when the app was created in the tenant by "Connect with Microsoft". */
+	provisioned?: { app_object_id: string; sp_object_id: string; created_at: number } | null;
+	created_at: number;
+}
+
+export interface ProvisionFlow {
+	flow_id: string;
+	user_code: string;
+	verification_uri: string;
+	expires_in: number;
+	interval: number;
+	message: string;
+}
+
+export type ProvisionStatus = 'waiting' | 'working' | 'done' | 'error' | 'expired';
+export type ProvisionStep = 'signin' | 'app' | 'consent' | 'secret' | 'propagation' | 'test' | 'remove';
+
+/** Why a flow failed (or ended with a warning), stable: the UI translates it, `error` stays the English details. */
+export type ProvisionErrorCode =
+	| 'not_admin'
+	| 'consent_refused'
+	| 'expired'
+	| 'step_refused'
+	| 'propagation_timeout'
+	| 'login_refused'
+	| 'unreachable'
+	| 'other_tenant'
+	| 'cancelled'
+	| 'unexpected';
+
+export interface ProvisionState {
+	status: ProvisionStatus;
+	step: ProvisionStep | null;
+	error: string | null;
+	error_code: ProvisionErrorCode | null;
+	connection: SourceConnection | null;
+}
+
+export interface SourceConnectionInput {
+	name: string;
+	kind: string;
+	config: Record<string, unknown>;
+	/** On update: omitted keeps stored secrets, {} clears them, a value replaces that field. */
+	secrets?: Record<string, string>;
+	notes?: string | null;
+}
+
+export type TenantMailboxKind = 'user' | 'shared' | 'room' | 'equipment' | 'unknown';
+
+export interface TenantMailbox {
+	id: string;
+	display_name: string;
+	mail: string;
+	upn: string;
+	aliases: string[];
+	kind: TenantMailboxKind;
+	enabled: boolean;
+	licensed: boolean;
+}
+
+export interface TenantMailboxes {
+	fetched_at: number;
+	purpose_checked: boolean;
+	mailboxes: TenantMailbox[];
+	hidden: { guests: number; no_mailbox: number };
+}
+
+export type MatchState = 'ready' | 'linked' | 'other_source' | 'no_target' | 'no_source' | 'conflict';
+export type CoverageState = 'on' | 'off' | 'no_dav' | 'failed' | 'unknown' | 'no_permission';
+
+export interface Coverage {
+	mail: CoverageState;
+	calendar: CoverageState;
+	contacts: CoverageState;
+	tasks: CoverageState;
+}
+
+/** The server side of a matching row: the mccb account, as the matching screen needs it. */
+export interface MatchAccount {
+	id: number;
+	email: string;
+	status: AccountStatus;
+	last_test: number | null;
+	last_test_result: TestResult | null;
+	/** Source kind of the account today (null or 'pst' without a valid file: free to link). */
+	source_kind: string | null;
+	/** Set when the account is already read through a source connection. */
+	source_connection_id: number | null;
+	/** No source of its own worth keeping, or already read through this tenant: it can be chosen as a destination. */
+	free?: boolean;
+}
+
+/**
+ * One row of the matching screen, one pair (or one lone side).
+ * - mailbox is null only for 'no_source', account is null only for 'no_target';
+ * - matched_by and matched_address say how the pair was made ('alias' shows "via alias x", 'manual': the destination
+ *   was chosen by hand, the account is linked to this mailbox whatever its address);
+ * - conflict_with: for 'conflict', the address of the tenant mailbox that won the account;
+ * - last_job: the account's latest job (linked rows show it), null when none.
+ */
+export interface MatchRow {
+	state: MatchState;
+	mailbox: TenantMailbox | null;
+	account: MatchAccount | null;
+	matched_by: 'mail' | 'upn' | 'alias' | 'manual' | null;
+	matched_address: string | null;
+	conflict_with?: string | null;
+	coverage: Coverage;
+	last_job: { id: number; status: JobStatus } | null;
+}
+
+export interface MatchResponse {
+	connection: { id: number; name: string };
+	server: { id: number; name: string; dav_enabled: boolean; caldav_ok: boolean | null; carddav_ok: boolean | null };
+	rows: MatchRow[];
+	counts: Partial<Record<MatchState, number>>;
+	/** From the mailbox listing the match was computed on. */
+	fetched_at: number;
+	purpose_checked: boolean;
+	hidden: { guests: number; no_mailbox: number };
+}
+
+export interface LinkInput {
+	server_id: number;
+	/** manual: a destination chosen by hand (any other box of the server linked to this mailbox lets it go). */
+	links: { account_id: number; mailbox_id: string; manual?: boolean }[];
+	include_tasks?: boolean;
+	start?: boolean;
+	mode?: 'full' | 'delta';
+	batch_name?: string;
+}
+
+export interface LinkResponse {
+	linked: number[];
+	errors: { account_id: number; msg: string }[];
+	jobs: Job[];
+	batch_id: number | null;
 }

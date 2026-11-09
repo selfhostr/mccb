@@ -20,6 +20,8 @@
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { router } from '../../lib/router.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
+	import { sources } from '../../lib/stores/sources.svelte.ts';
+	import Cloud from '@lucide/svelte/icons/cloud';
 	import Button from '../../lib/ui/Button.svelte';
 	import Dialog from '../../lib/ui/Dialog.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
@@ -62,6 +64,17 @@
 	// Where the mail comes from: an uploaded file, or a server read through a connector.
 	const FILE_TILE = '__files';
 	let sourceKind = $state(FILE_TILE);
+	const TENANT_TILE = '__tenant';
+	void sources.load();
+	let tenantId = $state(0);
+	const tenant = $derived(sources.list.find((c) => c.id === tenantId) ?? sources.list[0]);
+	const onTenant = $derived(sourceKind === TENANT_TILE);
+	function goTenant() {
+		if (!tenant) return;
+		const url = `/tenants/${tenant.id}/migrate${Number(serverId) ? `?server=${Number(serverId)}` : ''}`;
+		onclose();
+		router.go(url);
+	}
 	let editor = $state<EndpointEditor>();
 	const sourceKinds = $derived(kindsFor(connectors.list, 'source'));
 	// The editor needs a mailbox; before it exists it gets an empty one, and the test runs without it.
@@ -132,7 +145,7 @@
 			<fieldset class="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
 				<legend class="mb-2 p-0 text-sm font-semibold">{m.migrations_step_from()}</legend>
 				<div class="grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label={m.migrations_step_from()} data-testid="source-kinds">
-					{#each [{ kind: FILE_TILE, label: m.migrations_new_source_files() }, ...sourceKinds.map((c) => ({ kind: c.kind, label: c.label || c.kind }))] as tile (tile.kind)}
+					{#each [{ kind: FILE_TILE, label: m.migrations_new_source_files() }, ...sourceKinds.map((c) => ({ kind: c.kind, label: c.label || c.kind })), ...(sources.list.length ? [{ kind: TENANT_TILE, label: m.sources_from_tile() }] : [])] as tile (tile.kind)}
 						<button
 							type="button"
 							role="radio"
@@ -141,12 +154,21 @@
 							onclick={() => (sourceKind = tile.kind)}
 							data-kind={tile.kind}
 						>
-							<KindIcon icon={kindIcon(tile.kind === FILE_TILE ? 'pst' : tile.kind)} size={28} />
+							<KindIcon icon={tile.kind === TENANT_TILE ? Cloud : kindIcon(tile.kind === FILE_TILE ? 'pst' : tile.kind)} size={28} />
 							<span class="min-w-0 text-xs leading-tight">{tile.label}</span>
 						</button>
 					{/each}
 				</div>
-				{#if sourceKind === FILE_TILE}
+				{#if sources.loaded && !sources.list.length}
+					<p class="m-0 text-xs text-ink-3" data-testid="tenant-none">{m.sources_from_none()} <a href="/servers" onclick={onclose}>{m.sources_from_add()}</a></p>
+				{/if}
+				{#if onTenant}
+					<Field label={m.sources_from_pick()} hint={m.sources_from_hint()}>
+						<select class="input" value={tenant?.id} onchange={(e) => (tenantId = Number(e.currentTarget.value))} data-testid="tenant-pick">
+							{#each sources.list as item (item.id)}<option value={item.id}>{item.name}</option>{/each}
+						</select>
+					</Field>
+				{:else if sourceKind === FILE_TILE}
 					<Field label={m.migrations_new_source()} hint={m.migrations_new_source_hint()}>
 						<select class="input" value={source} onchange={onSourceChange} data-testid="new-source">
 							<option value="">{m.migrations_new_source_later()}</option>
@@ -184,6 +206,7 @@
 					</div>
 					<a class="self-start text-xs" href="/servers" onclick={onclose}>{m.migrations_new_add_server()}</a>
 				</div>
+				{#if !onTenant}
 				<Field label={m.migrations_account_email()} hint={serverName ? m.migrations_new_email_hint({ server: serverName }) : undefined}>
 					<input class="input font-mono" type="email" required autocomplete="off" bind:value={email} />
 				</Field>
@@ -193,6 +216,7 @@
 				<Field label={m.migrations_account_login()} hint={m.migrations_account_login_hint()}>
 					<input class="input font-mono" autocomplete="off" bind:value={login} />
 				</Field>
+				{/if}
 			</fieldset>
 		{:else}
 			<Field label={m.migrations_account_password()} hint={m.migrations_account_password_keep()}>
@@ -211,6 +235,10 @@
 			<span class="mr-auto"><Button variant="ghost" icon={FileUp} onclick={oncsv} data-testid="new-csv">{m.migrations_add_csv()}</Button></span>
 		{/if}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
+		{#if !account && onTenant}
+			<Button variant="primary" onclick={goTenant} disabled={!tenant} data-testid="tenant-go">{m.sources_from_go()}</Button>
+		{:else}
 		<Button variant="primary" type="submit" form="account-form" loading={busy}>{account ? m.common_save() : m.migrations_add_account()}</Button>
+		{/if}
 	{/snippet}
 </Dialog>

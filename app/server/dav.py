@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, unquote, urljoin
 
 import httpx
 
@@ -228,13 +228,14 @@ class DavClient:
         slug = "-contacts/" if kind != "caldav" else "-tasks/" if component == "VTODO" else "-agenda/"
         return self._mkcol(kind, home + IMPORT_NAME + slug, component)
 
-    def _mkcol(self, kind: str, url: str, component: str = "VEVENT") -> str:
-        """Creates the "PST Import" collection at `url`: MKCALENDAR (CalDAV) or extended MKCOL (CardDAV, RFC 5689).
-        Server refusal -> explicit DavError (non-temporary except 5xx/429)."""
+    def _mkcol(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
+        """Creates a collection at `url` ("PST Import" unless `display` names it): MKCALENDAR (CalDAV) or extended
+        MKCOL (CardDAV, RFC 5689). Server refusal -> explicit DavError (non-temporary except 5xx/429)."""
+        display = display or IMPORT_DISPLAY
         if kind == "caldav":
             root = ET.Element(_q(NS_CAL, "mkcalendar"))
             setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
-            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = IMPORT_DISPLAY
+            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = display
             comps = ET.SubElement(setp, _q(NS_CAL, "supported-calendar-component-set"))
             ET.SubElement(comps, _q(NS_CAL, "comp")).set("name", component)
             method = "MKCALENDAR"
@@ -244,7 +245,7 @@ class DavClient:
             rt = ET.SubElement(setp, _q(NS_DAV, "resourcetype"))
             ET.SubElement(rt, _q(NS_DAV, "collection"))
             ET.SubElement(rt, _q(NS_CARD, "addressbook"))
-            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = IMPORT_DISPLAY
+            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = display
             method = "MKCOL"
         data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
         try:
@@ -254,7 +255,7 @@ class DavClient:
             if e.status == 405 and self._is_collection(kind, url):
                 return url  # already exists (created in the meantime)
             what = "the calendar" if kind == "caldav" else "the address book"
-            raise DavError(f"creation of {what} '{IMPORT_DISPLAY}' refused by the server "
+            raise DavError(f"creation of {what} '{display}' refused by the server "
                            f"({method} {url} -> {f'HTTP {e.status}' if e.status else e}): create the collection "
                            f"manually or set its URL in the server configuration",
                            temporary=e.temporary, status=e.status) from e
@@ -267,11 +268,46 @@ class DavClient:
             return False
         return bool(entries) and self._is_kind(entries[0][1], kind)
 
-    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT") -> str:
-        """The collection `url` exists (otherwise it is created). Useful if it disappeared after discovery."""
-        if self._is_collection(kind, url):
+    def _probe(self, kind: str, url: str) -> int | None:
+        """None: `url` is a collection of this kind; else the HTTP status of the PROPFIND (0: no answer, 207: an
+        answer that is not such a collection)."""
+        try:
+            entries = self._propfind(url, [(NS_DAV, "resourcetype")], 0)
+        except DavError as e:
+            return e.status or 0
+        return None if entries and self._is_kind(entries[0][1], kind) else 207
+
+    def _listed_name(self, kind: str, url: str) -> str | None:
+        """Display name of `url` when its parent lists it as a collection of this kind (None: not listed)."""
+        target = unquote(_slash(url))
+        parent = target.rstrip("/").rsplit("/", 1)[0] + "/"
+        try:
+            rows = self._propfind(parent, [(NS_DAV, "resourcetype"), (NS_DAV, "displayname")], 1)
+        except DavError:
+            return None
+        for href, props in rows:
+            if unquote(_slash(href)) == target and self._is_kind(props, kind):
+                return (props.get(_q(NS_DAV, "displayname")).text or "").strip() if props.get(
+                    _q(NS_DAV, "displayname")) is not None else ""
+        return None
+
+    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
+        """The collection `url` exists (otherwise it is created, named `display`). A collection the server lists but
+        will not open (MDaemon: "Invalid Path") is never created again over itself: an explicit error instead."""
+        status = self._probe(kind, url)
+        if status is None:
             return url
-        return self._mkcol(kind, _slash(url), component)
+        if status == 0 or status == 429 or status >= 500:
+            raise DavError(f"PROPFIND {url} -> {f'HTTP {status}' if status else 'no answer'}", temporary=True,
+                           status=status or None)
+        listed = self._listed_name(kind, url)
+        if listed is not None:
+            what = "calendar" if kind == "caldav" else "address book"
+            raise DavError(f"the server lists the {what} '{listed or url}' ({url}) but refuses to open it "
+                           f"(PROPFIND -> HTTP {status}): check this {what} on the server (it may be damaged), or set "
+                           f"the {kind.upper()} URL of a working collection in the server configuration",
+                           status=status if status >= 400 else 409)
+        return self._mkcol(kind, _slash(url), component, display)
 
     def _starts(self, kind: str, template_url: str | None, email: str,
                 imap_host: str) -> list[str]:
@@ -318,7 +354,10 @@ class DavClient:
                     imap_host: str) -> list[tuple[str, str, list[str]]]:
         """Every collection of this kind, to read them: [(url, display name, accepted components)]. Empty components:
         the server does not say."""
-        coll, home = self._discover(kind, template_url, email, imap_host, False)
+        return self.collections_at(kind, *self._discover(kind, template_url, email, imap_host, False))
+
+    def collections_at(self, kind: str, coll: str | None, home: str | None) -> list[tuple[str, str, list[str]]]:
+        """As `collections`, from a discovery already made: the collections of `home`, else `coll` alone."""
         if home is None:
             starts = [coll] if coll else []
             rows = [e for s in starts for e in self._propfind(s, [

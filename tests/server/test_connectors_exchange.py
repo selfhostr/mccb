@@ -792,20 +792,47 @@ def test_graph_listing_paging_flags(fake_graph):
 
 
 def test_graph_delta(fake_graph):
+    """Exchange Online refuses $expand on a delta query (HTTP 400 '... initialState'): the round asks for plain fields,
+    the size and the answered state of the changed messages are read one by one."""
     seed_graph(fake_graph)
     src = graph_source()
     inbox = folder_of(src.folders(), "Inbox")
-    first = src.changed_since(inbox, None)
+    first = src.changed_since(inbox, None)  # first delta pass after a full copy: tracking starts, full listing
     assert first.reset and len(first.items) == 3 and "deltatoken=3" in first.cursor
-    fake_graph.add_message("mf-inbox", MIME, id="msg-new", receivedDateTime="2024-03-02T12:00:00Z")
+    assert all(i.size == 321 for i in first.items)
+    props = [{"id": "Integer 0x0e08", "value": "555"}, {"id": "Integer 0x1081", "value": "102"}]
+    fake_graph.add_message("mf-inbox", MIME, id="msg-new", receivedDateTime="2024-03-02T12:00:00Z",
+                           internetMessageId="<new@x.test>", singleValueExtendedProperties=props)
     second = src.changed_since(inbox, first.cursor)
     assert not second.reset and [i.ref for i in second.items] == ["msg-new"]
+    assert second.items[0].size == 555 and "\\Answered" in second.items[0].flags
+    assert fake_graph.delta_calls and not any("$expand" in c for c in fake_graph.delta_calls)
     fake_graph.delta_expired = True  # 410: a full round, said so
     third = src.changed_since(inbox, second.cursor)
-    assert third.reset and len(third.items) == 4
+    assert third.reset and len(third.items) == 4 and third.cursor
     cal = folder_of(src.folders(), "Calendar")
     full = src.changed_since(cal, "ignored")
     assert full.reset and full.cursor is None  # no per-calendar delta
+
+
+def test_graph_delta_many_changes_and_other_kinds(fake_graph, monkeypatch):
+    seed_graph(fake_graph)
+    src = graph_source()
+    folders = src.folders()
+    inbox = folder_of(folders, "Inbox")
+    cur = src.changed_since(inbox, None).cursor
+    monkeypatch.setattr(m365, "DELTA_DETAILS_MAX", 1)
+    for i in range(2):
+        fake_graph.add_message("mf-inbox", MIME, id=f"msg-x{i}", receivedDateTime="2024-03-02T12:00:00Z")
+    many = src.changed_since(inbox, cur)  # too many to read one by one: the normal listing
+    assert many.reset and len(many.items) == 5 and many.cursor
+    contacts = next(f for f in folders if f.kind == CONTACTS and not f.ref)
+    got = src.changed_since(contacts, None)  # no delta for the default contact folder in v1.0
+    assert got.reset and got.cursor is None and len(got.items) == 1
+    tasks = folder_of(folders, "Tasks")
+    t1 = src.changed_since(tasks, None)
+    assert t1.reset and len(t1.items) == 1 and t1.cursor
+    assert src.changed_since(tasks, t1.cursor).items == []
 
 
 def test_graph_event_with_exceptions(fake_graph):
@@ -1425,6 +1452,30 @@ def test_route_graph_to_ews(client, monkeypatch, waits):
     assert cal.find(fx.t("Recurrence")).find(fx.t("RelativeMonthlyRecurrence")) is not None
     rep = client.get(f"/api/jobs/{jid}/report").json()
     assert rep["dav"]["tasks"]["ok"] is True and rep["dav"]["calendar"]["ok"] is True
+
+
+def test_route_graph_final_resync_after_a_full_copy(client, monkeypatch, waits):
+    """The cutover workflow: full copy, then a final resync (delta) with no cursor yet, then another one."""
+    graph, server = fx.FakeGraph(), fx.FakeEws()
+
+    def transport(request):
+        return server(request) if request.url.host == "ews.example.test" else graph(request)
+    monkeypatch.setattr(oauth, "TRANSPORT", httpx.MockTransport(transport))
+    seed_graph(graph)
+    aid = make_account(client)
+    client.put(f"/api/accounts/{aid}/source", json={"kind": "m365_graph", "config": GRAPH_CONFIG, "secrets": {"client_secret": graph.SECRET}})
+    client.put(f"/api/accounts/{aid}/target", json={"kind": "exchange_ews", "config": {**EWS_CONFIG, "auth": "basic"}, "secrets": {"password": "pw"}})
+    jid = start(client, aid)
+    assert run_job(client, jid)["status"] == "done", log_of(client, jid)
+    graph.add_message("mf-inbox", MIME, id="msg-late", receivedDateTime="2024-03-03T12:00:00Z")
+    for n in (4, 5):
+        assert client.post(f"/api/jobs/{jid}/delta").status_code == 200
+        j = run_job(client, jid)
+        assert j["status"] == "done", log_of(client, jid)
+        assert len(server.in_folder("id-inbox")) == n
+        graph.add_message("mf-inbox", MIME, id="msg-later", receivedDateTime="2024-03-04T12:00:00Z")
+    assert "changed since the previous pass" in log_of(client, jid)
+    assert not any("$expand" in c for c in graph.delta_calls)
 
 
 def test_route_source_auth_failure_fails_the_job(client, fake_graph, collect):

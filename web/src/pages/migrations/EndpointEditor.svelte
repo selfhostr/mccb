@@ -28,7 +28,9 @@
 	} from '../../lib/logic/connector.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
+	import { sources } from '../../lib/stores/sources.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
+	import Confirm from '../../lib/ui/Confirm.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
 	import ConnectorForm from './ConnectorForm.svelte';
 
@@ -55,11 +57,16 @@
 	let probeError = $state<string | null>(null);
 	let testing = $state(false);
 	let problem = $state<string | null>(null);
+	// A source read through a tenant: shown read-only. Detaching (after a Confirm) turns it into per-mailbox settings.
+	let detached = $state(false);
+	let confirmDetach = $state(false);
+	const connection = $derived(role === 'source' && !detached ? (stored?.connection ?? null) : null);
+	if (untrack(() => stored?.connection)) void sources.load();
 
 	const options = $derived(kindsFor(connectors.list, role));
 	const def = $derived(findKind(connectors.list, kind)?.[role] ?? null);
 	const sameAsStored = $derived(kind === storedKind);
-	const hasSecret = $derived(sameAsStored && !!stored?.has_secret);
+	const hasSecret = $derived(sameAsStored && !!stored?.has_secret && !stored?.connection);
 
 	function applyKind(next: string) {
 		kind = next;
@@ -85,6 +92,7 @@
 
 	/** What to send: nothing when untouched, or the body; a message when a required field is empty. */
 	export function body(): { skip: true } | { input: EndpointInput } | { problem: string } {
+		if (connection) return { skip: true };
 		if (!kind) return storedKind ? { input: { kind: role === 'source' ? PST_KIND : null } } : { skip: true };
 		if (!dirty && sameAsStored) return { skip: true };
 		const missing = missingNames();
@@ -95,7 +103,7 @@
 		return { input: endpointBody(kind, def, values, drafts) };
 	}
 
-	export const changed = () => (kind ? dirty || !sameAsStored : !!storedKind);
+	export const changed = () => (connection ? false : kind ? dirty || !sameAsStored : !!storedKind);
 
 	async function test() {
 		const missing = missingNames();
@@ -135,6 +143,13 @@
 <!-- Edits bubble up from the inputs: one place marks the side as touched. -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="flex flex-col gap-3" data-testid={`route-${role}`} oninput={edited} onchange={edited} role="group" aria-label={role === 'source' ? m.migrations_route_source() : m.migrations_route_target()}>
+	{#if connection}
+		<div class="flex flex-col gap-2 rounded-card border border-line p-3" data-testid="route-source-linked">
+			<p class="m-0 font-medium">{m.sources_linked({ name: prefs.text(connection.name), mailbox: prefs.email(String(stored?.config?.mailbox ?? '')) })}</p>
+			<p class="m-0 text-xs text-ink-3">{m.sources_linked_hint()}</p>
+			<div><Button onclick={() => (confirmDetach = true)} data-testid="route-source-detach">{m.sources_detach()}</Button></div>
+		</div>
+	{:else}
 	{#if !fixedKind}
 	<label class="flex min-w-0 flex-col gap-1">
 		<span class="font-medium text-ink-2">{role === 'source' ? m.migrations_route_source() : m.migrations_route_target()}</span>
@@ -174,5 +189,23 @@
 		<!-- A kind the catalogue no longer has for this role: shown, not editable. -->
 		<p class="m-0 text-xs text-warning-ink">{m.migrations_route_unknown({ kind })}</p>
 	{/if}
+	{/if}
 	{#if problem}<p class="m-0 text-xs text-warning-ink" role="alert" data-testid={`route-${role}-problem`}>{problem}</p>{/if}
 </div>
+{#if confirmDetach}
+	<Confirm
+		title={m.sources_detach_title()}
+		text={m.sources_detach_text()}
+		confirm={m.sources_detach_confirm()}
+		danger
+		onconfirm={() => {
+			// The tenant's own settings (never its secret) prefill the form: only the client secret is left to type.
+			const shared = stored?.connection ? sources.byId(stored.connection.id)?.config : undefined;
+			if (shared) values = initialValues(def, { ...(stored?.config ?? {}), ...shared });
+			detached = true;
+			dirty = true;
+			onedit?.();
+		}}
+		onclose={() => (confirmDetach = false)}
+	/>
+{/if}
