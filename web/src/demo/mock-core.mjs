@@ -1185,17 +1185,27 @@ function tenantSecrets(current, given) {
 	return secrets;
 }
 
-function matchAccount(a) {
-	return { id: a.id, email: a.email, status: a.status, last_test: a.last_test, last_test_result: a.last_test_result, source_kind: a.source?.kind ?? (a.pst_id ? 'pst' : null), source_connection_id: a.source?.connection?.id ?? null };
+function matchAccount(a, conn) {
+	const free = a.source?.connection?.id === conn.id || (!a.source?.kind && !(a.pst_id && state.psts.get(a.pst_id)?.status === 'valid'));
+	return { id: a.id, email: a.email, status: a.status, last_test: a.last_test, last_test_result: a.last_test_result, source_kind: a.source?.kind ?? (a.pst_id ? 'pst' : null), source_connection_id: a.source?.connection?.id ?? null, free };
 }
 
 /** Pure matching, same states as app/server/tenant_match.py. */
 function tenantMatch(conn, server) {
 	const { mailboxes, hidden } = tenantDirectory();
 	const accounts = [...state.accounts.values()].filter((a) => a.server_id === server.id);
-	const byEmail = new Map(accounts.map((a) => [a.email.toLowerCase(), a]));
+	// An account linked to this tenant keeps the mailbox it reads, whatever its address (a destination chosen by hand).
+	const pinned = new Map();
+	for (const a of [...accounts].sort((x, y) => x.id - y.id)) {
+		const value = a.source?.connection?.id === conn.id ? String(a.source.config?.mailbox ?? '').toLowerCase() : '';
+		const mb = value && mailboxes.find((x) => [x.id, x.mail, x.upn].some((v) => v && v.toLowerCase() === value));
+		if (mb && !pinned.has(mb)) pinned.set(mb, a);
+	}
+	const taken = new Set([...pinned.values()].map((a) => a.id));
+	const byEmail = new Map(accounts.filter((a) => !taken.has(a.id)).map((a) => [a.email.toLowerCase(), a]));
 	const claims = new Map();
 	for (const mb of mailboxes) {
+		if (pinned.has(mb)) continue;
 		const keys = [[mb.mail, 'mail'], [mb.upn, 'upn'], ...mb.aliases.map((x) => [x, 'alias'])];
 		const hit = keys.find(([addr]) => byEmail.has(addr.toLowerCase()));
 		if (!hit) continue;
@@ -1217,6 +1227,15 @@ function tenantMatch(conn, server) {
 	const rows = [];
 	const used = new Set();
 	for (const mb of mailboxes) {
+		const pin = pinned.get(mb);
+		if (pin) {
+			const email = pin.email.toLowerCase();
+			const by = (mb.mail ?? '').toLowerCase() === email ? 'mail' : (mb.upn ?? '').toLowerCase() === email ? 'upn' : (mb.aliases ?? []).some((x) => x.toLowerCase() === email) ? 'alias' : 'manual';
+			const job = lastJob(pin);
+			const st = by !== 'manual' || job ? 'linked' : 'ready';
+			rows.push({ state: st, mailbox: mb, account: matchAccount(pin, conn), matched_by: by, matched_address: by === 'upn' || by === 'alias' ? email : null, coverage: coverage(pin), last_job: st === 'linked' ? job : null });
+			continue;
+		}
 		const found = [...claims.entries()].find(([, list]) => list.some((c) => c.mb === mb));
 		if (!found) {
 			rows.push({ state: 'no_target', mailbox: mb, account: null, matched_by: null, matched_address: null, coverage: { mail: 'unknown', calendar: 'unknown', contacts: 'unknown', tasks: 'unknown' }, last_job: null });
@@ -1226,7 +1245,7 @@ function tenantMatch(conn, server) {
 		const list = found[1];
 		const mine = list.find((c) => c.mb === mb);
 		const winner = [...list].sort((x, y) => (x.by === 'mail' ? 0 : 1) - (y.by === 'mail' ? 0 : 1))[0];
-		const view = matchAccount(account);
+		const view = matchAccount(account, conn);
 		let st;
 		if (list.length > 1 && winner.mb !== mb) st = 'conflict';
 		else if (account.source?.connection?.id === conn.id) st = 'linked';
@@ -1235,7 +1254,7 @@ function tenantMatch(conn, server) {
 		if (st !== 'conflict') used.add(account.id);
 		rows.push({ state: st, mailbox: mb, account: view, matched_by: mine.by, matched_address: mine.by === 'mail' ? null : account.email.toLowerCase(), ...(st === 'conflict' ? { conflict_with: winner.mb.mail } : {}), coverage: coverage(account), last_job: st === 'linked' ? lastJob(account) : null });
 	}
-	for (const a of accounts) if (!claims.has(a.id)) rows.push({ state: 'no_source', mailbox: null, account: matchAccount(a), matched_by: null, matched_address: null, coverage: coverage(a), last_job: null });
+	for (const a of accounts) if (!claims.has(a.id) && !taken.has(a.id)) rows.push({ state: 'no_source', mailbox: null, account: matchAccount(a, conn), matched_by: null, matched_address: null, coverage: coverage(a), last_job: null });
 	const counts = {};
 	for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
 	const t = server.last_test_result;
@@ -1277,6 +1296,21 @@ function startFlow(extra) {
 	state.flows.set(flow.id, flow);
 	state.provisionCalls.push({ ...extra });
 	return send(201, { flow_id: flow.id, user_code: 'ABCD-EFGH', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 2, message: 'To sign in, open https://microsoft.com/devicelogin and enter the code ABCD-EFGH.' });
+}
+
+/** Two stored `mailbox` values naming the same tenant mailbox (its id, address or sign-in name). */
+function sameMailbox(a, b) {
+	const names = (v) => {
+		const key = String(v ?? '').toLowerCase();
+		const mb = tenantDirectory().mailboxes.find((x) => [x.id, x.mail, x.upn].some((n) => n && n.toLowerCase() === key));
+		return mb ? mb.id : key;
+	};
+	return names(a) === names(b);
+}
+
+function mailboxName(v) {
+	const key = String(v ?? '').toLowerCase();
+	return tenantDirectory().mailboxes.find((x) => [x.id, x.mail, x.upn].some((n) => n && n.toLowerCase() === key))?.mail ?? String(v);
 }
 
 function handleTenants(parts, m, json, query) {
@@ -1364,7 +1398,15 @@ function handleTenants(parts, m, json, query) {
 			const account = state.accounts.get(Number(l.account_id));
 			if (!account || account.server_id !== server.id) errors.push({ account_id: l.account_id, msg: 'not a mailbox of this server' });
 			else if ([...state.jobs.values()].some((j) => j.account_id === account.id && ['queued', 'running', 'paused', 'stopping'].includes(j.status))) errors.push({ account_id: account.id, msg: 'a job is active for this mailbox' });
+			else if (account.source?.connection?.id === conn.id && !sameMailbox(account.source.config?.mailbox, l.mailbox_id)) errors.push({ account_id: account.id, msg: `already the destination of ${mailboxName(account.source.config?.mailbox)}: set that one back to automatic first` });
+			else if (l.manual && account.source?.connection?.id !== conn.id && (account.source?.kind || (account.pst_id && state.psts.get(account.pst_id)?.status === 'valid'))) errors.push({ account_id: account.id, msg: 'the mailbox has another source' });
 			else {
+				if (l.manual)
+					for (const other of state.accounts.values())
+						if (other.id !== account.id && other.server_id === server.id && other.source?.connection?.id === conn.id && sameMailbox(other.source.config?.mailbox, l.mailbox_id)) {
+							other.source = undefined;
+							publish('account', accountView(other));
+						}
 				account.source = { kind: 'm365_graph', config: { mailbox: l.mailbox_id, include_tasks }, has_secret: false, connection: { id: conn.id, name: conn.name } };
 				account.srcSecrets = {};
 				account.pst_id = null;

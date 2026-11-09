@@ -1,13 +1,18 @@
 """Pairs the mailboxes of a Microsoft 365 tenant with the accounts of a target server. Pure: no database, no network.
 
 Keys are the account addresses, lower-cased. A mailbox matches by primary address, then user principal name, then
-alias. An account wanted by two mailboxes goes to the stronger match; a tie, or the weaker one, is a conflict."""
+alias. An account wanted by two mailboxes goes to the stronger match; a tie, or the weaker one, is a conflict.
+
+An account already linked to the connection keeps the mailbox it reads (`source_mailbox`), whatever its address: that
+is how a destination chosen by hand lasts. Such a pair is `matched_by: "manual"` when no address of the mailbox is the
+account's, and stays `ready` until a job has run for it."""
 from __future__ import annotations
 
 from typing import Any
 
 STATES = ("ready", "linked", "no_target", "no_source", "other_source", "conflict")  # display order
 RANK = {"mail": 0, "upn": 1, "alias": 2}
+BY = ("mail", "upn", "alias")
 RESOURCES = ("room", "equipment")
 
 
@@ -53,21 +58,27 @@ def coverage(acct: dict, server: dict, tasks_granted: bool) -> dict:
 def match(mailboxes: list[dict], accounts: list[dict], connection_id: int, server: dict | None = None,
           tasks_granted: bool = True, tenant_id: str | None = None) -> dict:
     """mailboxes: the listing of the tenant. accounts: those of the chosen server, as dicts {id, email, source_kind,
-    source_connection_id, source_tenant_id?, pst_valid, opt_mail, opt_calendar, opt_contacts, last_test_result, job}.
-    server: {dav_enabled, caldav_ok, carddav_ok}. Returns {rows, counts}."""
+    source_connection_id, source_mailbox?, source_tenant_id?, pst_valid, opt_mail, opt_calendar, opt_contacts,
+    last_test_result, job}. server: {dav_enabled, caldav_ok, carddav_ok}. Returns {rows, counts}."""
     server = server or {}
-    by_email = {str(a["email"]).lower(): a for a in accounts}
+    pinned = _pinned(mailboxes, accounts, connection_id)  # mailbox index -> the account linked to it
+    taken = {a["id"] for a in pinned.values()}
+    by_email = {str(a["email"]).lower(): a for a in accounts if a["id"] not in taken}
     wanted: dict[int, list[tuple[int, int, str]]] = {}   # account id -> [(rank, mailbox index, alias used)]
     for i, mb in enumerate(mailboxes):
+        if i in pinned:
+            continue
         for rank, addr in _addresses(mb):
             a = by_email.get(addr)
             if a is not None:
                 wanted.setdefault(a["id"], []).append((rank, i, addr))
                 break
     rows: list[dict] = []
-    claimed: set[int] = set()
-    matched: dict[int, tuple[dict, str, str]] = {}
+    claimed: set[int] = set(taken)
     for i, mb in enumerate(mailboxes):
+        if i in pinned:
+            rows.append(_pinned_row(mb, pinned[i], server, tasks_granted))
+            continue
         hit = next(((rank, addr, by_email[addr]) for rank, addr in _addresses(mb) if addr in by_email), None)
         if hit is None:
             rows.append(_row("no_target", mb, None, None, server, tasks_granted))
@@ -76,7 +87,7 @@ def match(mailboxes: list[dict], accounts: list[dict], connection_id: int, serve
         claimed.add(acct["id"])
         best = sorted(wanted[acct["id"]])
         winner = best[0][1] if len(best) == 1 or best[0][0] < best[1][0] else None
-        by = ("mail", "upn", "alias")[rank]
+        by = BY[rank]
         if winner != i:
             rows.append(_row("conflict", mb, acct, by, server, tasks_granted))
             continue
@@ -95,6 +106,35 @@ def match(mailboxes: list[dict], accounts: list[dict], connection_id: int, serve
     for r in rows:
         counts[r["state"]] += 1
     return {"rows": rows, "counts": counts}
+
+
+def names_of(mb: dict) -> set[str]:
+    """What a stored `mailbox` value may be for this mailbox: its id, primary address or UPN, lower-cased."""
+    return {str(v).lower() for v in (mb.get("id"), mb.get("mail"), mb.get("upn")) if v}
+
+
+def _pinned(mailboxes: list[dict], accounts: list[dict], connection_id: int) -> dict[int, dict]:
+    index: dict[str, int] = {}
+    for i, mb in enumerate(mailboxes):
+        for name in names_of(mb):
+            index.setdefault(name, i)
+    out: dict[int, dict] = {}
+    for a in sorted(accounts, key=lambda x: x["id"]):
+        value = a.get("source_mailbox")
+        if a.get("source_connection_id") != connection_id or not value:
+            continue
+        i = index.get(str(value).lower())
+        if i is not None and i not in out:  # two accounts on one mailbox (old data): the first keeps it
+            out[i] = a
+    return out
+
+
+def _pinned_row(mb: dict, acct: dict, server: dict, tasks_granted: bool) -> dict:
+    email = str(acct["email"]).lower()
+    rank = next((r for r, addr in _addresses(mb) if addr == email), None)
+    if rank is None:
+        return _row("linked" if acct.get("job") else "ready", mb, acct, "manual", server, tasks_granted)
+    return _row("linked", mb, acct, BY[rank], server, tasks_granted, email if rank == 2 else None)
 
 
 def _addresses(mb: dict) -> list[tuple[int, str]]:

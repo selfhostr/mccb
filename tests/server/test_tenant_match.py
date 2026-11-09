@@ -100,3 +100,34 @@ def test_rooms_not_preticked_and_stable_order():
 def test_no_coverage_without_pair():
     res = run([mb("a", "a@x.test")], [acct(1, "b@x.test")])
     assert all(r["coverage"] is None for r in res["rows"])
+
+
+def test_a_linked_account_keeps_its_mailbox_whatever_its_address():
+    # test@y.test was chosen by hand for a: a no longer goes to a@x.test, which is left without source
+    res = run([mb("a", "a@x.test"), mb("b", "b@x.test")],
+              [acct(1, "a@x.test"), acct(2, "test@y.test", source_connection_id=7, source_kind="m365_graph",
+                                         source_mailbox="A")])
+    got = {(r["mailbox"] or {}).get("id") or r["account_email"]: r for r in res["rows"]}
+    assert (got["a"]["state"], got["a"]["matched_by"], got["a"]["account_id"]) == ("ready", "manual", 2)
+    assert got["a"]["ticked"] and got["a"]["coverage"]["mail"] == "on"
+    assert got["a@x.test"]["state"] == "no_source" and got["b"]["state"] == "no_target"
+    assert res["counts"]["ready"] == 1 and res["counts"]["no_source"] == 1
+    # once a job ran: linked
+    res = run([mb("a", "a@x.test")], [acct(2, "test@y.test", source_connection_id=7, source_kind="m365_graph",
+                                           source_mailbox="a@x.test", job={"id": 1, "status": "done"})])
+    assert [(r["state"], r["matched_by"]) for r in res["rows"]] == [("linked", "manual")]
+
+
+def test_a_linked_account_on_its_own_address_is_linked_as_before():
+    res = run([mb("a", "a@x.test", upn="a@corp.test"), mb("b", "b@x.test", aliases=["a@x.test"])],
+              [acct(1, "a@x.test", source_connection_id=7, source_kind="m365_graph", source_mailbox="a")])
+    got = {r["mailbox"]["id"]: r for r in res["rows"]}
+    assert (got["a"]["state"], got["a"]["matched_by"]) == ("linked", "mail")
+    assert got["b"]["state"] == "no_target"  # pinned: the alias of b no longer makes a conflict
+    # linked to another tenant, or to a mailbox gone from the listing: matched by address as before
+    res = run([mb("a", "a@x.test")], [acct(1, "a@x.test", source_connection_id=8, source_kind="m365_graph",
+                                           source_mailbox="zz")])
+    assert res["rows"][0]["state"] == "other_source"
+    res = run([mb("a", "a@x.test")], [acct(1, "a@x.test", source_connection_id=7, source_kind="m365_graph",
+                                           source_mailbox="gone")])
+    assert (res["rows"][0]["state"], res["rows"][0]["matched_by"]) == ("linked", "mail")

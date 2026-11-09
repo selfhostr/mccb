@@ -341,6 +341,86 @@ test.describe('Microsoft 365 tenants', () => {
 		expect(servers.find((x: { name: string }) => x.name === 'Yety').dav_enabled).toBe(true);
 	});
 
+	test('choose a destination by hand: it lasts after a reload, then goes back to automatic', async ({ page }) => {
+		await ready(page, MATCH);
+		const jules = pair(page, 'jules.moreau@contoso.example');
+		await expect(jules).toHaveAttribute('data-state', 'no_target');
+		await jules.getByTestId('tenant-pick').click();
+		const dialog = page.getByTestId('tenant-pick-dialog');
+		const option = (email: string) => dialog.locator(`[data-testid="tenant-pick-option"][data-email="${email}"]`);
+		// Boxes another mailbox receives are shown, not offered.
+		await expect(option('camille.dupont@contoso.example')).toHaveAttribute('data-blocked', 'taken');
+		await expect(option('camille.dupont@contoso.example').getByRole('radio')).toBeDisabled();
+		await dialog.getByTestId('tenant-pick-q').fill('stagiaire');
+		await expect(dialog.getByTestId('tenant-pick-option')).toHaveCount(1);
+		await option('stagiaire@contoso.example').click();
+		await page.getByTestId('tenant-pick-confirm').click();
+		await expect(dialog).toHaveCount(0);
+
+		await expect(jules).toHaveAttribute('data-account', 'stagiaire@contoso.example');
+		await expect(jules).toHaveAttribute('data-state', 'ready');
+		await expect(jules.getByTestId('tenant-manual')).toBeVisible();
+		await expect(jules.getByTestId('tenant-tick')).toBeChecked();
+		await expect(chip(page, 'no_target')).toHaveText(/0/);
+		await expect(chip(page, 'no_source')).toHaveText(/1/);
+		const { linkCalls } = await state(page);
+		expect(linkCalls.at(-1)).toMatchObject({ server_id: 3, links: [{ manual: true }] });
+		expect(linkCalls.at(-1).start).toBeFalsy();
+
+		await page.reload();
+		await expect(jules).toHaveAttribute('data-account', 'stagiaire@contoso.example');
+		await expect(jules.getByTestId('tenant-manual')).toBeVisible();
+
+		await jules.getByTestId('tenant-pick-reset').click();
+		await expect(jules).toHaveAttribute('data-state', 'no_target');
+		await expect(page.locator('[data-testid="tenant-row"][data-account="stagiaire@contoso.example"]')).toHaveAttribute('data-state', 'no_source');
+	});
+
+	test('phone: a new box typed in the picker becomes the destination', async ({ page }) => {
+		await page.setViewportSize({ width: 390, height: 800 });
+		await ready(page, MATCH);
+		const camille = pair(page, 'camille.dupont@contoso.example');
+		await camille.getByTestId('tenant-pick').click();
+		const dialog = page.getByTestId('tenant-pick-dialog');
+		await dialog.getByTestId('tenant-pick-q').fill('test@yety.ch');
+		await dialog.getByTestId('tenant-pick-new').click();
+		await expect(dialog.getByTestId('tenant-pick-email')).toHaveValue('test@yety.ch');
+		await dialog.getByTestId('tenant-pick-password').fill('pw-test');
+		await noOverflow(page);
+		await page.getByTestId('tenant-pick-confirm').click();
+		await expect(dialog).toHaveCount(0);
+		await expect(camille).toHaveAttribute('data-account', 'test@yety.ch');
+		await expect(camille.getByTestId('tenant-manual')).toBeVisible();
+		await expect(page.locator('[data-testid="tenant-row"][data-account="camille.dupont@contoso.example"]')).toHaveAttribute('data-state', 'no_source');
+		const accounts = await (await page.request.get('/api/accounts?server_id=3')).json();
+		expect(accounts.some((a: { email: string }) => a.email === 'test@yety.ch')).toBe(true);
+		await noOverflow(page);
+	});
+
+	test('one box, one mailbox: the destination of another mailbox is refused', async ({ page }) => {
+		await ready(page, MATCH);
+		await pair(page, 'jules.moreau@contoso.example').getByTestId('tenant-pick').click();
+		const dialog = page.getByTestId('tenant-pick-dialog');
+		const hugo = dialog.locator('[data-testid="tenant-pick-option"][data-email="hugo.martin@contoso.example"]');
+		await expect(hugo).toContainText('Already the destination of hugo.martin@contoso.example');
+		await expect(hugo.getByRole('radio')).toBeDisabled();
+		// Typed by hand, the same box is refused too, in words.
+		await dialog.getByTestId('tenant-pick-new').click();
+		await dialog.getByTestId('tenant-pick-email').fill('Hugo.Martin@contoso.example');
+		await dialog.getByTestId('tenant-pick-password').fill('pw');
+		await page.getByTestId('tenant-pick-confirm').click();
+		await expect(dialog.getByRole('alert')).toContainText('already in the list');
+		await expect(dialog).toBeVisible();
+		// The API refuses it as well: a linked box keeps its mailbox.
+		const accounts = await (await page.request.get('/api/accounts?server_id=3')).json();
+		const id = accounts.find((a: { email: string }) => a.email === 'hugo.martin@contoso.example').id;
+		const match = await (await page.request.get('/api/source-connections/1/match?server_id=3')).json();
+		const jules = match.rows.find((r: { mailbox: { mail: string } | null }) => r.mailbox?.mail === 'jules.moreau@contoso.example').mailbox.id;
+		const res = await page.request.post('/api/source-connections/1/link', { data: { server_id: 3, links: [{ account_id: id, mailbox_id: jules, manual: true }] } });
+		expect(res.status()).toBe(409);
+		expect(JSON.stringify(await res.json())).toContain('already the destination of hugo.martin@contoso.example');
+	});
+
 	test('phone: no horizontal scroll', async ({ page }) => {
 		await page.setViewportSize({ width: 375, height: 800 });
 		await ready(page, MATCH);

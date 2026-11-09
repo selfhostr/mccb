@@ -674,12 +674,15 @@ export interface MatchAccount {
 	source_kind: string | null;
 	/** Set when the account is already read through a source connection. */
 	source_connection_id: number | null;
+	/** No source of its own worth keeping, or already read through this tenant: it can be chosen as a destination. */
+	free?: boolean;
 }
 
 /**
  * One row of the matching screen, one pair (or one lone side).
  * - mailbox is null only for 'no_source', account is null only for 'no_target';
- * - matched_by and matched_address say how the pair was made ('alias' shows "via alias x");
+ * - matched_by and matched_address say how the pair was made ('alias' shows "via alias x", 'manual': the destination
+ *   was chosen by hand, the account is linked to this mailbox whatever its address);
  * - conflict_with: for 'conflict', the address of the tenant mailbox that won the account;
  * - last_job: the account's latest job (linked rows show it), null when none.
  */
@@ -687,7 +690,7 @@ export interface MatchRow {
 	state: MatchState;
 	mailbox: TenantMailbox | null;
 	account: MatchAccount | null;
-	matched_by: 'mail' | 'upn' | 'alias' | null;
+	matched_by: 'mail' | 'upn' | 'alias' | 'manual' | null;
 	matched_address: string | null;
 	conflict_with?: string | null;
 	coverage: Coverage;
@@ -707,7 +710,8 @@ export interface MatchResponse {
 
 export interface LinkInput {
 	server_id: number;
-	links: { account_id: number; mailbox_id: string }[];
+	/** manual: a destination chosen by hand (any other box of the server linked to this mailbox lets it go). */
+	links: { account_id: number; mailbox_id: string; manual?: boolean }[];
 	include_tasks?: boolean;
 	start?: boolean;
 	mode?: 'full' | 'delta';

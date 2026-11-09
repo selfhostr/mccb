@@ -2,7 +2,7 @@
  * Matching screen (Microsoft 365 tenant -> server), the pure part: filters, counters, ticks, what a start covers.
  * Rows come from the server (GET /source-connections/{id}/match); nothing here decides a match.
  */
-import type { CoverageState, MatchRow, MatchState, TenantMailbox } from '../api/types.ts';
+import type { CoverageState, MatchAccount, MatchRow, MatchState, TenantMailbox } from '../api/types.ts';
 
 export type CoverageKind = 'mail' | 'calendar' | 'contacts' | 'tasks';
 export const COVERAGE_KINDS: readonly CoverageKind[] = ['mail', 'calendar', 'contacts', 'tasks'];
@@ -202,4 +202,57 @@ export function bestServer(servers: readonly { id: number }[], accounts: Iterabl
 		}
 	}
 	return best;
+}
+
+/** The destination was chosen by hand: it can go back to the match by address. */
+export function isManual(row: Pick<MatchRow, 'matched_by' | 'mailbox' | 'account'>): boolean {
+	return row.matched_by === 'manual' && !!row.mailbox && !!row.account;
+}
+
+/**
+ * Why a box of the server cannot be chosen for a mailbox: it is already its destination ('current'), it is the
+ * destination of another mailbox ('taken'), or it has a source of its own ('other_source'). null: it can.
+ */
+export type PickBlock = 'current' | 'taken' | 'other_source' | null;
+
+export interface PickChoice {
+	account: MatchAccount;
+	block: PickBlock;
+	/** For 'taken': the address of the mailbox it receives. */
+	takenBy: string | null;
+}
+
+const BLOCK_RANK: Record<string, number> = { current: 0, taken: 1, other_source: 2, null: 3 };
+
+/**
+ * Every box of the server, once, for the destination picker of one mailbox: the ones that can be chosen first,
+ * then by address. A box two mailboxes compete for (conflict) can be chosen: that settles it.
+ */
+export function pickChoices(rows: readonly MatchRow[], mailboxId: string): PickChoice[] {
+	const byAccount = new Map<number, PickChoice>();
+	for (const r of rows) {
+		if (!r.account) continue;
+		let block: PickBlock = null;
+		let takenBy: string | null = null;
+		if (r.mailbox && r.mailbox.id === mailboxId) block = 'current';
+		else if (r.mailbox && r.state === 'other_source') block = 'other_source';
+		else if (r.mailbox && r.state !== 'conflict') {
+			block = 'taken';
+			takenBy = r.mailbox.mail || r.mailbox.upn;
+		} else if (r.account.free === false) block = 'other_source';
+		const seen = byAccount.get(r.account.id);
+		if (!seen || BLOCK_RANK[String(block)] < BLOCK_RANK[String(seen.block)]) byAccount.set(r.account.id, { account: r.account, block, takenBy });
+	}
+	return [...byAccount.values()].sort((a, b) => Number(a.block !== null) - Number(b.block !== null) || a.account.email.localeCompare(b.account.email));
+}
+
+export function searchChoices(choices: readonly PickChoice[], q: string): PickChoice[] {
+	const needle = q.trim().toLowerCase();
+	return needle ? choices.filter((c) => c.account.email.toLowerCase().includes(needle)) : [...choices];
+}
+
+/** The choice already holding this address, if any (a new box typed by hand must not exist twice). */
+export function choiceFor(choices: readonly PickChoice[], email: string): PickChoice | undefined {
+	const needle = email.trim().toLowerCase();
+	return choices.find((c) => c.account.email.toLowerCase() === needle);
 }

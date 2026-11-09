@@ -17,8 +17,8 @@
 	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
 	import { onMount, untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
-	import { ApiError, errorText } from '../../lib/api/client.ts';
-	import type { LinkResponse, MatchResponse, MatchRow as MatchRowT, MatchState } from '../../lib/api/types.ts';
+	import { ApiError, errorText, put } from '../../lib/api/client.ts';
+	import type { Account, LinkResponse, MatchResponse, MatchRow as MatchRowT, MatchState } from '../../lib/api/types.ts';
 	import {
 		STATE_ORDER,
 		baseRows,
@@ -54,6 +54,7 @@
 	import Toggle from '../../lib/ui/Toggle.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import MatchRow from './MatchRow.svelte';
+	import PickDialog from './PickDialog.svelte';
 	import StartDialog from './StartDialog.svelte';
 	import TenantBar from './TenantBar.svelte';
 	import { COVERAGE_STATES, chipLabel, coverageLook, kindName, matchLook } from './looks.ts';
@@ -75,6 +76,9 @@
 	let ticked = $state.raw<Set<string>>(new Set());
 	let dialog = $state<'full' | 'delta' | null>(null);
 	let testIds = $state.raw<number[]>([]);
+	// The row whose destination is being chosen by hand, and the one going back to automatic.
+	let picking = $state.raw<MatchRowT | null>(null);
+	let resetting = $state<number | null>(null);
 	// Why the last Start left some mailboxes out (account id -> message), shown on their rows.
 	let linkErrors = $state.raw<Map<number, string>>(new Map());
 	const BATCH_MAX = 120; // as the API accepts
@@ -115,15 +119,15 @@
 	});
 
 	// No server in the address: take the one that holds most of the tenant's addresses, and say so in the URL.
-	let picking = false;
+	let choosingServer = false;
 	$effect(() => {
 		if (serverId || !tenantId || data.loading || !data.servers.length) return;
 		untrack(pickServer);
 	});
 
 	async function pickServer() {
-		if (picking) return;
-		picking = true;
+		if (choosingServer) return;
+		choosingServer = true;
 		const id = tenantId;
 		try {
 			let best = data.servers[0].id;
@@ -137,7 +141,7 @@
 			}
 			if (router.route.page === 'tenant' && router.route.tenantId === id && !Number(router.params.get('server'))) router.setParams({ server: String(best) });
 		} finally {
-			picking = false;
+			choosingServer = false;
 		}
 	}
 
@@ -195,6 +199,26 @@
 		const ids = targets.map((r) => r.account!.id);
 		data.test(ids);
 		testIds = ids;
+	}
+
+	async function picked(row: MatchRowT, email: string) {
+		await load(false);
+		toast(m.tenant_pick_done({ mailbox: prefs.email(row.mailbox?.mail ?? ''), email: prefs.email(email) }), 'signal');
+	}
+
+	/** Back to automatic: the box lets the mailbox go (as before the choice), the match by address comes back. */
+	async function reset(row: MatchRowT) {
+		if (!row.account) return;
+		resetting = row.account.id;
+		try {
+			data.upsertAccount(await put<Account>(`/accounts/${row.account.id}/source`, {}));
+			await load(false);
+			toast(m.tenant_pick_reset_done({ mailbox: prefs.email(row.mailbox?.mail ?? '') }), 'signal');
+		} catch (err) {
+			toast(errorText(err), 'warning', 9000);
+		} finally {
+			resetting = null;
+		}
 	}
 
 	function batchName(mode: 'full' | 'delta'): string {
@@ -384,7 +408,16 @@
 					<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" aria-label={m.tenant_list_label()} data-testid="tenant-list">
 						{#each visible as row (rowKey(row))}
 							{@const key = rowKey(row)}
-							<MatchRow {row} server={serverName} ticked={ticked.has(key)} problem={row.account ? linkErrors.get(row.account.id) : undefined} ontoggle={(on) => toggle(key, on)} />
+							<MatchRow
+								{row}
+								server={serverName}
+								ticked={ticked.has(key)}
+								problem={row.account ? linkErrors.get(row.account.id) : undefined}
+								ontoggle={(on) => toggle(key, on)}
+								onpick={row.mailbox ? () => (picking = row) : undefined}
+								onreset={() => reset(row)}
+								resetting={resetting != null && resetting === row.account?.id}
+							/>
 						{/each}
 					</ul>
 				{:else}
@@ -429,6 +462,11 @@
 		onstart={() => (dialog = 'full')}
 		onshowHidden={showAll}
 	/>
+{/if}
+
+{#if picking && result && serverId}
+	{@const row = picking}
+	<PickDialog {row} rows={result.rows} {tenantId} {serverId} server={serverName} ondone={(_id, email) => picked(row, email)} onclose={() => (picking = null)} />
 {/if}
 
 {#if dialog && result}

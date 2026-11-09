@@ -6,6 +6,7 @@
 - Microsoft 365 tenant as a source connection: one credential for many mailboxes, registered in Settings, Servers. See [Exchange](docs/exchange.md#migrate-a-microsoft-365-tenant).
 - Listing of the mailboxes of a tenant, with their type (user, shared, room, equipment).
 - Matching screen between the tenant and a target server: a state per mailbox (ready, linked, not on the server, no Microsoft 365 mailbox, other source, conflict), the coverage of mail, calendar, contacts and tasks for each, batch start and final resync from the same screen.
+- On the matching screen, the destination of a tenant mailbox can be chosen by hand: another account of the server, or a new one typed with its password. The choice is kept until set back to automatic.
 - The Test of a tenant names the missing permissions, required or optional.
 - Mailboxes are linked by Entra object ID, so the final resync survives the removal of the domain from the tenant.
 - API routes `/api/source-connections`.

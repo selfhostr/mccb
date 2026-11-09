@@ -50,6 +50,8 @@ class ProvisionIn(BaseModel):
 class LinkItem(BaseModel):
     account_id: int
     mailbox_id: str = Field(..., min_length=1, max_length=200)
+    # A destination chosen by hand: any other account of the server linked to this mailbox lets it go.
+    manual: bool = False
 
 
 class LinkIn(BaseModel):
@@ -177,6 +179,7 @@ def _account_dict(a) -> dict:
     return {"id": a["id"], "email": a["email"], "status": a["status"], "last_test": a["last_test"],
             "last_test_result": db.jload(a["last_test_result"], None), "source_kind": kind,
             "source_connection_id": a["source_connection_id"],
+            "source_mailbox": own.get("mailbox") if a["source_connection_id"] else None,
             "source_tenant_id": own.get("tenant_id") if a["source_kind"] and not a["source_connection_id"] else None,
             "pst_valid": _pst_valid(a) if kind in (wiring.PST, wiring.FILES) else False,
             "opt_mail": bool(a["opt_mail"]), "opt_calendar": bool(a["opt_calendar"]),
@@ -203,7 +206,9 @@ def _match(r, server, listing: dict) -> dict:
         acct = by_id.get(row["account_id"])
         by = row["matched_by"]
         out = {"state": row["state"], "mailbox": row["mailbox"],
-               "account": {k: acct[k] for k in ACCOUNT_KEYS} if acct else None,
+               "account": {**{k: acct[k] for k in ACCOUNT_KEYS},
+                           "free": acct["source_connection_id"] == r["id"] or tenant_match._free(acct, r["id"], tenant)}
+               if acct else None,
                "matched_by": by,
                "matched_address": str(acct["email"]).lower() if acct and by in ("upn", "alias") else None,
                "coverage": row["coverage"] or (tenant_match.coverage(acct, info, tasks) if acct else dict(UNKNOWN)),
@@ -328,11 +333,41 @@ def match(cid: int, server_id: int | None = None, refresh: int = 0):
     return best[1]
 
 
+def _names(r, mailbox_id: str) -> tuple[set[str], str]:
+    """Every value naming this tenant mailbox (id, address, UPN) and the address to show, from the listing."""
+    try:
+        listing = _mailboxes(r, False)
+    except HTTPException:
+        listing = {"mailboxes": []}
+    key = mailbox_id.lower()
+    for mb in listing.get("mailboxes") or []:
+        names = tenant_match.names_of(mb)
+        if key in names:
+            return names, str(mb.get("mail") or mb.get("upn") or mailbox_id)
+    return {key}, mailbox_id
+
+
+def _mailbox_of(a) -> str:
+    return str((db.jload(a["source_config"], {}) or {}).get("mailbox") or "")
+
+
 def _link_one(r, spec, server_id: int, item: LinkItem, include_tasks: bool | None) -> str | None:
-    """Links one account (None) or says why not. One transaction: the active job check and the update."""
+    """Links one account (None) or says why not. One transaction: the active job check and the update.
+    An account linked to another mailbox of the tenant is refused; a manual link frees the mailbox from the other
+    accounts of the server linked to it."""
     conn_config = db.jload(r["config"], {}) or {}
+    names: set[str] = {item.mailbox_id.lower()}
+    shown = item.mailbox_id
+    before = db.q1("SELECT source_config, source_connection_id FROM accounts WHERE id=?", (item.account_id,))
+    if item.manual or (before is not None and before["source_connection_id"] == r["id"]
+                       and _mailbox_of(before).lower() not in ("", item.mailbox_id.lower())):
+        names, shown = _names(r, item.mailbox_id)
+    if before is not None and before["source_connection_id"] == r["id"] and _mailbox_of(before) \
+            and _mailbox_of(before).lower() not in names:
+        return f"already the destination of {_names(r, _mailbox_of(before))[1]}: set that one back to automatic first"
     tenant = str(conn_config.get("tenant_id") or "").lower()
     mailbox_names = {f.name for f in registry.split_fields(spec.source, "mailbox")}
+    freed: list[int] = []
     with db.tx() as c:
         a = c.execute("SELECT * FROM accounts WHERE id=?", (item.account_id,)).fetchone()
         if a is None or a["server_id"] != server_id:
@@ -340,10 +375,14 @@ def _link_one(r, spec, server_id: int, item: LinkItem, include_tasks: bool | Non
         if c.execute(f"SELECT id FROM jobs WHERE account_id=? AND status IN {ACTIVE}", (a["id"],)).fetchone():
             return "a job is active for this mailbox"
         own = db.jload(a["source_config"], {}) or {}
+        if a["source_connection_id"] == r["id"] and own.get("mailbox") and str(own["mailbox"]).lower() not in names:
+            return "already the destination of another mailbox of this tenant"
         if a["source_connection_id"] == r["id"] and a["source_kind"] == r["kind"]:
             keep = own  # already linked: same mailbox value, same namespace (idempotent)
         elif (a["source_kind"] == r["kind"] and not a["source_connection_id"]
               and str(own.get("tenant_id") or "").lower() == tenant and tenant):
+            if item.manual and own.get("mailbox") and str(own["mailbox"]).lower() not in names:
+                return "the mailbox has another source"
             keep = own  # configured per mailbox for this very tenant: its namespace and its items carry on
         elif not a["source_kind"] or (a["source_kind"] in (wiring.PST, wiring.FILES) and not _pst_valid(a)):
             keep = {}
@@ -358,8 +397,21 @@ def _link_one(r, spec, server_id: int, item: LinkItem, include_tasks: bool | Non
         except ConnectorError as e:
             return str(e)
         config = {k: v for k, v in merged.items() if k in mailbox_names}
+        if item.manual:
+            others = [o for o in c.execute("SELECT * FROM accounts WHERE server_id=? AND source_connection_id=? AND id<>?",
+                                           (server_id, r["id"], a["id"])).fetchall()
+                      if _mailbox_of(o).lower() in names]
+            for o in others:
+                if c.execute(f"SELECT id FROM jobs WHERE account_id=? AND status IN {ACTIVE}", (o["id"],)).fetchone():
+                    return f"a job is active for {o['email']}, which receives {shown}"
+            for o in others:  # back to its own source (its PST, if any), as PUT /api/accounts/{id}/source does
+                c.execute("UPDATE accounts SET source_kind=NULL, source_config=NULL, source_secret_enc=NULL, "
+                          "source_connection_id=NULL WHERE id=?", (o["id"],))
+                freed.append(o["id"])
         c.execute("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=NULL, source_connection_id=? "
                   "WHERE id=?", (r["kind"], db.jdump(config), r["id"], a["id"]))
+    for aid in freed:
+        wiring.sync_files_source(aid)
     return None
 
 

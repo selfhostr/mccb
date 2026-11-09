@@ -8,13 +8,17 @@ import {
 	countStates,
 	coverageSummary,
 	filterRows,
+	choiceFor,
 	hiddenTicked,
+	isManual,
 	isTickable,
 	landingKinds,
 	linksOf,
 	parseStateFilter,
+	pickChoices,
 	pretick,
 	rowKey,
+	searchChoices,
 	sortRows,
 	targetRows,
 	tasksAllowed,
@@ -187,5 +191,44 @@ describe('tenant matching: default server', () => {
 		expect(bestServer(servers, [{ server_id: 2, email: 'a@old.example' }, { server_id: 2, email: 'b@contoso.example' }, { server_id: 1, email: 'a@contoso.example' }], boxes)).toBe(2);
 		expect(bestServer(servers, [], boxes)).toBe(1);
 		expect(bestServer([], [], boxes)).toBeNull();
+	});
+});
+
+describe('tenant matching: a destination chosen by hand', () => {
+	const conflictBox = row('conflict', 'hal');
+	const rows = [...ROWS, row('no_source', 'kit', { account: { ...row('no_source', 'kit').account!, free: false } }), { ...conflictBox, mailbox: box('ivy', 'ivy@contoso.example'), account: ROWS[6].account }];
+	const choices = pickChoices(rows, 'anna');
+	const block = (name: string) => choices.find((c) => c.account.email.startsWith(`${name}@`))?.block;
+
+	it('lists every box of the server once, free ones first', () => {
+		const ids = choices.map((c) => c.account.id);
+		expect(new Set(ids).size).toBe(ids.length);
+		expect(choices.length).toBe(rows.filter((r) => r.account).length - 1); // gus appears in two conflict rows
+		expect(choices.slice(0, 2).map((c) => c.block)).toEqual([null, null]);
+		expect(choices.map((c) => c.account.email.split('@')[0]).slice(0, 2)).toEqual(['eve', 'gus']);
+	});
+
+	it('says why a box cannot be chosen', () => {
+		expect(block('anna')).toBe('current');
+		expect(block('bob')).toBe('taken');
+		expect(choices.find((c) => c.account.email.startsWith('bob@'))?.takenBy).toBe('bob@contoso.example');
+		expect(block('carla')).toBe('taken'); // linked to another mailbox
+		expect(block('fay')).toBe('other_source');
+		expect(block('kit')).toBe('other_source'); // free: false
+		expect(block('gus')).toBeNull(); // a conflict is settled by a choice
+		expect(block('eve')).toBeNull();
+	});
+
+	it('searches and finds a typed address', () => {
+		expect(searchChoices(choices, ' EVE').map((c) => c.account.email)).toEqual(['eve@contoso.example']);
+		expect(searchChoices(choices, '')).toHaveLength(choices.length);
+		expect(choiceFor(choices, 'Bob@Contoso.example ')?.block).toBe('taken');
+		expect(choiceFor(choices, 'test@yety.ch')).toBeUndefined();
+	});
+
+	it('a manual pair is a full pair matched by hand', () => {
+		expect(isManual({ ...ROWS[0], matched_by: 'manual' })).toBe(true);
+		expect(isManual(ROWS[0])).toBe(false);
+		expect(isManual({ ...ROWS[3], matched_by: 'manual' })).toBe(false);
 	});
 });

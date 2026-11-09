@@ -10,13 +10,16 @@
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 	import CircleX from '@lucide/svelte/icons/circle-x';
 	import DoorOpen from '@lucide/svelte/icons/door-open';
+	import Hand from '@lucide/svelte/icons/hand';
+	import Pencil from '@lucide/svelte/icons/pencil';
+	import Undo2 from '@lucide/svelte/icons/undo-2';
 	import UserRoundX from '@lucide/svelte/icons/user-round-x';
 	import Users from '@lucide/svelte/icons/users';
 	import Wrench from '@lucide/svelte/icons/wrench';
 	import { m } from '#lib/paraglide/messages.js';
 	import type { MatchRow } from '../../lib/api/types.ts';
-	import { connectionOf } from '../../lib/logic/accounts.ts';
-	import { isTickable } from '../../lib/logic/tenantmatch.ts';
+	import { connectionOf, isActive } from '../../lib/logic/accounts.ts';
+	import { isManual, isTickable } from '../../lib/logic/tenantmatch.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { jobLookOf, jobLook, testLook, type StatusLook } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
@@ -31,9 +34,14 @@
 		/** Why the last Start left this mailbox out. */
 		problem?: string;
 		ontoggle: (checked: boolean) => void;
+		/** Choose the destination by hand (rows with a tenant mailbox). */
+		onpick?: () => void;
+		/** Back to the match by address (rows chosen by hand). */
+		onreset?: () => void;
+		resetting?: boolean;
 	}
 
-	let { row, server, ticked, problem, ontoggle }: Props = $props();
+	let { row, server, ticked, problem, ontoggle, onpick, onreset, resetting = false }: Props = $props();
 
 	const box = $derived(row.mailbox);
 	const tickable = $derived(isTickable(row));
@@ -44,6 +52,9 @@
 	const jobLink = $derived(job ? { id: job.id, look: jobLookOf(job) } : row.last_job ? { id: row.last_job.id, look: jobLook(row.last_job.status) } : null);
 	const phase = $derived(row.account ? data.testing.get(row.account.id) : undefined);
 	const name = $derived(prefs.email(box?.mail || row.account?.email || ''));
+	const manual = $derived(isManual(row));
+	const busy = $derived(isActive(job));
+	const PICK = 'inline-flex min-h-9 items-center gap-1.5 rounded-btn px-2 text-xs font-semibold whitespace-nowrap text-ink-2 hover:text-ink hover:underline disabled:cursor-not-allowed disabled:opacity-50';
 
 	const check = $derived.by((): StatusLook | null => {
 		if (!account) return null;
@@ -110,6 +121,7 @@
 		{#if account}
 			<p class="m-0 truncate font-mono text-xs text-ink md:text-sm">{prefs.email(account.email)}</p>
 			<p class="m-0 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+				{#if manual}<span data-testid="tenant-manual"><Plate tone="info" icon={Hand} label={m.tenant_plate_manual()} /></span>{/if}
 				{#if check}<span data-testid="tenant-check"><Plate tone={check.tone} icon={check.icon} label={check.label} /></span>{/if}
 				{#if row.state === 'other_source'}
 					<a class="text-xs" href={`/?account=${account.id}`}>{m.tenant_row_see_source()}</a>
@@ -121,6 +133,20 @@
 			</p>
 		{:else}
 			<p class="m-0 text-sm text-ink-3 italic">{m.tenant_row_add_to_csv({ server })}</p>
+		{/if}
+		{#if box && (onpick || (manual && onreset))}
+			<p class="m-0 mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
+				{#if onpick}
+					<button type="button" class={`${PICK} -ml-2`} disabled={busy} onclick={onpick} data-testid="tenant-pick">
+						<Pencil size={13} aria-hidden="true" />{account ? m.tenant_pick_change() : m.tenant_pick_choose()}
+					</button>
+				{/if}
+				{#if manual && onreset}
+					<button type="button" class={PICK} disabled={busy || resetting} onclick={onreset} data-testid="tenant-pick-reset">
+						<Undo2 size={13} aria-hidden="true" />{m.tenant_pick_reset()}
+					</button>
+				{/if}
+			</p>
 		{/if}
 	</div>
 
@@ -134,3 +160,4 @@
 		{/if}
 	</div>
 </li>
+

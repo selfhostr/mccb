@@ -379,7 +379,8 @@ def test_match_rows_for_a_server_filled_by_csv(client, graph):
     assert bob["matched_by"] == "alias" and bob["matched_address"] == "robert@contoso.test"
     assert set(bob) == {"state", "mailbox", "account", "matched_by", "matched_address", "coverage", "last_job"}
     assert set(bob["account"]) == {"id", "email", "status", "last_test", "last_test_result", "source_kind",
-                                   "source_connection_id"}
+                                   "source_connection_id", "free"}
+    assert bob["account"]["free"] is True
     assert bob["coverage"] == {"mail": "on", "calendar": "unknown", "contacts": "unknown", "tasks": "unknown"}
     assert all(set(x["coverage"]) == {"mail", "calendar", "contacts", "tasks"} for x in body["rows"])
     assert body["counts"]["ready"] == 3 and body["counts"]["no_target"] == 1 and "all" not in body["counts"]
@@ -485,6 +486,73 @@ def test_linked_account_migrates_every_kind(client, graph, collect):  # noqa: F8
     assert j["status"] == "done", log_of(client, jid)
     assert {i.kind for _f, i in collect} == {"mail", "calendar", "contacts", "tasks"}
     assert SECRET not in log_of(client, jid)
+
+
+def test_manual_destination_lasts_and_goes_back_to_automatic(client, graph):
+    from app.connectors import wiring
+    from app.server import db
+    c = new_conn(client)
+    sid, ids = yeti(client)
+    url = f"/api/source-connections/{c['id']}"
+    rows = lambda: {(x["mailbox"] or {}).get("id") or x["account"]["email"]: x  # noqa: E731
+                    for x in client.get(f"{url}/match?server_id={sid}").json()["rows"]}
+    test = client.post("/api/accounts", json={"server_id": sid, "email": "test@yeti.test", "password": "pw"}).json()
+    assert rows()["test@yeti.test"]["state"] == "no_source"
+    # zed has no box of its own on the server: test@yeti.test is chosen by hand
+    r = client.post(f"{url}/link", json={"server_id": sid, "links": [
+        {"account_id": test["id"], "mailbox_id": "oid-zed", "manual": True}]})
+    assert r.status_code == 200 and r.json()["linked"] == [test["id"]], r.text
+    zed = rows()["oid-zed"]
+    assert (zed["state"], zed["matched_by"], zed["account"]["email"]) == ("ready", "manual", "test@yeti.test")
+    assert "test@yeti.test" not in rows()
+    refreshed = client.get(f"{url}/match?server_id={sid}&refresh=1").json()
+    assert next(x for x in refreshed["rows"] if (x["mailbox"] or {}).get("id") == "oid-zed")[
+        "matched_by"] == "manual"
+    # the job reads zed and writes into test@yeti.test (its own server and password)
+    acc = db.q1("SELECT * FROM accounts WHERE id=?", (test["id"],))
+    assert wiring.source_config(acc)["mailbox"] == "oid-zed" and acc["email"] == "test@yeti.test"
+    # one box, one mailbox: test@yeti.test cannot also take ann
+    r = client.post(f"{url}/link", json={"server_id": sid, "links": [
+        {"account_id": test["id"], "mailbox_id": "oid-ann", "manual": True}]})
+    assert r.status_code == 409
+    assert r.json()["detail"]["errors"][0]["msg"].startswith("already the destination of zed@contoso.test")
+    assert rows()["oid-ann"]["account"]["email"] == "ann@contoso.test"
+    # ann linked to her own box, then moved by hand to only@yeti.test: ann lets it go
+    me, ann, only = ids["me@contoso.test"], ids["ann@contoso.test"], ids["only@yeti.test"]
+    assert client.post(f"{url}/link", json={"server_id": sid, "links": [{"account_id": ann, "mailbox_id": "oid-ann"}]
+                                            }).status_code == 200
+    assert rows()["oid-ann"]["state"] == "linked"
+    db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, created_at) VALUES (?, 'running', 'mail', '{}', "
+          "'full', 1)", (ann,))
+    r = client.post(f"{url}/link", json={"server_id": sid, "links": [
+        {"account_id": only, "mailbox_id": "oid-ann", "manual": True}]})
+    assert r.status_code == 409 and "a job is active for ann@contoso.test" in r.json()["detail"]["errors"][0]["msg"]
+    db.ex("UPDATE jobs SET status='done' WHERE account_id=?", (ann,))
+    r = client.post(f"{url}/link", json={"server_id": sid, "links": [
+        {"account_id": only, "mailbox_id": "oid-ann", "manual": True}]})
+    assert r.status_code == 200, r.text
+    got = rows()
+    assert got["oid-ann"]["account"]["id"] == only and got["oid-ann"]["matched_by"] == "manual"
+    assert got["ann@contoso.test"]["state"] == "no_source" and got["ann@contoso.test"]["account"]["free"] is True
+    assert client.get(f"/api/accounts/{ann}").json()["source"]["kind"] == "pst"
+    # back to automatic: the account lets the mailbox go, the address match comes back
+    assert client.put(f"/api/accounts/{only}/source", json={}).status_code == 200
+    got = rows()
+    assert got["oid-ann"]["account"]["id"] == ann and got["oid-ann"]["state"] == "ready"
+    assert got["oid-ann"]["matched_by"] == "mail" and got["only@yeti.test"]["state"] == "no_source"
+    assert got["oid-me"]["account"]["id"] == me
+
+
+def test_manual_link_starts_a_job_into_the_chosen_box(client, graph):
+    c = new_conn(client)
+    sid, ids = yeti(client, ("only@yeti.test",))
+    only = ids["only@yeti.test"]
+    r = client.post(f"/api/source-connections/{c['id']}/link", json={"server_id": sid, "links": [
+        {"account_id": only, "mailbox_id": "oid-me", "manual": True}], "start": True})
+    assert r.status_code == 200 and r.json()["jobs"][0]["account_id"] == only, r.text
+    row = next(x for x in client.get(f"/api/source-connections/{c['id']}/match?server_id={sid}").json()["rows"]
+               if (x["mailbox"] or {}).get("id") == "oid-me")
+    assert (row["state"], row["matched_by"], row["account"]["id"]) == ("linked", "manual", only)
 
 
 # ------------------------------------------------------------------ existing endpoints (additive)

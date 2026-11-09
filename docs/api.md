@@ -69,14 +69,19 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   kept 5 minutes in memory (`refresh=1` reads again); **502** when the tenant refuses.
   `GET /api/source-connections/{id}/match?server_id=N&refresh=0|1` (no `server_id`: the server with the most matches) →
   `{connection:{id,name},server:{id,name,dav_enabled,caldav_ok,carddav_ok},rows,counts,fetched_at,purpose_checked,hidden}`,
-  row = `{state:'ready'|'linked'|'no_target'|'no_source'|'other_source'|'conflict',mailbox|null,account:{id,email,status,last_test,last_test_result,source_kind,source_connection_id}|null,`
-  `matched_by:'mail'|'upn'|'alias'|null,matched_address|null,conflict_with?,coverage:{mail,calendar,contacts,tasks},last_job:{id,status}|null}`,
-  coverage values `on|off|no_dav|failed|unknown|no_permission`.
-  `POST /api/source-connections/{id}/link {server_id,links:[{account_id,mailbox_id}],include_tasks?,start?,mode?,batch_name?}`
+  row = `{state:'ready'|'linked'|'no_target'|'no_source'|'other_source'|'conflict',mailbox|null,account:{id,email,status,last_test,last_test_result,source_kind,source_connection_id,free}|null,`
+  `matched_by:'mail'|'upn'|'alias'|'manual'|null,matched_address|null,conflict_with?,coverage:{mail,calendar,contacts,tasks},last_job:{id,status}|null}`,
+  coverage values `on|off|no_dav|failed|unknown|no_permission`. An account linked to the connection stays paired with the
+  mailbox it reads, whatever its address (`manual` when no address of the mailbox is its own; `ready` until a job has run).
+  `free`: no source of its own worth keeping, or already linked to this connection.
+  `POST /api/source-connections/{id}/link {server_id,links:[{account_id,mailbox_id,manual?}],include_tasks?,start?,mode?,batch_name?}`
   → `{linked:[account_id],errors:[{account_id,msg}],jobs:[Job],batch_id}`. Per account: on that server, no active job, no
   other source (a PST without a valid file is none); others go on. An account already linked, or configured alone for the same
   tenant, keeps its `mailbox` value: same migration state, no duplicates. `include_tasks` omitted: the last test's tasks
   check (true if never tested). `start` queues the jobs as `POST /api/runs` does. **409** `detail:{msg,errors}` when none is linked.
+  An account linked to another mailbox of the tenant is refused. `manual: true` (a destination chosen by hand): the other
+  accounts of the server linked to that mailbox go back to their own source (refused while one has an active job).
+  `PUT /api/accounts/{id}/source {}` undoes a link (back to automatic).
   Connection gains `provisioned:{app_object_id,sp_object_id,created_at}|null` (set when made by Connect with Microsoft, not secret).
 - Connect with Microsoft (device code flow, see [Exchange](exchange.md)): the `m365_graph` entry of `GET /api/connectors`
   gains `provision:bool` (`M365_BOOTSTRAP_CLIENT_ID` not empty).
