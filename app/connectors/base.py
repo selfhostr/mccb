@@ -68,6 +68,7 @@ class SourceFolder:
     special: str | None = None    # inbox | sent | drafts | trash | junk | None
     count: int | None = None      # number of items if cheap to know (refined by the listing)
     ref: Any = None               # connector data (mailbox name, handle...)
+    skip: str | None = None       # why this folder is not migrated (logged by the runner), e.g. a generated calendar
 
 
 @dataclass
@@ -106,6 +107,8 @@ class OutgoingItem:
 class FolderPlan:
     name: str                     # target folder identifier (IMAP mailbox name, DAV collection URL...)
     flag: str | None = None       # special-use flag to ask for when creating it
+    label: str | None = None      # display name to give the folder when it is created (DAV collections)
+    fallback: str | None = None   # where its items go if the target refuses to create it (DAV: the default collection)
 
 
 @dataclass
@@ -223,6 +226,10 @@ class Target(abc.ABC):
     @abc.abstractmethod
     def session(self) -> TargetSession:
         """A new session, not connected yet."""
+
+    def resource_name(self, raw: bytes, default: str) -> str:
+        """Name to give a calendar, contact or task object (`default`: derived from its import id)."""
+        return default
 
 
 def stamp_import_id(raw: bytes, import_id: str) -> bytes:

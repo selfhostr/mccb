@@ -4,6 +4,7 @@ import CircleCheck from '@lucide/svelte/icons/circle-check';
 import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 import CircleSlash from '@lucide/svelte/icons/circle-slash';
 import Clock from '@lucide/svelte/icons/clock';
+import CopyX from '@lucide/svelte/icons/copy-x';
 import Download from '@lucide/svelte/icons/download';
 import FileX from '@lucide/svelte/icons/file-x';
 import FlaskConical from '@lucide/svelte/icons/flask-conical';
@@ -17,7 +18,7 @@ import Undo2 from '@lucide/svelte/icons/undo-2';
 import Upload from '@lucide/svelte/icons/upload';
 import Wrench from '@lucide/svelte/icons/wrench';
 import { m } from '#lib/paraglide/messages.js';
-import type { AccountStatus, Job, JobStatus, Pst, RepairBox } from './api/types.ts';
+import type { AccountStatus, DedupBox, Job, JobStatus, Pst, RepairBox } from './api/types.ts';
 import type { TestPhase } from './logic/testrun.ts';
 import type { UploadStatus } from './upload/queue.ts';
 import type { Tone } from './ui/Plate.svelte';
@@ -131,4 +132,23 @@ export function repairLook(box: Pick<RepairBox, 'active_run' | 'last_scan'>): St
 		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.repair_state_repaired_errors() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_repaired() };
 	}
 	return last.progress.affected ? { tone: 'advisory', icon: TriangleAlert, label: m.repair_state_damaged() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_intact() };
+}
+
+/** A mailbox of the duplicates tab: what runs now, else what its last run found or did. */
+export function dedupLook(box: Pick<DedupBox, 'active_run' | 'last_run' | 'last_scan'>): StatusLook {
+	const run = box.active_run;
+	if (run) {
+		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.dedup_state_queued() };
+		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
+		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.dedup_state_scanning() };
+		return { tone: 'info', icon: CopyX, label: m.dedup_state_removing() };
+	}
+	const last = box.last_run ?? box.last_scan;
+	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.dedup_state_never() };
+	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed() };
+	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
+	if (last.mode === 'dedup') {
+		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.dedup_state_removed_errors() } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_removed() };
+	}
+	return last.progress.duplicates ? { tone: 'advisory', icon: TriangleAlert, label: m.dedup_state_found() } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_none() };
 }

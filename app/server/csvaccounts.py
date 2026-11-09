@@ -2,7 +2,8 @@
 
 Import: `email;password[;login]` as ever; with a header it may also carry the PST file name, the content toggles and
 the settings of a source connector (`source_kind`, `source_<field>`). Export: the same columns, never a password
-or any secret (`source_<secret field>` is left out)."""
+or any secret (`source_<secret field>` is left out). An account linked to a source connection exports the merged
+settings; importing a `source_kind` onto it replaces the link with the file's settings."""
 from __future__ import annotations
 
 import csv
@@ -43,6 +44,29 @@ def _split_source(kind: str, cfg: dict, current: dict) -> tuple[dict, dict | Non
     return registry.normalize_config(role, plain), registry.merge_secrets(role, current, given or None)
 
 
+def _keep_link(ex, src: dict) -> dict | None:
+    """Mailbox config to store when a row re-imports the settings of a linked account (an exported file): same kind,
+    no secret, the connection's own settings unchanged. None: the row replaces the link. Raises ConnectorError."""
+    if ex is None or ex["source_connection_id"] is None or ex["source_kind"] != src["kind"]:
+        return None
+    conn = wiring.connection_of(ex)
+    if conn is None:
+        return None
+    role = registry.role_of(src["kind"], "source")
+    shared = {f.name: f for f in registry.split_fields(role, "connection")}
+    conn_cfg = db.jload(conn["config"], {}) or {}
+    for k, v in src["config"].items():
+        f = shared.get(k)
+        if f is None:
+            continue
+        if f.secret or str(v).strip().lower() != str(conn_cfg.get(k, "")).lower():
+            return None
+    flags = {f.name for f in role.fields if f.type == "boolean"}
+    own = {k: (_flag(v) if k in flags else v) for k, v in src["config"].items() if k not in shared}
+    merged = registry.normalize_config(role, {**own, **conn_cfg})
+    return {k: v for k, v in merged.items() if k not in shared}
+
+
 def apply(server_id: int, rows: list[dict], errors: list[dict]) -> dict:
     created = updated = 0
     warnings: list[dict] = []
@@ -63,14 +87,19 @@ def apply(server_id: int, rows: list[dict], errors: list[dict]) -> dict:
         if row.get("source"):
             src = row["source"]
             try:
+                # a source in the file replaces the current one, a link to a source connection included
                 if src["kind"] == wiring.PST:
-                    sets.update(source_kind=None, source_config=None, source_secret_enc=None)
+                    sets.update(source_kind=None, source_config=None, source_secret_enc=None,
+                                source_connection_id=None)
+                elif (kept := _keep_link(ex, src)) is not None:
+                    sets.update(source_config=db.jdump(kept))
                 else:
-                    current = wiring.load_secrets(ex["source_secret_enc"]) if ex is not None and \
+                    linked = ex is not None and ex["source_connection_id"] is not None
+                    current = wiring.load_secrets(ex["source_secret_enc"]) if ex is not None and not linked and \
                         ex["source_kind"] == src["kind"] else {}
                     config, secrets = _split_source(src["kind"], src["config"], current)
                     sets.update(source_kind=src["kind"], source_config=db.jdump(config),
-                                source_secret_enc=wiring.dump_secrets(secrets))
+                                source_secret_enc=wiring.dump_secrets(secrets), source_connection_id=None)
             except ConnectorError as e:
                 errors.append({"line": line, "msg": f"source: {e}"})
                 continue
@@ -124,7 +153,9 @@ def export(server_id: int | None = None) -> str:
     w.writerow(["email", "login", "server", "pst", "mail", "calendar", "contacts", "source_kind",
                 *[f"source_{f}" for f in fields]])
     for r in rows:
-        cfg = db.jload(r["source_config"], {}) or {}
+        # linked to a source connection: its settings too (the secret is never written)
+        cfg = wiring.source_config(r) if r["source_kind"] and r["source_connection_id"] is not None else \
+            db.jload(r["source_config"], {}) or {}
         w.writerow([r["email"], r["login"] or "", r["server_name"], r["pst_name"] or "", int(r["opt_mail"]),
                     int(r["opt_calendar"]), int(r["opt_contacts"]), r["source_kind"] or "",
                     *[_cell(cfg.get(f)) for f in fields]])

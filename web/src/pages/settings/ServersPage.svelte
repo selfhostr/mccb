@@ -4,10 +4,12 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
 	import ServersSection from './ServersSection.svelte';
+	import SourcesSection from './SourcesSection.svelte';
 </script>
 
 <PageHeader title={m.settings_servers_title()} sentence={data.servers.length ? m.settings_page_sentence({ servers: data.servers.length }) : m.settings_servers_sentence()} />
 
 <div class="max-w-[1040px]">
 	<ServersSection />
+	<div class="mt-8"><SourcesSection /></div>
 </div>

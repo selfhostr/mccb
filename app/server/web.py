@@ -15,11 +15,13 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..connectors.wiring import items_key_of_account, source_problem, sync_files_source
-from . import crash, csvaccounts, csvimport, db, planning, preview, repo, tokens, uploads
+from ..connectors.wiring import items_key_of_account, sync_files_source
+from . import crash, csvaccounts, csvimport, db, planning, preview, repo, runs, tokens, uploads
 from .api_connectors import router as connectors_router
 from .api_planning import router as planning_router
+from .api_dedup import router as dedup_router
 from .api_repair import router as repair_router
+from .api_sources import router as sources_router
 from .api_tokens import router as tokens_router
 from .config import settings
 from .dav import DavClient
@@ -271,23 +273,35 @@ def test_server(sid: int):
 
 
 def _probe_dav(r, kind: str, template: str | None) -> dict:
-    """Test without credentials: does the DAV entry point respond (401/207/200...)?"""
+    """Test without credentials: does the DAV entry point respond (401/207/200...)?
+    With DAV switched off nothing fails, but the entry point is still looked up so that the verdict can say
+    `found` (DAV answers here yet is off): a green "DAV disabled" alone hid a working CalDAV/CardDAV."""
     import httpx
-    if not r["dav_enabled"]:
-        return {"ok": True, "msg": "DAV disabled for this server"}
-    if template and "{" in template:
+    enabled = bool(r["dav_enabled"])
+    if enabled and template and "{" in template:
         return {"ok": True, "msg": "template URL: checked when each mailbox is tested"}
-    urls = [template] if template else [f"https://{r['imap_host']}/.well-known/{kind}"]
+    urls = [template] if template and "{" not in template else [f"https://{r['imap_host']}/.well-known/{kind}"]
+    err = "no URL"
     for url in urls:
         try:
-            with httpx.Client(verify=bool(r["verify_tls"]), timeout=15, follow_redirects=True) as c:
+            with httpx.Client(verify=bool(r["verify_tls"]), timeout=15 if enabled else 8, follow_redirects=True) as c:
                 resp = c.request("PROPFIND", url, headers={"Depth": "0"})
-            if resp.status_code < 500 and resp.status_code != 404:
+            reachable = resp.status_code < 500 and resp.status_code != 404
+            if not enabled:
+                if reachable:
+                    return {"ok": True, "found": True, "msg": f"DAV is off, but {url} answers (HTTP {resp.status_code})"}
+                err = ""
+                break
+            if reachable:
                 return {"ok": True, "msg": f"{url} reachable (HTTP {resp.status_code})"}
             return {"ok": False, "msg": f"{url}: HTTP {resp.status_code}"}
         except Exception as e:
-            return {"ok": False, "msg": f"{url} unreachable: {e}"}
-    return {"ok": False, "msg": "no URL"}
+            if enabled:
+                return {"ok": False, "msg": f"{url} unreachable: {e}"}
+            err = ""
+    if not enabled:
+        return {"ok": True, "found": False, "msg": "DAV disabled for this server"}
+    return {"ok": False, "msg": err}
 
 
 # ======================================================================= accounts
@@ -566,33 +580,7 @@ class RunIn(BaseModel):
 
 @app.post("/api/runs")
 def create_runs(body: RunIn):
-    jobs, errors = [], []
-    batch_id = None
-    for aid in body.account_ids:
-        a = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
-        if a is None:
-            errors.append({"account_id": aid, "msg": "unknown mailbox"})
-            continue
-        if not a["password_enc"] and not a["target_kind"]:
-            errors.append({"account_id": aid, "msg": "password missing"})
-            continue
-        problem = source_problem(a)
-        if problem:
-            errors.append({"account_id": aid, "msg": problem})
-            continue
-        active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
-                       "ORDER BY id DESC LIMIT 1", (aid,))
-        if active:
-            jobs.append(repo.job_view(active))
-            continue
-        if body.name and body.name.strip() and batch_id is None:
-            batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",
-                             (body.name.strip(), time.time())).lastrowid
-        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at) "
-                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?)",
-                    (aid, db.jdump(repo.empty_progress()), body.mode, batch_id, body.priority, time.time()))
-        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if body.mode == "delta" else ""))
-        jobs.append(repo.get_job(cur.lastrowid))
+    jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})
     for e in errors:
@@ -773,7 +761,9 @@ async def _prune_events() -> None:
 app.include_router(connectors_router)  # before the /api catch-all below
 app.include_router(planning_router)
 app.include_router(repair_router)
+app.include_router(dedup_router)
 app.include_router(tokens_router)
+app.include_router(sources_router)
 
 
 # ======================================================================= static SPA

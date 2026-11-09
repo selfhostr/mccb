@@ -175,6 +175,24 @@ CREATE TABLE IF NOT EXISTS repair_runs (
     heartbeat REAL
 );
 CREATE INDEX IF NOT EXISTS repair_runs_box ON repair_runs(box_id, id);
+CREATE TABLE IF NOT EXISTS dedup_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    box_key TEXT NOT NULL,
+    server_id INTEGER,
+    email TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    kinds TEXT NOT NULL DEFAULT '["mail","calendar","contacts"]',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress TEXT,
+    report TEXT,
+    error TEXT,
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL,
+    heartbeat REAL
+);
+CREATE INDEX IF NOT EXISTS dedup_runs_box ON dedup_runs(box_key, id);
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL DEFAULT 'queued',
@@ -202,6 +220,20 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at REAL NOT NULL,
     last_used_at REAL,
     revoked_at REAL
+);
+-- a credential reached by many accounts (accounts.source_connection_id), e.g. a Microsoft 365 tenant.
+-- config: JSON of the connection-scoped fields of `kind` (no secret); secret_enc: encrypted JSON of its secrets.
+CREATE TABLE IF NOT EXISTS source_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    secret_enc TEXT,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    last_test REAL,
+    last_test_result TEXT,
+    provisioned TEXT  -- JSON {app_object_id, sp_object_id, created_at}: created by "Connect with Microsoft"
 );
 CREATE TABLE IF NOT EXISTS notify_sent (
     kind TEXT NOT NULL,
@@ -246,8 +278,11 @@ DEFAULT_WORKERS_LEGACY = (2, 4)
 
 
 def _add_column(conn: sqlite3.Connection, table: str, ddl: str) -> None:
+    """Adds a column to an existing table. A table that does not exist yet is left alone: SCHEMA creates it with
+    the column (a table newer than the database being migrated, e.g. source_connections on a 1.0.0 database)."""
     name = ddl.split()[0]
-    if name in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if not cols or name in cols:
         return
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
@@ -300,7 +335,8 @@ def _migrate_job_trigger(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Migrations: psts.source/origin/received_bytes/fetch_spec, jobs.rate_bytes, jobs.tuning, servers.tuning/builders,
     items(pst_id) -> items(pst_key = PST fingerprint), kv keys `pst:<id>:crash_skips` -> `pst:<sha>:...`,
-    accounts.source_* / target_* (NULL: the PST of the account, written to its server), items.source_ref and the
+    accounts.source_* / target_* (NULL: the PST of the account, written to its server), accounts.source_connection_id,
+    items.source_ref and the
     planning columns: servers.policy / accounts.policy (JSON: folder mapping, filters, allowed hours, bandwidth),
     jobs.batch_id / jobs.priority / jobs.pause_reason (see docs/planning.md)."""
     _add_column(conn, "servers", "policy TEXT")
@@ -314,6 +350,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for ddl in ("source_kind TEXT", "source_config TEXT", "source_secret_enc TEXT",
                 "target_kind TEXT", "target_config TEXT", "target_secret_enc TEXT"):
         _add_column(conn, "accounts", ddl)
+    # NULL: the source config and secrets are the account's own; set: they come from that source_connections row
+    # (no FK: deleting a connection that accounts use is refused by the API)
+    _add_column(conn, "accounts", "source_connection_id INTEGER")
+    # JSON {app_object_id, sp_object_id, created_at}: the Entra app was created by "Connect with Microsoft" (not secret).
+    # Only for a source_connections table created before the column (SCHEMA has it).
+    _add_column(conn, "source_connections", "provisioned TEXT")
     _add_column(conn, "items", "source_ref TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}

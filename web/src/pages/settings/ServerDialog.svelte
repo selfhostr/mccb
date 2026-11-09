@@ -13,6 +13,7 @@
 	import Toggle from '../../lib/ui/Toggle.svelte';
 	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
+	import { davDetected } from '../../lib/logic/dav.ts';
 	import { PROVIDERS, providerOf, type Provider } from '../../lib/logic/providers.ts';
 
 	let { server = null, onclose, onsaved }: { server?: Server | null; onclose: () => void; onsaved?: (saved: Server) => void } = $props();
@@ -117,6 +118,9 @@
 			<input class="input font-mono" bind:value={form.root_folder} />
 		</Field>
 		<Toggle checked={form.dav_enabled} label={m.settings_server_dav()} onchange={(v) => (form.dav_enabled = v)} />
+		{#if server && !form.dav_enabled && davDetected(server, server.last_test_result)}
+			<Notice><p class="m-0" data-testid="server-dialog-dav-found">{m.settings_server_dav_found()}</p></Notice>
+		{/if}
 		{#if form.dav_enabled}
 			<Field label={m.settings_server_caldav()} hint={m.settings_server_dav_hint({ email: "{email}", user: "{user}", domain: "{domain}" })}>
 				<input class="input font-mono" bind:value={form.caldav_url} />

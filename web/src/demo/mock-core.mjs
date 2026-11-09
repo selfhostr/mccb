@@ -56,6 +56,26 @@ const CATALOGUE = [
 		source: { items: ['mail'], capabilities: ['folders'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] },
 		target: { items: ['mail'], capabilities: ['parallel'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] }
 	},
+	{
+		kind: 'm365_graph',
+		label: 'Microsoft 365 (Graph)',
+		description: 'Read mailboxes, calendars, contacts and tasks from Microsoft 365 through the Graph API.',
+		directory: true,
+		provision: true,
+		source: {
+			items: ['mail', 'calendar', 'contacts'],
+			capabilities: ['folders'],
+			fields: [
+				field('tenant_id', 'Tenant ID', 'text', { required: true, scope: 'connection' }),
+				field('client_id', 'Client ID', 'text', { required: true, scope: 'connection' }),
+				field('client_secret', 'Client secret', 'password', { required: true, secret: true, scope: 'connection' }),
+				field('cloud', 'Cloud', 'select', { options: ['global', 'usgov', 'china'], default: 'global', scope: 'connection' }),
+				field('mailbox', 'Mailbox', 'text', { required: true, scope: 'mailbox' }),
+				field('include_tasks', 'Include tasks', 'boolean', { default: true, scope: 'mailbox' })
+			]
+		},
+		target: null
+	},
 	{ kind: 'pst', label: 'PST file', description: 'A Personal Folders file.', source: { items: ['mail', 'calendar', 'contacts'], capabilities: ['folders'], fields: [] }, target: null }
 ];
 
@@ -134,10 +154,24 @@ export function reset(options = {}) {
 		runBodies: [],
 		hold: options.hold ?? false,
 		repair: { boxes: new Map(), runs: new Map(), next: { box: 1, run: 1 } },
+		dedup: { runs: new Map(), next: 1 },
 		planDelay: options.planDelay ?? 600,
 		plans: new Map(),
 		compares: new Map(),
 		batches: new Map(),
+		sourceConnections: new Map(),
+		tenantOn: false,
+		sourceTests: [],
+		linkCalls: [],
+		tenantNext: 2,
+		// "Connect with Microsoft": the flows in progress, and how the next one ends (null, 'admin', 'expired')
+		provisionOn: options.provision !== false,
+		provisionFail: options.provisionFail ?? null,
+		flows: new Map(),
+		flowNext: 1,
+		provisionCalls: [],
+		// set: what the tenant answers on listing its mailboxes (HTTP 502), as when Microsoft refuses
+		tenantFail: options.tenantFail ?? null,
 		policies: { server: new Map(), account: new Map() },
 		tokens: [],
 		reorderCalls: [],
@@ -148,6 +182,7 @@ export function reset(options = {}) {
 		demo: options.demo === true
 	};
 	if (options.demo) seedDemo();
+	else if (options.tenant) seedTenant();
 }
 reset();
 
@@ -159,7 +194,7 @@ function accountView(a) {
 	const job = [...state.jobs.values()].filter((j) => j.account_id === a.id).sort((x, y) => y.id - x.id)[0] ?? null;
 	const { srcSecrets, tgtSecrets, ...rest } = a;
 	const source = a.source ?? { kind: 'pst', config: { pst_id: a.pst_id }, has_secret: false };
-	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
+	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
 }
 
 /** Same rules as registry.normalize_config and merge_secrets. Returns [config, secrets] or throws a message. */
@@ -406,7 +441,13 @@ export async function control(path, body) {
 		reset(body);
 		return send(200, { ok: true });
 	}
-	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, provisionCalls: state.provisionCalls, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/provision') {
+		// How the next "Connect with Microsoft" flows end: null, 'admin' (not an administrator), 'expired' (code expired),
+		// 'propagation' (saved, permissions not active yet) or 'lost' (404 from the second poll, as after a restart).
+		state.provisionFail = body.fail ?? null;
+		return send(200, { ok: true });
+	}
 	if (path === '/__mock/inbox') {
 		state.inbox = body.files ?? [];
 		return send(200, { ok: true });
@@ -486,14 +527,16 @@ export async function handle(req) {
 		}
 		if (parts[2] === 'test') {
 			// Stored like the real server does: the list shows the verdict after a reload.
-			const result = { imap: { ok: true, msg: `IMAP server reachable (${server.imap_host}:${server.imap_port})`, capabilities: [] }, caldav: { ok: server.dav_enabled, msg: server.dav_enabled ? 'reachable (HTTP 207)' : 'DAV disabled for this server' }, carddav: { ok: false, msg: 'https://dav.example.com/ unreachable: timeout' } };
+			const result = { imap: { ok: true, msg: `IMAP server reachable (${server.imap_host}:${server.imap_port})`, capabilities: [] }, caldav: server.dav_enabled ? { ok: true, msg: 'reachable (HTTP 207)' } : { ok: true, found: server.imap_host.includes('dav'), msg: server.imap_host.includes('dav') ? 'DAV is off, but https://' + server.imap_host + '/.well-known/caldav answers (HTTP 401)' : 'DAV disabled for this server' }, carddav: server.dav_enabled ? { ok: false, msg: 'https://dav.example.com/ unreachable: timeout' } : { ok: true, found: false, msg: 'DAV disabled for this server' } };
 			server.last_test = Date.now() / 1000;
 			server.last_test_result = result;
 			return send(200, result);
 		}
 		if (m === 'GET') return send(200, server);
 		if (m === 'PUT') {
+			const before = server.dav_enabled;
 			Object.assign(server, json(), { id: server.id });
+			if (before !== server.dav_enabled) Object.assign(server, { last_test: null, last_test_result: null });
 			return send(200, server);
 		}
 		if (m === 'DELETE') {
@@ -508,7 +551,18 @@ export async function handle(req) {
 		if (r) return r;
 	}
 
-	if (path === '/connectors' && m === 'GET') return send(200, CATALOGUE);
+	if (parts[0] === 'dedup') {
+		const r = handleDedup(parts.slice(1), m, json, url.searchParams);
+		if (r) return r;
+	}
+
+	if (parts[0] === 'source-connections') {
+		const r = handleTenants(parts.slice(1), m, json, url.searchParams);
+		if (r) return r;
+	}
+
+	// The tenant connector is only offered once a tenant is seeded: other specs list the source kinds.
+	if (path === '/connectors' && m === 'GET') return send(200, state.tenantOn ? CATALOGUE.map((c) => (c.kind === 'm365_graph' ? { ...c, provision: state.provisionOn } : c)) : CATALOGUE.filter((c) => c.kind !== 'm365_graph'));
 	if (parts[0] === 'connectors' && parts[2] === 'test' && m === 'POST') {
 		const body = json();
 		const spec = CATALOGUE.find((c) => c.kind === parts[1]);
@@ -635,6 +689,14 @@ export async function handle(req) {
 				account.target = { kind: null, config: {}, has_secret: false };
 				account[key] = {};
 			} else {
+				if (role === 'source' && body.connection_id != null) {
+					const conn = state.sourceConnections.get(Number(body.connection_id));
+					if (!conn) return fail(404, 'unknown source connection');
+					account.source = { kind: body.kind, config: { mailbox: body.config?.mailbox, include_tasks: body.config?.include_tasks ?? true }, has_secret: false, connection: { id: conn.id, name: conn.name } };
+					account.srcSecrets = {};
+					publish('account', accountView(account));
+					return send(200, accountView(account));
+				}
 				try {
 					const same = account[role]?.kind === body.kind;
 					const [config, secrets] = checkEndpoint(body.kind, role, body.config, same ? account[key] : {}, body.secrets);
@@ -962,9 +1024,8 @@ function seedDemo() {
 	pace.set(waiting, { tick: 1000, frac: 0.002 });
 	timers.add(setTimeout(() => run(waiting), 45_000));
 
-	state.next.account = 11;
+	seedTenant();
 	state.next.pst = 11;
-	state.next.server = 3;
 	state.next2.batch = 2;
 }
 
@@ -1044,4 +1105,504 @@ function handleRepair(parts, m, json) {
 		return send(200, run);
 	}
 	return null;
+}
+
+// ---------------------------------------------------------------- duplicates tab (fictional: a run ends at once)
+const DEDUP_KINDS = ['mail', 'calendar', 'contacts'];
+const dedupFolders = (clean) => [
+	{ kind: 'mail', name: 'INBOX', items: 5200, groups: clean ? 0 : 300, duplicates: clean ? 0 : 440, refused: null },
+	{ kind: 'mail', name: 'Archive/2023', items: 3450, groups: clean ? 0 : 110, duplicates: clean ? 0 : 164, refused: null },
+	{ kind: 'mail', name: 'Shared', items: 12, groups: 0, duplicates: 0, refused: 'no_uidplus' },
+	{ kind: 'calendar', name: 'Calendar', items: 310, groups: clean ? 0 : 17, duplicates: clean ? 0 : 37, refused: null },
+	{ kind: 'contacts', name: 'Contacts', items: 96, groups: clean ? 0 : 6, duplicates: clean ? 0 : 12, refused: null }
+];
+
+function dedupBoxes() {
+	const boxes = [...state.accounts.values()].map((a) => ({ key: `account:${a.id}`, source: 'account', ref_id: a.id, server_id: a.server_id, email: a.email, login: a.login, status: a.status, has_password: a.has_password }));
+	for (const b of state.repair.boxes.values()) boxes.push({ key: `repair:${b.id}`, source: 'repair', ref_id: b.id, server_id: b.server_id, email: b.email, login: b.login, status: b.status, has_password: b.has_password });
+	return boxes;
+}
+
+function dedupView(box) {
+	const runs = [...state.dedup.runs.values()].filter((r) => r.box_key === box.key);
+	const bare = (r) => (r ? { ...r, report: undefined } : null);
+	const scans = runs.filter((r) => r.mode === 'scan');
+	const account = box.source === 'account' ? state.accounts.get(box.ref_id) : null;
+	const busy = account?.job && ['queued', 'running', 'paused', 'stopping'].includes(account.job.status) ? 'migration' : null;
+	const server = state.servers.get(box.server_id);
+	return {
+		key: box.key, source: box.source, ref_id: box.ref_id, server_id: box.server_id, email: box.email, login: box.login, status: box.status,
+		dav: !!server?.dav_enabled, usable: box.has_password, unusable_reason: box.has_password ? null : 'no_password', busy,
+		last_scan: bare(scans[scans.length - 1]), last_run: bare(runs[runs.length - 1]), active_run: null
+	};
+}
+
+function dedupRun(box, mode, kinds) {
+	const id = state.dedup.next++;
+	const clean = box.email.startsWith('clean');
+	const dav = !!state.servers.get(box.server_id)?.dav_enabled;
+	const used = kinds.filter((k) => k === 'mail' || dav);
+	const folders = dedupFolders(clean).filter((f) => used.includes(f.kind)).map((f) => ({ ...f, deleted: mode === 'dedup' ? f.duplicates : 0, skipped: 0 }));
+	const totals = {};
+	for (const k of used) {
+		const fs = folders.filter((f) => f.kind === k);
+		const sum = (key) => fs.reduce((n, f) => n + f[key], 0);
+		totals[k] = { items: sum('items'), groups: sum('groups'), duplicates: sum('duplicates'), deleted: sum('deleted'), skipped: 0 };
+	}
+	const all = Object.values(totals);
+	const total = (key) => all.reduce((n, t) => n + t[key], 0);
+	const now = Date.now() / 1000;
+	const examples = clean ? [] : [
+		{ kind: 'mail', folder: 'INBOX', label: 'Facture mars 2024', detail: 'Compta <compta@example.com>, 5 Mar 2024', copies: 3, keep: 'INBOX#412', remove: ['INBOX#977', 'INBOX#1310'] },
+		{ kind: 'calendar', folder: 'Calendar', label: 'Point hebdo', detail: 'Mon 3 Jun 2024 09:00 - 09:30', copies: 2, keep: 'evt-91.ics', remove: ['evt-91-1.ics'] },
+		{ kind: 'contacts', folder: 'Contacts', label: 'Camille Dupont', detail: 'camille@example.com, +33 1 23 45 67 89', copies: 2, keep: 'c-17.vcf', remove: ['c-17-1.vcf'] }
+	].filter((e) => used.includes(e.kind));
+	const report = {
+		folders, examples, errors: [],
+		notes: ['no_uidplus', ...(dav ? [] : ['dav_disabled'])],
+		log: [{ ts: now, level: 'info', msg: `${mode === 'scan' ? 'Analysis' : 'Removal'} of ${box.email}` }, { ts: now, level: 'warning', msg: 'Shared: no UIDPLUS, removal refused' }]
+	};
+	const run = {
+		id, box_key: box.key, email: box.email, mode, kinds: used, status: 'done', error: null, created_at: now, started_at: now, finished_at: now, totals,
+		progress: { phase: null, folder: null, folders_done: folders.length, folders_total: folders.length, seen: total('items'), total: total('items'), groups: total('groups'), duplicates: total('duplicates'), deleted: total('deleted'), skipped: 0, errors: 0 },
+		report
+	};
+	state.dedup.runs.set(id, run);
+	return run;
+}
+
+function handleDedup(parts, m, json, query) {
+	const D = state.dedup;
+	if (parts[0] === 'boxes' && parts.length === 1 && m === 'GET') return send(200, dedupBoxes().map(dedupView));
+	if (parts[0] === 'boxes' && parts[2] === 'runs' && m === 'GET') {
+		const limit = Number(query?.get?.('limit') ?? 20);
+		return send(200, [...D.runs.values()].filter((r) => r.box_key === parts[1]).reverse().slice(0, limit).map((r) => ({ ...r, report: undefined })));
+	}
+	if (parts[0] === 'runs' && parts.length === 1 && m === 'POST') {
+		const body = json();
+		if (body.mode === 'dedup' && body.confirm !== true) return fail(400, 'removal needs confirm: true');
+		const kinds = (body.kinds ?? DEDUP_KINDS).filter((k) => DEDUP_KINDS.includes(k));
+		const skipped = [];
+		const runs = [];
+		for (const key of body.box_keys ?? []) {
+			const box = dedupBoxes().find((b) => b.key === key);
+			if (!box) continue;
+			const view = dedupView(box);
+			if (view.busy || !view.usable) skipped.push(key);
+			else runs.push(dedupRun(box, body.mode, kinds));
+		}
+		return send(202, { runs: runs.map((r) => ({ ...r, report: undefined })), skipped_busy: skipped });
+	}
+	if (parts[0] === 'runs' && parts[1]) {
+		const run = D.runs.get(Number(parts[1]));
+		if (!run) return fail(404, 'unknown run');
+		if (parts[2] === 'stop' && m === 'POST') return send(200, { ...run, report: undefined });
+		return send(200, run);
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------- Microsoft 365 tenants (fictional: "Contoso", no network, no secret kept)
+/** The fictional directory behind every tenant connection of the demo. */
+function tenantDirectory() {
+	const u = (n, first, last, over = {}) => {
+		const slug = `${first}.${last}`.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+		const mail = `${slug}@contoso.example`;
+		return { id: `3f2a${String(n).padStart(4, '0')}-0c1d-4e5f-8a9b-${String(n).padStart(12, '0')}`, display_name: `${first} ${last}`, mail, upn: mail, aliases: [mail], kind: 'user', enabled: true, licensed: true, ...over };
+	};
+	const shared = (n, name, local) => {
+		const mail = `${local}@contoso.example`;
+		return { id: `7c9e${String(n).padStart(4, '0')}-6b2a-4d3c-9e1f-${String(n).padStart(12, '0')}`, display_name: name, mail, upn: mail, aliases: [mail], kind: 'shared', enabled: false, licensed: false };
+	};
+	const mailboxes = [
+		u(1, 'Camille', 'Dupont'),
+		u(2, 'Hugo', 'Martin'),
+		u(3, 'Lea', 'Bernard', { display_name: 'Léa Bernard' }),
+		u(4, 'Nathan', 'Petit'),
+		u(5, 'Chloe', 'Robert', { display_name: 'Chloé Robert' }),
+		u(6, 'Louis', 'Richard'),
+		u(7, 'Emma', 'Durand'),
+		u(8, 'Jules', 'Moreau'),
+		u(9, 'Manon', 'Simon'),
+		u(10, 'Arthur', 'Laurent', { mail: 'a.laurent@contoso.example', upn: 'a.laurent@contoso.example', aliases: ['a.laurent@contoso.example', 'arthur@contoso.example'] }),
+		u(11, 'Ines', 'Garcia', { display_name: 'Inès Garcia', mail: 'ines@contoso.example', upn: 'ines.garcia@contoso.example', aliases: ['ines@contoso.example', 'ines.garcia@contoso.example'] }),
+		u(12, 'Paul', 'Roux'),
+		u(13, 'Marc', 'Fabre', { enabled: false }),
+		u(14, 'Alice', 'Martin'),
+		u(15, 'Theo', 'Blanc', { display_name: 'Théo Blanc', aliases: ['theo.blanc@contoso.example', 'alice.martin@contoso.example'] }),
+		shared(16, 'Support', 'support'),
+		shared(17, 'Accounting', 'accounting'),
+		{ ...shared(18, 'Meeting room Paris', 'room.paris'), kind: 'room' },
+		{ ...shared(19, 'Projector kit', 'projector'), kind: 'equipment' }
+	];
+	return { mailboxes, hidden: { guests: 1, no_mailbox: 2 } };
+}
+
+function tenantCheck(config, secrets) {
+	const secret = secrets?.client_secret ?? '';
+	if (!secret) return { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'No client secret given.' }] };
+	if (secret.startsWith('wrong')) return { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'Wrong or expired client secret (AADSTS7000215).' }] };
+	const checks = [{ key: 'token', ok: true, level: 'required', msg: 'Token obtained for the tenant.' }];
+	const roles = (label, key, level, ok, role, extra = {}) => checks.push({ key, ok, level, msg: ok ? `${label} permission granted.` : `${label} permission missing: grant ${role} and admin consent.`, ...(ok ? {} : { missing: [role] }), ...extra });
+	roles('Directory', 'directory', 'required', true, 'User.Read.All');
+	roles('Mail', 'mail', 'required', true, 'Mail.Read');
+	roles('Calendars', 'calendars', 'required', true, 'Calendars.Read');
+	roles('Contacts', 'contacts', 'required', true, 'Contacts.Read');
+	roles('Mailbox settings', 'settings', 'required', true, 'MailboxSettings.Read');
+	roles('Tasks', 'tasks', 'optional', secret.startsWith('full'), 'Tasks.Read.All');
+	checks.push({ key: 'probe_directory', ok: true, level: 'required', msg: 'The directory can be read.' });
+	checks.push({ key: 'probe_mailbox', ok: true, level: 'required', msg: 'Exchange accepts the application on a mailbox.' });
+	return { ok: true, checks, tenant_name: 'Contoso' };
+}
+
+function tenantView(c) {
+	const accounts = [...state.accounts.values()].filter((a) => a.source?.connection?.id === c.id).length;
+	return { id: c.id, name: c.name, kind: c.kind, config: c.config, has_secret: Object.keys(c.secrets).length > 0, notes: c.notes, last_test: c.last_test, last_test_result: c.last_test_result, accounts, provisioned: c.provisioned ?? null, created_at: c.created_at };
+}
+
+function tenantConfig(body) {
+	const fields = CATALOGUE.find((x) => x.kind === 'm365_graph').source.fields;
+	const conn = fields.filter((f) => f.scope === 'connection');
+	for (const k of Object.keys(body.config ?? {})) if (!conn.some((f) => f.name === k && !f.secret)) throw new Error(`unknown field '${k}'`);
+	const config = {};
+	for (const f of conn.filter((x) => !x.secret)) {
+		const v = String(body.config?.[f.name] ?? '').trim() || f.default;
+		if (!v) throw new Error(`'${f.name}' is required`);
+		config[f.name] = v;
+	}
+	return config;
+}
+
+function tenantSecrets(current, given) {
+	let secrets = { ...current };
+	if (given !== undefined) {
+		if (!Object.keys(given).length) secrets = {};
+		else for (const [k, v] of Object.entries(given)) {
+			if (k !== 'client_secret') throw new Error(`unknown secret '${k}'`);
+			if (v) secrets[k] = v;
+			else delete secrets[k];
+		}
+	}
+	return secrets;
+}
+
+function matchAccount(a, conn) {
+	const free = a.source?.connection?.id === conn.id || (!a.source?.kind && !(a.pst_id && state.psts.get(a.pst_id)?.status === 'valid'));
+	return { id: a.id, email: a.email, status: a.status, last_test: a.last_test, last_test_result: a.last_test_result, source_kind: a.source?.kind ?? (a.pst_id ? 'pst' : null), source_connection_id: a.source?.connection?.id ?? null, free };
+}
+
+/** Pure matching, same states as app/server/tenant_match.py. */
+function tenantMatch(conn, server) {
+	const { mailboxes, hidden } = tenantDirectory();
+	const accounts = [...state.accounts.values()].filter((a) => a.server_id === server.id);
+	// An account linked to this tenant keeps the mailbox it reads, whatever its address (a destination chosen by hand).
+	const pinned = new Map();
+	for (const a of [...accounts].sort((x, y) => x.id - y.id)) {
+		const value = a.source?.connection?.id === conn.id ? String(a.source.config?.mailbox ?? '').toLowerCase() : '';
+		const mb = value && mailboxes.find((x) => [x.id, x.mail, x.upn].some((v) => v && v.toLowerCase() === value));
+		if (mb && !pinned.has(mb)) pinned.set(mb, a);
+	}
+	const taken = new Set([...pinned.values()].map((a) => a.id));
+	const byEmail = new Map(accounts.filter((a) => !taken.has(a.id)).map((a) => [a.email.toLowerCase(), a]));
+	const claims = new Map();
+	for (const mb of mailboxes) {
+		if (pinned.has(mb)) continue;
+		const keys = [[mb.mail, 'mail'], [mb.upn, 'upn'], ...mb.aliases.map((x) => [x, 'alias'])];
+		const hit = keys.find(([addr]) => byEmail.has(addr.toLowerCase()));
+		if (!hit) continue;
+		const account = byEmail.get(hit[0].toLowerCase());
+		const list = claims.get(account.id) ?? [];
+		list.push({ mb, by: hit[1] });
+		claims.set(account.id, list);
+	}
+	const tasksOk = !!conn.last_test_result?.checks?.find((c) => c.key === 'tasks')?.ok;
+	const coverage = (a) => {
+		const tested = a.last_test_result;
+		const dav = (kind, opt) => (!server.dav_enabled ? 'no_dav' : a.options?.[opt] === false ? 'off' : !tested ? 'unknown' : tested[kind]?.ok === false ? 'failed' : 'on');
+		return { mail: a.options?.mail === false ? 'off' : 'on', calendar: dav('caldav', 'calendar'), contacts: dav('carddav', 'contacts'), tasks: !server.dav_enabled ? 'no_dav' : !tasksOk ? 'no_permission' : a.options?.calendar === false ? 'off' : dav('caldav', 'calendar') };
+	};
+	const lastJob = (a) => {
+		const j = [...state.jobs.values()].filter((x) => x.account_id === a.id).sort((x, y) => y.id - x.id)[0];
+		return j ? { id: j.id, status: j.status } : null;
+	};
+	const rows = [];
+	const used = new Set();
+	for (const mb of mailboxes) {
+		const pin = pinned.get(mb);
+		if (pin) {
+			const email = pin.email.toLowerCase();
+			const by = (mb.mail ?? '').toLowerCase() === email ? 'mail' : (mb.upn ?? '').toLowerCase() === email ? 'upn' : (mb.aliases ?? []).some((x) => x.toLowerCase() === email) ? 'alias' : 'manual';
+			const job = lastJob(pin);
+			const st = by !== 'manual' || job ? 'linked' : 'ready';
+			rows.push({ state: st, mailbox: mb, account: matchAccount(pin, conn), matched_by: by, matched_address: by === 'upn' || by === 'alias' ? email : null, coverage: coverage(pin), last_job: st === 'linked' ? job : null });
+			continue;
+		}
+		const found = [...claims.entries()].find(([, list]) => list.some((c) => c.mb === mb));
+		if (!found) {
+			rows.push({ state: 'no_target', mailbox: mb, account: null, matched_by: null, matched_address: null, coverage: { mail: 'unknown', calendar: 'unknown', contacts: 'unknown', tasks: 'unknown' }, last_job: null });
+			continue;
+		}
+		const account = state.accounts.get(found[0]);
+		const list = found[1];
+		const mine = list.find((c) => c.mb === mb);
+		const winner = [...list].sort((x, y) => (x.by === 'mail' ? 0 : 1) - (y.by === 'mail' ? 0 : 1))[0];
+		const view = matchAccount(account, conn);
+		let st;
+		if (list.length > 1 && winner.mb !== mb) st = 'conflict';
+		else if (account.source?.connection?.id === conn.id) st = 'linked';
+		else if (account.source?.kind || (account.pst_id && state.psts.get(account.pst_id)?.status === 'valid')) st = 'other_source';
+		else st = 'ready';
+		if (st !== 'conflict') used.add(account.id);
+		rows.push({ state: st, mailbox: mb, account: view, matched_by: mine.by, matched_address: mine.by === 'mail' ? null : account.email.toLowerCase(), ...(st === 'conflict' ? { conflict_with: winner.mb.mail } : {}), coverage: coverage(account), last_job: st === 'linked' ? lastJob(account) : null });
+	}
+	for (const a of accounts) if (!claims.has(a.id) && !taken.has(a.id)) rows.push({ state: 'no_source', mailbox: null, account: matchAccount(a, conn), matched_by: null, matched_address: null, coverage: coverage(a), last_job: null });
+	const counts = {};
+	for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
+	const t = server.last_test_result;
+	return { connection: { id: conn.id, name: conn.name }, server: { id: server.id, name: server.name, dav_enabled: !!server.dav_enabled, caldav_ok: t ? !!t.caldav?.ok : null, carddav_ok: t ? !!t.carddav?.ok : null }, rows, counts, fetched_at: Date.now() / 1000 - 120, purpose_checked: true, hidden };
+}
+
+// A flow answers one step further on each poll: waiting, then the steps, then done (or the failure chosen with /__mock/provision).
+const PROVISION_STEPS = ['signin', 'app', 'consent', 'propagation', 'test'];
+function flowView(flow) {
+	flow.polls++;
+	if (flow.fail === 'expired' && flow.polls > 1) return { status: 'expired', step: null, error: 'The code expired before the sign-in: start again.', error_code: 'expired', connection: null };
+	if (flow.fail === 'admin' && flow.polls > 2) return { status: 'error', step: 'app', error: 'Creating the application was refused: the account must be Global Administrator or Application Administrator of the client tenant (Graph 403 Authorization_RequestDenied: Insufficient privileges to complete the operation.).', error_code: 'not_admin', connection: null };
+	if (flow.remove) {
+		if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, error_code: null, connection: null };
+		if (flow.polls === 2) return { status: 'working', step: 'remove', error: null, error_code: null, connection: null };
+		const conn = state.sourceConnections.get(flow.connectionId);
+		if (conn) conn.provisioned = null;
+		return { status: 'done', step: 'remove', error: null, error_code: null, connection: conn ? tenantView(conn) : null };
+	}
+	if (flow.polls <= 1) return { status: 'waiting', step: 'signin', error: null, error_code: null, connection: null };
+	const step = PROVISION_STEPS[Math.min(flow.polls - 1, PROVISION_STEPS.length - 1)];
+	if (flow.polls <= PROVISION_STEPS.length) return { status: 'working', step, error: null, error_code: null, connection: null };
+	if (!flow.connectionId) {
+		const conn = { id: state.tenantNext++, name: flow.name || 'Fabrikam', kind: 'm365_graph', config: { tenant_id: '3c9e7a10-5b42-4d18-8f6a-1e2d4c7b9a05', client_id: 'a7d5e2b4-9c18-4f03-b6a1-8e0d3f5c2b79', cloud: flow.cloud || 'global' }, secrets: { client_secret: 'full-provisioned' }, notes: null, last_test: Date.now() / 1000, last_test_result: tenantCheck({}, { client_secret: 'full-provisioned' }), provisioned: { app_object_id: 'f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b', sp_object_id: '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', created_at: Date.now() / 1000 }, created_at: Date.now() / 1000 };
+		state.sourceConnections.set(conn.id, conn);
+		flow.connectionId = conn.id;
+	}
+	const conn = state.sourceConnections.get(flow.connectionId);
+	if (flow.fail === 'propagation' && !conn.healed) {
+		// The permissions are not active yet: saved, last check failing.
+		conn.last_test_result = { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: 'Microsoft has not activated the new credentials yet.' }], tenant_name: conn.name };
+		return { status: 'done', step: 'propagation', error: 'The new credentials do not work yet (Microsoft can take a few minutes to propagate them). The tenant is saved: run Test again later.', error_code: 'propagation_timeout', connection: tenantView(conn) };
+	}
+	return { status: 'done', step: 'test', error: null, error_code: null, connection: tenantView(conn) };
+}
+
+function startFlow(extra) {
+	const flow = { id: `flow-${state.flowNext++}`, polls: 0, cancelled: false, fail: state.provisionFail, ...extra };
+	state.flows.set(flow.id, flow);
+	state.provisionCalls.push({ ...extra });
+	return send(201, { flow_id: flow.id, user_code: 'ABCD-EFGH', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900, interval: 2, message: 'To sign in, open https://microsoft.com/devicelogin and enter the code ABCD-EFGH.' });
+}
+
+/** Two stored `mailbox` values naming the same tenant mailbox (its id, address or sign-in name). */
+function sameMailbox(a, b) {
+	const names = (v) => {
+		const key = String(v ?? '').toLowerCase();
+		const mb = tenantDirectory().mailboxes.find((x) => [x.id, x.mail, x.upn].some((n) => n && n.toLowerCase() === key));
+		return mb ? mb.id : key;
+	};
+	return names(a) === names(b);
+}
+
+function mailboxName(v) {
+	const key = String(v ?? '').toLowerCase();
+	return tenantDirectory().mailboxes.find((x) => [x.id, x.mail, x.upn].some((n) => n && n.toLowerCase() === key))?.mail ?? String(v);
+}
+
+function handleTenants(parts, m, json, query) {
+	const C = state.sourceConnections;
+	if (parts[0] === 'provision') {
+		if (!state.provisionOn) return fail(409, 'Connect with Microsoft is not configured');
+		if (parts.length === 1 && m === 'POST') {
+			const body = json();
+			return startFlow({ cloud: body.cloud ?? null, name: String(body.name ?? '').trim() || null });
+		}
+		const flow = state.flows.get(parts[1]);
+		if (!flow) return fail(404, 'unknown flow');
+		if (m === 'DELETE') {
+			flow.cancelled = true;
+			return send(200, { ok: true });
+		}
+		// 'lost': mccb restarted meanwhile, the flow is no longer known
+		if (m === 'GET') return flow.cancelled || (flow.fail === 'lost' && flow.polls++ > 0) ? fail(404, 'unknown flow') : send(200, flowView(flow));
+	}
+	if (!parts.length) {
+		if (m === 'GET') return send(200, [...C.values()].map(tenantView));
+		const body = json();
+		let config;
+		let secrets;
+		try {
+			if (body.kind !== 'm365_graph') throw new Error('this connector has no directory');
+			config = tenantConfig(body);
+			secrets = tenantSecrets({}, body.secrets);
+			if (!secrets.client_secret) throw new Error("'client_secret' is required");
+			if (!String(body.name ?? '').trim()) throw new Error("'name' is required");
+		} catch (error) {
+			return fail(422, error.message);
+		}
+		const conn = { id: state.tenantNext++, name: body.name.trim(), kind: body.kind, config, secrets, notes: body.notes ?? null, last_test: null, last_test_result: null, created_at: Date.now() / 1000 };
+		C.set(conn.id, conn);
+		return send(201, tenantView(conn));
+	}
+	if (parts[0] === 'test' && m === 'POST') {
+		const body = json();
+		const stored = body.id != null ? C.get(Number(body.id)) : null;
+		let result;
+		try {
+			tenantConfig(body);
+			result = tenantCheck(body.config, tenantSecrets(stored?.secrets ?? {}, body.secrets));
+		} catch (error) {
+			result = { ok: false, checks: [{ key: 'token', ok: false, level: 'required', msg: error.message }] };
+		}
+		state.sourceTests.push({ id: body.id ?? null, kind: body.kind, config: body.config, has_secret: !!(body.secrets && Object.keys(body.secrets).length) });
+		return send(200, result);
+	}
+	const conn = C.get(Number(parts[0]));
+	if (!conn) return fail(404, 'unknown source connection');
+	if (parts[1] === 'deprovision' && m === 'POST') {
+		if (!state.provisionOn || !conn.provisioned) return fail(409, 'this connection was not created by Connect with Microsoft');
+		return startFlow({ remove: true, connectionId: conn.id });
+	}
+	if (parts[1] === 'test' && m === 'POST') {
+		conn.healed = true;
+		const result = tenantCheck(conn.config, conn.secrets);
+		state.sourceTests.push({ id: conn.id, kind: conn.kind, config: conn.config, has_secret: true });
+		conn.last_test = Date.now() / 1000;
+		conn.last_test_result = result;
+		return send(200, result);
+	}
+	if ((parts[1] === 'mailboxes' || parts[1] === 'match') && m === 'GET' && state.tenantFail) return fail(502, state.tenantFail);
+	if (parts[1] === 'mailboxes' && m === 'GET') {
+		const { mailboxes, hidden } = tenantDirectory();
+		return send(200, { fetched_at: Date.now() / 1000 - (query.get('refresh') === '1' ? 0 : 120), purpose_checked: true, mailboxes, hidden });
+	}
+	if (parts[1] === 'match' && m === 'GET') {
+		const server = state.servers.get(Number(query.get('server_id')));
+		if (!server) return fail(404, 'unknown server');
+		return send(200, tenantMatch(conn, server));
+	}
+	if (parts[1] === 'link' && m === 'POST') {
+		const body = json();
+		state.linkCalls.push(body);
+		const server = state.servers.get(Number(body.server_id));
+		if (!server) return fail(404, 'unknown server');
+		const tasksOk = !!conn.last_test_result?.checks?.find((c) => c.key === 'tasks')?.ok;
+		const include_tasks = (body.include_tasks ?? true) && tasksOk;
+		const linked = [];
+		const errors = [];
+		for (const l of body.links ?? []) {
+			const account = state.accounts.get(Number(l.account_id));
+			if (!account || account.server_id !== server.id) errors.push({ account_id: l.account_id, msg: 'not a mailbox of this server' });
+			else if ([...state.jobs.values()].some((j) => j.account_id === account.id && ['queued', 'running', 'paused', 'stopping'].includes(j.status))) errors.push({ account_id: account.id, msg: 'a job is active for this mailbox' });
+			else if (account.source?.connection?.id === conn.id && !sameMailbox(account.source.config?.mailbox, l.mailbox_id)) errors.push({ account_id: account.id, msg: `already the destination of ${mailboxName(account.source.config?.mailbox)}: set that one back to automatic first` });
+			else if (l.manual && account.source?.connection?.id !== conn.id && (account.source?.kind || (account.pst_id && state.psts.get(account.pst_id)?.status === 'valid'))) errors.push({ account_id: account.id, msg: 'the mailbox has another source' });
+			else {
+				if (l.manual)
+					for (const other of state.accounts.values())
+						if (other.id !== account.id && other.server_id === server.id && other.source?.connection?.id === conn.id && sameMailbox(other.source.config?.mailbox, l.mailbox_id)) {
+							other.source = undefined;
+							publish('account', accountView(other));
+						}
+				account.source = { kind: 'm365_graph', config: { mailbox: l.mailbox_id, include_tasks }, has_secret: false, connection: { id: conn.id, name: conn.name } };
+				account.srcSecrets = {};
+				account.pst_id = null;
+				linked.push(account.id);
+				publish('account', accountView(account));
+			}
+		}
+		if (errors.length && !linked.length) return fail(409, { msg: 'no mailbox linked', errors });
+		let batch = null;
+		const jobs = [];
+		if (body.start && linked.length) {
+			if (body.batch_name) {
+				batch = { id: state.next2.batch++, name: body.batch_name, created_at: Date.now() / 1000 };
+				state.batches.set(batch.id, batch);
+			}
+			for (const id of linked) {
+				const job = startJob(state.accounts.get(id));
+				if (batch) job.batch_id = batch.id;
+				if (body.mode) job.mode = body.mode;
+				publish('job', job);
+				jobs.push(job);
+			}
+		}
+		return send(200, { linked, errors, jobs: jobs.map((j) => ({ ...j })), batch_id: batch?.id ?? null });
+	}
+	if (parts.length === 1) {
+		if (m === 'GET') return send(200, tenantView(conn));
+		if (m === 'PUT') {
+			const body = json();
+			try {
+				const config = tenantConfig({ config: { ...conn.config, ...(body.config ?? {}) } });
+				const linked = tenantView(conn).accounts;
+				if (linked && (config.tenant_id !== conn.config.tenant_id || config.cloud !== conn.config.cloud)) return fail(409, 'mailboxes are linked to this tenant: create another tenant');
+				const secrets = tenantSecrets(conn.secrets, body.secrets);
+				const changed = JSON.stringify(config) !== JSON.stringify(conn.config) || JSON.stringify(secrets) !== JSON.stringify(conn.secrets);
+				Object.assign(conn, { config, secrets, name: body.name?.trim() || conn.name, notes: 'notes' in body ? body.notes : conn.notes });
+				if (changed) Object.assign(conn, { last_test: null, last_test_result: null });
+			} catch (error) {
+				return fail(422, error.message);
+			}
+			return send(200, tenantView(conn));
+		}
+		if (m === 'DELETE') {
+			const n = tenantView(conn).accounts;
+			if (n) return fail(409, { msg: `${n} account(s) are linked to this connection`, accounts: n });
+			C.delete(conn.id);
+			return send(200, { ok: true });
+		}
+	}
+	return null;
+}
+
+/** A tenant already registered, a server for it, and target mailboxes covering every match state. */
+function seedTenant() {
+	const now = Date.now() / 1000;
+	const ago = (minutes) => now - minutes * 60;
+	const dir = tenantDirectory().mailboxes;
+	const by = (local) => dir.find((x) => x.mail.startsWith(`${local}@`));
+	const checks = tenantCheck({}, { client_secret: 'seed' });
+	state.sourceConnections = new Map([[1, { id: 1, name: 'Contoso', kind: 'm365_graph', config: { tenant_id: '8d1f3c52-4a7e-4b60-9c2d-5e0a1b7f6d34', client_id: 'c4b2a9e1-7d3f-4a58-b6c0-2f9e8d1a0b57', cloud: 'global' }, secrets: { client_secret: 'seed' }, notes: 'Fictional demo tenant.', last_test: ago(35), last_test_result: checks, created_at: ago(2000) }]]);
+	state.tenantNext = 2;
+	state.tenantOn = true;
+	state.servers.set(3, makeServer(3, 'Yeti (Contoso)', 'mail.contoso.example', { caldav_url: 'https://dav.contoso.example/', carddav_url: 'https://dav.contoso.example/', last_test: ago(40), last_test_result: { imap: { ok: true, msg: 'IMAP server reachable', capabilities: [] }, caldav: { ok: true, msg: 'reachable (HTTP 207)' }, carddav: { ok: true, msg: 'reachable (HTTP 207)' } } }));
+	const tested = (over = {}) => ({ status: 'ok', last_test: ago(30), last_test_result: { imap: { ok: true, msg: 'IMAP connection successful', quota: null }, caldav: { ok: true, msg: 'CalDAV reachable' }, carddav: { ok: true, msg: 'CardDAV reachable' } }, ...over });
+	const conn = { id: 1, name: 'Contoso' };
+	const linkedSource = (mb) => ({ kind: 'm365_graph', config: { mailbox: mb.id, include_tasks: false }, has_secret: false, connection: conn });
+	let id = Math.max(0, ...state.accounts.keys()) + 1;
+	const add = (email, over = {}, serverId = 3) => {
+		const a = makeAccount(id, email, serverId, { ...tested(), ...over });
+		state.accounts.set(id++, a);
+		return a;
+	};
+	// ready
+	for (const l of ['camille.dupont', 'louis.richard', 'emma.durand', 'manon.simon', 'paul.roux', 'marc.fabre', 'support', 'accounting']) add(`${l}@contoso.example`);
+	add('alice.martin@contoso.example');
+	add('arthur@contoso.example'); // matched by alias
+	add('ines.garcia@contoso.example', { last_test: null, last_test_result: null, status: 'new' }); // matched by UPN, never tested
+	add('chloe.robert@contoso.example', { options: { mail: true, calendar: false, contacts: true } });
+	// linked, one with a finished job
+	const hugo = add('hugo.martin@contoso.example', { source: linkedSource(by('hugo.martin')) });
+	const lea = add('lea.bernard@contoso.example', { source: linkedSource(by('lea.bernard')), last_test_result: { imap: { ok: true, msg: 'IMAP connection successful' }, caldav: { ok: false, msg: 'CalDAV: 401 Unauthorized' }, carddav: { ok: true, msg: 'CardDAV reachable' } } });
+	// other source: a PST and an IMAP source
+	add('nathan.petit@contoso.example', { pst_id: 1 });
+	// target without source mailbox
+	add('stagiaire@contoso.example');
+	add('scanner@contoso.example');
+	// the same account on the DAV-less server, to show the banner
+	for (const l of ['camille.dupont', 'hugo.martin', 'emma.durand']) add(`${l}@contoso.example`, {}, 2);
+	for (const [a, started] of [[hugo, 90], [lea, 85]]) {
+		const jid = state.next.job++;
+		const progress = emptyProgress();
+		for (const k of Object.keys(progress)) progress[k] = { done: 100, total: 100, errors: 0 };
+		state.jobs.set(jid, { id: jid, account_id: a.id, status: 'done', phase: 'verify', progress, current_folder: null, rate: null, rate_bytes: null, eta: 0, started_at: ago(started), finished_at: ago(started - 20), error: null, mode: 'full', created_at: ago(started + 1), tuning: null, priority: 0, batch_id: null, pause_reason: null });
+		state.logs.set(jid, []);
+	}
+	state.next.account = Math.max(state.next.account, ...state.accounts.keys()) + 1;
+	state.next.server = Math.max(state.next.server, 4);
 }

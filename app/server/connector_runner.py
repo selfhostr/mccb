@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from ..connectors import registry, wiring
-from ..connectors.base import (CAP_INCREMENTAL, CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, OutgoingItem,
-                               Target, stamp_import_id)
+from ..connectors.base import (CAP_INCREMENTAL, CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, FolderPlan,
+                               OutgoingItem, Target, stamp_import_id)
 from . import crash, db, foldermap, ordering
 from . import policy as pol
 from .config import settings
@@ -220,6 +220,14 @@ class ConnectorJobRunner(JobRunner):
                 raise JobFailed(f"Source ({self.source_kind}): {e}") from e
             self._mark()
             self.folders = [f for f in self.folders if not self._excluded(f)]
+            for f in self.folders:
+                if f.skip and f.kind in CARRIED and self._wanted(f.kind):
+                    self.log(f"Folder '{folder_key(f.path)}' ({f.kind}) not migrated: {f.skip}")
+                    # items of an earlier run are no longer part of the migration (nor of its checks)
+                    db.ex("UPDATE items SET status='skipped', error=? WHERE account_id=? AND pst_key=? AND kind=? "
+                          "AND folder IN (?, ?)", (f"not migrated: {f.skip}"[:2000], self.account_id, self.pst_key,
+                                                   CARRIED[f.kind], folder_key(f.path), legacy_folder_key(f.path)))
+            self.folders = [f for f in self.folders if not f.skip]
             if self.mode == "delta":
                 try:
                     self._incremental = CAP_INCREMENTAL in registry.role_of(self.source_kind, "source").capabilities
@@ -385,11 +393,20 @@ class ConnectorJobRunner(JobRunner):
             folders = [f for f in self.folders if f.kind == phase]
             for f in folders:
                 fk = folder_key(f.path)
+                p = plan[fk]
                 try:
-                    self._on_session(session, lambda: session.ensure_folder(plan[fk].name, plan[fk].flag))
+                    if p.label:  # a DAV collection to create under the name of the source folder
+                        self._on_session(session, lambda: session.ensure_folder(p.name, p.flag, label=p.label))
+                    else:
+                        self._on_session(session, lambda: session.ensure_folder(p.name, p.flag))
                 except ConnectorError as e:
                     if e.kind != ConnectorError.REJECTED:
                         raise JobFailed(f"Target ({phase}): {e}") from e
+                    if p.fallback:
+                        plan[fk] = FolderPlan(p.fallback)
+                        self.log(f"Folder '{fk}': the target refused to create '{p.label or p.name}' ({e}): its "
+                                 f"items go to {p.fallback}", "warning")
+                        continue
                     # refused: only the items of this folder are in error, the mailbox continues
                     self.folder_errors[fk] = f"folder '{plan[fk].name}' not created: {e}"
                     self.log(f"Folder '{fk}': {self.folder_errors[fk]}", "error")
@@ -431,10 +448,14 @@ class ConnectorJobRunner(JobRunner):
             for ckey, cursor in self._cursors.items():
                 db.kv_set(ckey, cursor)
             self._cursors.clear()
+            # one check per target folder: several source folders may share it (e.g. DAV fallback)
+            shared: dict[str, list[str]] = {}
             for f in folders:
                 fk = folder_key(f.path)
                 if fk not in self.folder_errors:
-                    self._check_target(session, phase, fk, plan[fk].name)
+                    shared.setdefault(plan[fk].name, []).append(fk)
+            for target_name, fks in shared.items():
+                self._check_target(session, phase, fks, target_name)
         finally:
             if pool is not None:
                 try:
@@ -497,7 +518,7 @@ class ConnectorJobRunner(JobRunner):
             mark = norm_hash(raw)
         else:
             digest = hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:32]
-            raw, name = got.raw, got.name or f"{digest}.{DAV_EXT[phase]}"
+            raw, name = got.raw, got.name or self.targets[phase].resource_name(got.raw, f"{digest}.{DAV_EXT[phase]}")
             mark = name  # as on the PST path: the hash column of a DAV item is its resource name
         if self._size_gate(kind, key, fkey, len(raw), got.subject, target, it.alt_key):
             return
@@ -510,9 +531,11 @@ class ConnectorJobRunner(JobRunner):
                                       name=name))
 
     # ------------------------------------------------------------ checks
-    def _check_target(self, session, phase: str, fkey: str, target: str) -> dict:
-        """Items of ours present in a target folder >= items marked as sent to it. Pre-existing content is not
-        counted. Same report entries as the PST path."""
+    def _check_target(self, session, phase: str, fkeys: list[str], target: str) -> dict:
+        """Items of ours present in a target folder >= items marked as sent to it, whatever source folders they came
+        from (`fkeys`: those mapped to it). Pre-existing content is not counted. Same report entries as the PST path."""
+        fkey = fkeys[0]
+        label = ", ".join(f"'{k}'" for k in fkeys)
         kind = CARRIED[phase]
         where = (self.account_id, self.pst_key, kind, target)
         n_ok = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? AND "
@@ -529,12 +552,22 @@ class ConnectorJobRunner(JobRunner):
         ok = present is not None and present >= n_ok
         entry = {"path": self._path_of(fkey), "folder": fkey, "target": target, "sent": n_ok, "present": present,
                  "ok": ok}
+        if len(fkeys) > 1:
+            entry["folders"] = list(fkeys)
         if phase == MAIL:
             self.report["folders"] = [x for x in self.report["folders"] if x["target"] != target] + [entry]
         else:
-            self.report["dav"][phase] = {"url": target, "sent": n_ok, "present": present, "ok": ok}
+            dav = self.report["dav"].get(phase) or {}
+            cols = {c["url"]: c for c in dav.get("collections") or []}
+            cols[target] = {"url": target, "folders": list(fkeys), "sent": n_ok, "present": present, "ok": ok}
+            rows = list(cols.values())
+            self.report["dav"][phase] = {
+                "url": rows[0]["url"], "sent": sum(c["sent"] for c in rows),
+                "present": None if any(c["present"] is None for c in rows) else sum(c["present"] for c in rows),
+                "ok": all(c["ok"] for c in rows), "collections": rows}
         if not ok:
-            self.log(f"Folder check '{fkey}': {present} present < {n_ok} sent", "error")
+            where = "" if phase == MAIL else f" -> {target}"
+            self.log(f"Folder check {label}{where}: {present} present < {n_ok} sent", "error")
         return entry
 
     def verify_targets(self, phases: list[str]) -> None:
@@ -546,13 +579,17 @@ class ConnectorJobRunner(JobRunner):
             target = self.targets[phase]
             session = target.session()
             try:
-                rows = db.q("SELECT target, MIN(folder) folder FROM items WHERE account_id=? AND pst_key=? AND kind=? "
-                            "AND status='ok' GROUP BY target", (self.account_id, self.pst_key, kind))
+                rows = db.q("SELECT target, folder FROM items WHERE account_id=? AND pst_key=? AND kind=? "
+                            "AND status='ok' GROUP BY target, folder ORDER BY target, folder",
+                            (self.account_id, self.pst_key, kind))
+                by_target: dict[str, list[str]] = {}
                 for t in rows:
+                    by_target.setdefault(t["target"], []).append(t["folder"])
+                for target_name, fks in by_target.items():
                     self.check()
-                    e = self._check_target(session, phase, t["folder"], t["target"])
+                    e = self._check_target(session, phase, fks, target_name)
                     if not e["ok"]:
-                        problems.append(f"folder {t['folder']}: {e['present']} present < {e['sent']} sent")
+                        problems.append(f"folder {', '.join(fks)}: {e['present']} present < {e['sent']} sent")
                 if phase == MAIL and CAP_READBACK in target.capabilities:
                     self._verify_sample(session, verify, problems)
             except ConnectorError as e:

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import ArrowRightLeft from '@lucide/svelte/icons/arrow-right-left';
+	import CopyX from '@lucide/svelte/icons/copy-x';
 	import FolderOpen from '@lucide/svelte/icons/folder-open';
 	import FolderUp from '@lucide/svelte/icons/folder-up';
 	import LogOut from '@lucide/svelte/icons/log-out';
@@ -23,11 +24,16 @@
 	import FilesPage from './files/FilesPage.svelte';
 	import MigrationsPage from './migrations/MigrationsPage.svelte';
 	import ServersPage from './settings/ServersPage.svelte';
+	import DuplicatesPage from './duplicates/DuplicatesPage.svelte';
 	import RepairPage from './repair/RepairPage.svelte';
 	import SettingsPage from './settings/SettingsPage.svelte';
+	import TenantPage from './tenant/TenantPage.svelte';
 
 	/** extra: only the static demo passes one (its badge); the product never does. */
 	let { onlogout, extra: Extra }: { onlogout: () => void; extra?: Component<{ part: 'badge' | 'footer' }> } = $props();
+
+	// The matching screen belongs to Migrations.
+	const isCurrent = (page: string) => router.route.page === page || (page === 'migrations' && router.route.page === 'tenant');
 
 	// Same width as --side-w in tokens.css: a column on the left, else a bar on top. Only one is in the page.
 	const wide = new MediaQuery('min-width: 64rem');
@@ -39,6 +45,7 @@
 		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: FolderOpen, count: data.psts.size, alert: false },
 		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length, alert: false },
 		{ page: 'repair', href: '/repair', label: m.shell_nav_repair(), icon: Wrench, count: 0, alert: false },
+		{ page: 'duplicates', href: '/duplicates', label: m.shell_nav_duplicates(), icon: CopyX, count: 0, alert: false },
 		{ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false }
 	]);
 
@@ -86,7 +93,7 @@
 		<nav class="flex flex-col gap-0.5 px-3" aria-label={m.shell_nav_label()}>
 			{#each NAV as item (item.page)}
 				{@const Icon = item.icon}
-				{@const current = router.route.page === item.page}
+				{@const current = isCurrent(item.page)}
 				<a
 					class={`flex min-h-10 items-center gap-3 rounded-btn px-3 no-underline transition-colors duration-200 ${current ? 'bg-surface-2 font-medium text-ink' : 'text-ink-2 hover:bg-ghost hover:text-ink'}`}
 					href={item.href}
@@ -115,12 +122,12 @@
 				<img src={asset('favicon.svg')} alt="" width="28" height="28" />
 				<span class="text-[0.9375rem] font-semibold">mccb</span>
 			</a>
-			<nav class="order-last flex w-full gap-0.5 sm:order-none sm:ml-2 sm:w-auto" aria-label={m.shell_nav_label()}>
+			<nav class="order-last -mx-1 flex w-full gap-0.5 overflow-x-auto px-1 [scrollbar-width:none] sm:order-none sm:ml-2 sm:mx-0 sm:w-auto sm:overflow-visible sm:px-0 [&::-webkit-scrollbar]:hidden" aria-label={m.shell_nav_label()}>
 				{#each NAV as item (item.page)}
 					<a
-						class={`inline-flex min-h-10 items-center rounded-btn px-3 no-underline transition-colors duration-200 ${router.route.page === item.page ? 'bg-surface-2 font-medium text-ink' : 'text-ink-2 hover:text-ink'}`}
+						class={`inline-flex min-h-10 shrink-0 items-center whitespace-nowrap rounded-btn px-3 no-underline transition-colors duration-200 ${isCurrent(item.page) ? 'bg-surface-2 font-medium text-ink' : 'text-ink-2 hover:text-ink'}`}
 						href={item.href}
-						aria-current={router.route.page === item.page ? 'page' : undefined}
+						aria-current={isCurrent(item.page) ? 'page' : undefined}
 					>
 						{item.label}
 					</a>
@@ -142,6 +149,10 @@
 		<ServersPage />
 	{:else if router.route.page === 'repair'}
 		<RepairPage />
+	{:else if router.route.page === 'duplicates'}
+		<DuplicatesPage />
+	{:else if router.route.page === 'tenant'}
+		<TenantPage />
 	{:else}
 		<SettingsPage />
 	{/if}

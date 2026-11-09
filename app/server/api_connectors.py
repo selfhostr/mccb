@@ -7,7 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..connectors import registry, sieve, wiring
+from ..connectors import m365_provision, registry, sieve, wiring
 from ..connectors.base import CAP_RULES, ConnectorError
 from . import db, planning, repo
 from .security import decrypt
@@ -21,6 +21,9 @@ class EndpointIn(BaseModel):
     config: dict[str, Any] | None = None
     # omitted: kept. {}: cleared. {name: value}: that value replaced, the others kept.
     secrets: dict[str, str] | None = None
+    # PUT /accounts/{id}/source only: read through this source connection (config: the mailbox fields only).
+    # Omitted: the account's own settings, any link is dropped.
+    connection_id: int | None = None
 
 
 class ProbeIn(BaseModel):
@@ -77,7 +80,11 @@ def _stored(token: str | None) -> dict:
 
 @router.get("/connectors")
 def list_connectors():
-    return registry.catalogue()
+    out = registry.catalogue()
+    for c in out:
+        if c["kind"] == "m365_graph":  # "Connect with Microsoft" available (bootstrap app configured)
+            c["provision"] = bool(m365_provision.bootstrap_client_id())
+    return out
 
 
 @router.get("/accounts/{aid:int}/source")
@@ -91,20 +98,52 @@ def put_source(aid: int, body: EndpointIn):
     duplicates."""
     r = _account(aid)
     _idle(aid)
+    if body.connection_id is not None:
+        _link_source(r, body)
+        return repo.get_account(aid)
     kind = body.kind or wiring.PST
     if kind == wiring.PST:
         pst_id = (body.config or {}).get("pst_id", r["pst_id"])
         if pst_id is not None and (not isinstance(pst_id, int) or not repo.get_pst(pst_id)):
             raise HTTPException(404, "unknown PST")
-        db.ex("UPDATE accounts SET source_kind=NULL, source_config=NULL, source_secret_enc=NULL, pst_id=? WHERE id=?",
-              (pst_id, aid))
+        db.ex("UPDATE accounts SET source_kind=NULL, source_config=NULL, source_secret_enc=NULL, "
+              "source_connection_id=NULL, pst_id=? WHERE id=?", (pst_id, aid))
         wiring.sync_files_source(aid)  # an uploaded mbox, Maildir, .eml... is read by the `files` connector
     else:
         current = _stored(r["source_secret_enc"]) if r["source_kind"] == kind else {}
         config, secrets = _validated(kind, "source", body.config, current, body.secrets)
-        db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=? WHERE id=?",
-              (kind, db.jdump(config), wiring.dump_secrets(secrets), aid))
+        db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=?, source_connection_id=NULL "
+              "WHERE id=?", (kind, db.jdump(config), wiring.dump_secrets(secrets), aid))
     return repo.get_account(aid)
+
+
+def _link_source(r, body: EndpointIn) -> None:
+    """The account's source read through a source connection: the merged config is validated, only the
+    mailbox-scoped fields are stored on the account, its own secrets are dropped (those of the connection serve)."""
+    conn = db.q1("SELECT * FROM source_connections WHERE id=?", (body.connection_id,))
+    if conn is None:
+        raise HTTPException(404, "unknown source connection")
+    kind = body.kind or conn["kind"]
+    if kind != conn["kind"]:
+        raise HTTPException(422, f"this source connection is for '{conn['kind']}'")
+    if body.secrets:
+        raise HTTPException(422, "the secrets of a linked source are those of its connection")
+    try:
+        role = registry.role_of(kind, "source")
+    except ConnectorError as e:
+        raise HTTPException(422, str(e)) from e
+    mailbox = {f.name for f in registry.split_fields(role, "mailbox")}
+    given = dict(body.config or {})
+    extra = sorted(k for k in given if k not in mailbox)
+    if extra:
+        raise HTTPException(422, f"'{extra[0]}' is not a mailbox setting: it comes from the source connection")
+    try:
+        merged = registry.normalize_config(role, {**given, **(db.jload(conn["config"], {}) or {})})
+    except ConnectorError as e:
+        raise HTTPException(422, str(e)) from e
+    config = {k: v for k, v in merged.items() if k in mailbox}
+    db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=NULL, source_connection_id=? "
+          "WHERE id=?", (kind, db.jdump(config), conn["id"], r["id"]))
 
 
 @router.get("/accounts/{aid:int}/target")

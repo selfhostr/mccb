@@ -358,8 +358,21 @@ class FakeGraph:
         self.expire_next_token = False
         self.fail: dict[str, tuple[int, str]] = {}  # "POST:/calendar/events" -> (status, code)
         self.delta_expired = False
+        self.delta_calls: list[dict] = []
         self.forbid: set[str] = set()
         self.base_versions: list[str] = []
+        # tenant directory: users as Graph returns them, the userPurpose of each ("shared", 404, 403; absent: "user")
+        self.directory: list[dict] = []
+        self.purposes: dict[str, str | int] = {}
+        self.roles: list[str] | None = None   # None: the access token is not a JWT
+        self.org_name: str | None = "Contoso Ltd"
+        self.last_token = ""
+
+    def _access_token(self) -> str:
+        if self.roles is None:
+            return f"tok{self.tokens}"
+        enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+        return f"{enc({'alg': 'none'})}.{enc({'roles': self.roles})}.tok{self.tokens}"
 
     def new_id(self, prefix: str) -> str:
         self.seq += 1
@@ -373,19 +386,36 @@ class FakeGraph:
             if form.get("client_secret") != self.SECRET:
                 return httpx.Response(401, json={"error": "invalid_client", "error_description": "AADSTS7000215: wrong secret"})
             self.tokens += 1
-            return httpx.Response(200, json={"access_token": f"tok{self.tokens}", "expires_in": 3599, "token_type": "Bearer"})
+            self.last_token = self._access_token()
+            return httpx.Response(200, json={"access_token": self.last_token, "expires_in": 3599, "token_type": "Bearer"})
         self.requests.append(request)
         if self.throttle:
             return httpx.Response(429, headers={"Retry-After": str(self.throttle.pop(0))}, json={
                 "error": {"code": "ApplicationThrottled", "message": "too many requests"}})
-        if request.headers.get("authorization") != f"Bearer tok{self.tokens}" or self.expire_next_token:
+        if request.headers.get("authorization") != f"Bearer {self.last_token}" or self.expire_next_token:
             self.expire_next_token = False
             return httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken", "message": "expired"}})
-        m_ = re.match(r"^/(v1\.0|beta)/users/([^/]+)(/.*)$", urllib.parse.unquote(url.path))
+        upath = urllib.parse.unquote(url.path)
+        if (d := re.match(r"^/(?:v1\.0|beta)(/users|/organization)$", upath)) and request.method == "GET":
+            if d.group(1) == "/users":
+                return self._page(request, self.directory, dict(url.params.multi_items()))
+            return httpx.Response(200, json={"value": [{"displayName": self.org_name}] if self.org_name else []})
+        m_ = re.match(r"^/(v1\.0|beta)/users/([^/]+)(/.*)$", upath)
         if not m_:
             return self._err(404, "ResourceNotFound")
         self.base_versions.append(m_.group(1))
-        if m_.group(2).lower() != self.mailbox.lower():
+        ref = m_.group(2)
+        known = next((u for u in self.directory if u["id"] == ref), None)
+        if known is not None and m_.group(3) == "/mailboxSettings":
+            purpose = self.purposes.get(ref, "user")
+            if isinstance(purpose, int):
+                return self._err(purpose, "ErrorInvalidUser" if purpose == 404 else "ErrorAccessDenied")
+            return httpx.Response(200, json={"userPurpose": purpose})
+        if known is not None and m_.group(3).startswith("/mailFolders/inbox") and known.get("mail", "") != self.mailbox:
+            return httpx.Response(200, json={"id": "mf-inbox"})
+        if known is not None and known.get("mail"):
+            ref = known["mail"]  # a user id stands for the address
+        if ref.lower() != self.mailbox.lower():
             return self._err(404, "ErrorInvalidUser")
         path = m_.group(3)
         key = f"{request.method}:{path}"
@@ -469,6 +499,14 @@ class FakeGraph:
         if (g := re.match(r"^/messages/([^/]+)/\$value$", path)):
             m2 = self.messages.get(g.group(1))
             return httpx.Response(200, content=m2["mime"]) if m2 else self._err(404, "ErrorItemNotFound")
+        if (g := re.match(r"^/messages/([^/]+)$", path)) and method == "GET":
+            m2 = self.messages.get(g.group(1))
+            if m2 is None:
+                return self._err(404, "ErrorItemNotFound")
+            out = {k: v for k, v in m2.items() if k != "mime"}
+            if "singleValueExtendedProperties" not in (params.get("$expand") or ""):
+                out.pop("singleValueExtendedProperties", None)
+            return httpx.Response(200, json=out)
         if (g := re.match(r"^/messages/([^/]+)$", path)) and method == "PATCH":
             m2 = self.messages.get(g.group(1))
             if m2 is None:
@@ -502,8 +540,8 @@ class FakeGraph:
                 self.contacts[cid] = dict(body, id=cid, folder=fid)
                 return httpx.Response(201, json={"id": cid})
             return self._collection(request, path, params, [c for c in self.contacts.values() if c.get("folder") == fid], "")
-        if path == "/contacts/delta":
-            return self._simple_delta(request, list(self.contacts.values()), params)
+        if (g := re.match(r"^/contactFolders/([^/]+)/contacts/delta$", path)):  # no /contacts/delta in v1.0
+            return self._tracked(request, [c for c in self.contacts.values() if c.get("folder") == g.group(1)], params)
         if (g := re.match(r"^(?:/contactFolders/[^/]+)?/contacts/([^/]+)$", path)):
             c = self.contacts.get(g.group(1))
             return httpx.Response(200, json=c) if c else self._err(404, "ErrorItemNotFound")
@@ -527,6 +565,8 @@ class FakeGraph:
                 self.tasks[tid] = dict(body, id=tid, listId=g.group(1))
                 return httpx.Response(201, json={"id": tid})
             return self._page(request, [x for x in self.tasks.values() if x["listId"] == g.group(1)], params)
+        if (g := re.match(r"^/todo/lists/([^/]+)/tasks/delta$", path)):
+            return self._tracked(request, [x for x in self.tasks.values() if x["listId"] == g.group(1)], params)
         if (g := re.match(r"^/todo/lists/([^/]+)/tasks/([^/]+)$", path)):
             x = self.tasks.get(g.group(2))
             return httpx.Response(200, json=x) if x else self._err(404, "ErrorItemNotFound")
@@ -577,7 +617,18 @@ class FakeGraph:
             rows = rows[int(params["$deltatoken"]):]
         return self._simple_delta(request, rows, params, base=int(params.get("$deltatoken") or 0))
 
+    def _tracked(self, request, rows, params) -> httpx.Response:
+        base = int(params.get("$deltatoken") or 0)
+        return self._simple_delta(request, rows[base:], params, base=base)
+
     def _simple_delta(self, request, rows, params, base=0) -> httpx.Response:
+        if "$expand" in params:  # Exchange Online, whatever the documentation of message delta says
+            return self._err(400, "BadRequest", "Parsing OData Select and Expand failed: Value cannot be null. "
+                                                "(Parameter 'initialState')")
+        if "$filter" in params or "$orderby" in params and params["$orderby"] != "receivedDateTime desc":
+            return self._err(400, "BadRequest", "simulated server: unsupported query on a delta")
+        self.delta_calls.append(dict(params))
+        rows = [{k: v for k, v in r.items() if k != "singleValueExtendedProperties"} for r in rows]
         skip = int(params.get("$skiptoken") or 0)
         page = rows[skip:skip + self.page_limit]
         body: dict = {"value": page}
@@ -635,3 +686,183 @@ class FakeGraph:
             self.instances.pop(eid, None)
             return httpx.Response(204)
         return httpx.Response(200, json=e)
+
+
+# ------------------------------------------------------------------ Entra (provisioning of the tenant app)
+GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+# the delegated scopes each endpoint needs (any one of them), as Microsoft Graph enforces them on the `scp` claim
+ADMIN_SCOPES = {
+    ("GET", "organization"): ("User.Read", "Organization.Read.All", "Directory.Read.All"),
+    ("GET", "servicePrincipals"): ("Application.Read.All", "Application.ReadWrite.All"),
+    ("POST", "applications"): ("Application.ReadWrite.All",),
+    ("POST", "servicePrincipals"): ("Application.ReadWrite.All",),
+    ("POST", "addPassword"): ("Application.ReadWrite.All",),
+    ("DELETE", "applications"): ("Application.ReadWrite.All",),
+    ("POST", "appRoleAssignedTo"): ("AppRoleAssignment.ReadWrite.All",),
+    ("POST", "appRoleAssignments"): ("AppRoleAssignment.ReadWrite.All",),
+}
+
+
+def _jwt(claims: dict, signature: str) -> str:
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.{signature}"
+
+
+class FakeEntra(FakeGraph):
+    """FakeGraph plus what "Connect with Microsoft" uses: the device code flow of the bootstrap app (delegated token:
+    a JWT whose `scp` holds the scopes asked at the devicecode endpoint, enforced per endpoint), the application
+    objects of the tenant, and a propagation delay of the new credentials."""
+
+    def __init__(self, mailbox: str = "me@contoso.test"):
+        super().__init__(mailbox)
+        self.tenant_id = "tid-contoso"
+        self.device_code = "dev-code-1"
+        self.pending = 2               # authorization_pending answers before the sign-in completes
+        self.device_error: tuple[str, str] | None = None   # (error, error_description) instead of the token
+        self.device_requests: list[dict] = []
+        self.scopes: list[str] = []    # the delegated scopes asked at the devicecode endpoint, resource prefix removed
+        self.delegated: list[str] = []  # the delegated tokens issued
+        self.upn = "admin@contoso.test"
+        self.org_forbidden = False     # True: GET /organization is 403 whatever the scopes
+        self.refused: list[tuple[str, str, int]] = []   # (method, path, status) of the delegated calls refused
+        self.admin = True              # False: POST /applications is 403 (not an administrator)
+        self.consent_forbidden = False  # True: the app role assignments are 403
+        self.propagation = 2           # client-credential tokens of a new app refused before it works
+        self.applications: dict[str, dict] = {}
+        self.passwords: dict[str, str] = {}   # appId -> secret
+        self.assignments: list[dict] = []
+        self.deleted: list[str] = []
+        # the Graph service principal of the tenant: role ids are per role, not to be hardcoded
+        self.graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "appRoles": [
+            {"id": f"role-{i}-{v.lower()}", "value": v, "allowedMemberTypes": ["Application"]}
+            for i, v in enumerate(["Mail.ReadWrite", "User.Read.All", "Mail.Read", "Calendars.Read", "Contacts.Read",
+                                   "MailboxSettings.Read", "Tasks.Read.All", "Directory.Read.All"])]}
+        self.service_principals: dict[str, dict] = {"sp-graph": self.graph_sp}
+
+    def role_value(self, role_id: str) -> str:
+        return next(r["value"] for r in self.graph_sp["appRoles"] if r["id"] == role_id)
+
+    @property
+    def DELEGATED(self) -> str:  # noqa: N802 - the last delegated token issued
+        return self.delegated[-1] if self.delegated else "delegated-token-none"
+
+    def _delegated_token(self) -> str:
+        tok = _jwt({"tid": self.tenant_id, "upn": self.upn, "scp": " ".join(self.scopes)},
+                   f"delegated-token-XYZ{len(self.delegated)}")
+        self.delegated.append(tok)
+        return tok
+
+    def _scp(self, request: httpx.Request) -> set[str]:
+        claims = json.loads(base64.urlsafe_b64decode(
+            request.headers["authorization"].split()[1].split(".")[1] + "=="))
+        return set(claims.get("scp", "").split())
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        url = request.url
+        if url.host.startswith("login."):
+            form = dict(urllib.parse.parse_qsl(request.content.decode()))
+            if url.path.endswith("/devicecode"):
+                self.device_requests.append(form)
+                self.scopes = [x.rsplit("/", 1)[-1] for x in form.get("scope", "").split()]
+                return httpx.Response(200, json={
+                    "device_code": self.device_code, "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://microsoft.com/devicelogin", "expires_in": 900, "interval": 5,
+                    "message": "To sign in, use a web browser to open https://microsoft.com/devicelogin and enter "
+                               "the code ABCD-EFGH to authenticate."})
+            if form.get("grant_type") == DEVICE_GRANT:
+                self.device_requests.append(form)
+                if form.get("device_code") != self.device_code:
+                    return httpx.Response(400, json={"error": "bad_verification_code"})
+                if self.pending > 0:
+                    self.pending -= 1
+                    return httpx.Response(400, json={"error": "authorization_pending",
+                                                     "error_description": "AADSTS70016: pending"})
+                if self.device_error:
+                    return httpx.Response(400, json={"error": self.device_error[0],
+                                                     "error_description": self.device_error[1]})
+                return httpx.Response(200, json={"access_token": self._delegated_token(), "token_type": "Bearer",
+                                                 "expires_in": 3599})
+            app = next((a for a in self.applications.values() if a["appId"] == form.get("client_id")), None)
+            if app is not None:
+                self.token_requests.append(form)
+                if self.propagation > 0 or form.get("client_secret") != self.passwords.get(app["appId"]):
+                    self.propagation = max(0, self.propagation - 1)
+                    return httpx.Response(401, json={"error": "invalid_client",
+                                                     "error_description": "AADSTS7000215: Invalid client secret."})
+                sp = next(s for s in self.service_principals.values() if s.get("appId") == app["appId"])
+                self.roles = [self.role_value(a["appRoleId"]) for a in self.assignments if a["principalId"] == sp["id"]]
+                self.tokens += 1
+                self.last_token = self._access_token()
+                return httpx.Response(200, json={"access_token": self.last_token, "expires_in": 3599})
+            return super().__call__(request)
+        if request.headers.get("authorization", "").removeprefix("Bearer ") in self.delegated:
+            self.requests.append(request)
+            path = urllib.parse.unquote(url.path)
+            r = self._scope_check(request, path) or self._admin(request, path, dict(url.params.multi_items()))
+            if r.status_code in (401, 403):
+                self.refused.append((request.method, path, r.status_code))
+            return r
+        return super().__call__(request)
+
+    def _scope_check(self, request: httpx.Request, path: str) -> httpx.Response | None:
+        parts = path.strip("/").split("/")
+        key = (request.method, parts[-1] if parts[-1] in ("addPassword", "appRoleAssignedTo", "appRoleAssignments") else parts[1])
+        needed = ADMIN_SCOPES.get(key)
+        assert needed, f"delegated scope of {key} not simulated"
+        if not self._scp(request) & set(needed):
+            return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+        if key == ("GET", "organization") and self.org_forbidden:
+            return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+        return None
+
+    def _admin(self, request: httpx.Request, path: str, params: dict) -> httpx.Response:
+        method = request.method
+        body = json.loads(request.content) if request.content else {}
+        if path == "/v1.0/organization" and method == "GET":
+            return httpx.Response(200, json={"value": [{"id": self.tenant_id, "displayName": self.org_name}]})
+        if path == "/v1.0/servicePrincipals" and method == "GET":
+            got = re.match(r"^appId eq '([^']+)'$", params.get("$filter", ""))
+            assert got, f"filter not supported by the simulated server: {params.get('$filter')}"
+            return httpx.Response(200, json={"value": [s for s in self.service_principals.values()
+                                                       if s.get("appId") == got.group(1)]})
+        if path == "/v1.0/applications" and method == "POST":
+            if not self.admin:
+                return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+            oid = self.new_id("app-obj-")
+            self.applications[oid] = {**body, "id": oid, "appId": self.new_id("app-id-")}
+            return httpx.Response(201, json=self.applications[oid])
+        if path == "/v1.0/servicePrincipals" and method == "POST":
+            if not any(a["appId"] == body.get("appId") for a in self.applications.values()):
+                return self._err(400, "Request_BadRequest", "unknown appId")
+            sid = self.new_id("sp-")
+            self.service_principals[sid] = {"id": sid, "appId": body["appId"]}
+            return httpx.Response(201, json=self.service_principals[sid])
+        if (g := re.match(r"^/v1\.0/servicePrincipals/([^/]+)/(appRoleAssignedTo|appRoleAssignments)$", path)) \
+                and method == "POST":
+            if self.consent_forbidden:
+                return self._err(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+            assert body["resourceId"] == "sp-graph" and body["principalId"] in self.service_principals
+            assert any(r["id"] == body["appRoleId"] for r in self.graph_sp["appRoles"])
+            self.assignments.append(dict(body))
+            return httpx.Response(201, json={**body, "id": self.new_id("asg-")})
+        if (g := re.match(r"^/v1\.0/applications/([^/]+)/addPassword$", path)) and method == "POST":
+            app = self.applications.get(g.group(1))
+            if app is None:
+                return self._err(404, "Request_ResourceNotFound")
+            secret = f"app-secret-{self.new_id('')}-S3CR3T"
+            self.passwords[app["appId"]] = secret
+            return httpx.Response(200, json={"keyId": "k1", "secretText": secret,
+                                             "displayName": body["passwordCredential"]["displayName"],
+                                             "endDateTime": body["passwordCredential"].get("endDateTime")})
+        if (g := re.match(r"^/v1\.0/applications/([^/]+)$", path)) and method == "DELETE":
+            app = self.applications.pop(g.group(1), None)
+            if app is None:
+                return self._err(404, "Request_ResourceNotFound")
+            self.deleted.append(g.group(1))
+            for sid in [s for s, v in self.service_principals.items() if v.get("appId") == app["appId"]]:
+                del self.service_principals[sid]
+            return httpx.Response(204)
+        return self._err(404, "Request_ResourceNotFound", f"not simulated: {method} {path}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from typing import Iterator
 
 from ..server.dav import DavClient, DavError
@@ -22,8 +23,10 @@ def convert(e: DavError) -> ConnectorError:
 
 
 class DavSession(TargetSession):
-    def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT"):
+    def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT",
+                 labels: dict[str, str] | None = None):
         self.dav_kind = dav_kind  # caldav | carddav
+        self.labels = labels if labels is not None else {}  # collection to create -> its name (shared by the target)
         self.component = component  # VTODO: a calendar that accepts tasks
         self.config = config
         self.password = secrets.get("password") or ""
@@ -47,23 +50,71 @@ class DavSession(TargetSession):
         self.ensure()
         return self.client  # type: ignore[return-value]
 
-    def _collection(self) -> str:
+    def _discovery(self) -> tuple[str, str | None]:
+        """(default collection, created when there is none; home of the collections, None when unknown)."""
         cfg = self.config
+        c = self._c()
         try:
-            return self._c().discover(self.dav_kind, cfg.get("url") or None, cfg.get("email") or cfg.get("login") or "",
-                                      cfg.get("discovery_host") or "", component=self.component)
+            coll, home = c._discover(self.dav_kind, cfg.get("url") or None, cfg.get("email") or cfg.get("login") or "",
+                                     cfg.get("discovery_host") or "", True, self.component)
         except DavError as e:
             raise convert(e) from e
+        if coll is None:
+            raise ConnectorError(f"no {self.dav_kind} collection found", ConnectorError.REJECTED)
+        return coll, home
+
+    def _collection(self) -> str:
+        return self._discovery()[0]
 
     def plan_folders(self, folders: list[SourceFolder]) -> dict[str, FolderPlan]:
+        """The default folder of the source goes to the default collection; every other one to the collection of the
+        same display name, else to a new one (created by ensure_folder; refused: back to the default collection)."""
         from ..server.runner import folder_key
-        url = self._collection()  # every source folder of the kind goes to the same collection, as for a PST
-        return {folder_key(f.path): FolderPlan(url) for f in folders}
+        from .exchange_base import is_default_folder
+        default, home = self._discovery()
+        by_label: dict[str, str] = {}
+        if home is not None:
+            try:
+                rows = self._c().collections_at(self.dav_kind, default, home)
+            except DavError as e:
+                raise convert(e) from e
+            for url, label, comps in rows:
+                if self.dav_kind == "caldav" and comps and self.component not in comps:
+                    continue
+                by_label.setdefault(label.strip().casefold(), url)
+        out: dict[str, FolderPlan] = {}
+        # no folder says it is the default one: a lone folder (one file, one calendar) is
+        lone = len(folders) == 1 and not is_default_folder(folders[0])
+        for f in folders:
+            label = " / ".join(p.strip() for p in f.path if p.strip()) or "Import"
+            if lone or is_default_folder(f):
+                out[folder_key(f.path)] = FolderPlan(default)
+            elif label.casefold() in by_label:
+                out[folder_key(f.path)] = FolderPlan(by_label[label.casefold()])
+            elif home is None:  # the URL names one collection: no home to create others in
+                out[folder_key(f.path)] = FolderPlan(default)
+            else:
+                url = home + collection_slug(self.dav_kind, self.component, label)
+                self.labels[url] = label
+                out[folder_key(f.path)] = FolderPlan(url, label=label, fallback=default)
+        return out
 
-    def ensure_folder(self, name: str, flag: str | None = None) -> None:
+    def _default_label(self) -> str:
+        return "Contacts" if self.dav_kind == "carddav" else "Tasks" if self.component == "VTODO" else "Calendar"
+
+    def has_folder(self, name: str) -> bool | None:
         try:
-            self._c().ensure_collection(self.dav_kind, name, self.component)
+            return self._c()._is_collection(self.dav_kind, name)
+        except DavError:
+            return None
+
+    def ensure_folder(self, name: str, flag: str | None = None, label: str | None = None) -> None:
+        try:
+            # without a label (a collection gone since the plan): the name it was planned under, never "PST Import"
+            self._c().ensure_collection(self.dav_kind, name, self.component, label or self.labels.get(name) or self._default_label())
         except DavError as e:
+            if e.status == 403:  # signed in already: a refused creation (MDaemon, shared homes), not a bad password
+                raise ConnectorError(str(e), ConnectorError.REJECTED) from e
             raise convert(e) from e
 
     def put(self, folder: str, item: OutgoingItem) -> str | None:
@@ -97,17 +148,46 @@ class DavSession(TargetSession):
         return text.encode("utf-8") if text is not None else None
 
 
+def collection_slug(dav_kind: str, component: str, label: str) -> str:
+    """Path segment of a collection created for a source folder: readable, stable across runs, distinct per kind
+    (CalDAV and CardDAV often share their home)."""
+    text = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii").lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:40] or "folder"
+    digest = hashlib.sha1(f"{dav_kind}:{component}:{label}".encode("utf-8")).hexdigest()[:8]  # noqa: S324
+    return f"mccb-{text}-{digest}/"
+
+
+_UID = re.compile(rb"^UID(?:;[^:\r\n]*)?:([^\r\n]*)", re.M | re.I)
+_SAFE_UID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:+=-]{0,199}")
+
+
+def uid_name(raw: bytes, ext: str) -> str | None:
+    """"<UID>.<ext>" when the UID of the object is safe as a file name. Some servers (MDaemon) store an object under
+    that name whatever the URL of the PUT: naming it so ourselves keeps our resources recognisable on every server."""
+    unfolded = re.sub(rb"\r?\n[ \t]", b"", raw)
+    m = _UID.search(unfolded)
+    if not m:
+        return None
+    uid = m.group(1).decode("utf-8", "replace").strip()
+    return f"{uid}.{ext}" if _SAFE_UID.fullmatch(uid) else None
+
+
 class DavTarget(Target):
     capabilities = frozenset({CAP_READBACK})
     dav_kind = "caldav"
     component = "VEVENT"
 
+    def resource_name(self, raw: bytes, default: str) -> str:
+        return uid_name(raw, default.rsplit(".", 1)[-1] if "." in default else
+                        ("vcf" if self.dav_kind == "carddav" else "ics")) or default
+
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
         self.secrets = secrets
+        self.labels: dict[str, str] = {}
 
     def session(self) -> DavSession:
-        return DavSession(self.dav_kind, self.config, self.secrets, self.component)
+        return DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
 
     def for_item(self, item: str) -> "DavTarget":
         """The target to use for this item kind (wiring.py): tasks need a calendar that accepts VTODO."""
