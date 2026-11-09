@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+mccb 2.1.0 migrates a whole Microsoft 365 tenant from one screen, after a two-click Connect with Microsoft, and adds a Duplicates tab. Calendars, address books and task lists now keep their own collections on CalDAV and CardDAV targets. The project moved to the selfhostr organisation: change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
 
 ### Added
 - Microsoft 365 tenant as a source connection: one credential for many mailboxes, registered in Settings, Servers. See [Exchange](docs/exchange.md#migrate-a-microsoft-365-tenant).
