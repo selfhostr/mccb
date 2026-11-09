@@ -221,7 +221,8 @@ The body of a Sieve rule needs the `body` extension, flags `imap4flags`, copies 
 ### Folders
 
 - Calendars and contact folders are flat with `m365_graph`: `A / B` for a nested source folder.
-- Every folder of one kind goes to a single collection on a DAV target, as for a PST.
+- On a DAV target, the default calendar, address book and task list go to the default collection, each other one to its own collection, matched by name or created. See [DAV](dav.md).
+- Read-only calendars of Outlook (holidays, birthdays, subscriptions) are not migrated.
 - The inbox, sent items, drafts, deleted items and junk of the source go to the well-known folders of the target, whatever their language. The others go by name under `root_folder`.
 
 ### Archive mailboxes

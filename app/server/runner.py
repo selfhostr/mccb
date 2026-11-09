@@ -877,8 +877,13 @@ class JobRunner:
         if n_unfinished:
             err = f"{n_unfinished} unfinished item(s) (pending / in progress) — rerun the job"
             self.log(err, "error")
+        n_verify = len(self.report["verify"].get("problems") or [])
         status = "done_with_errors" if (n_err or verify_ko or n_unfinished) else "done"
-        self.log(f"Finished: {status} ({n_err} error(s))", "warning" if status != "done" else "info")
+        detail = [f"{n_err} item error(s)"] + ([f"{n_verify} verification problem(s)"] if n_verify else []) \
+            + ([f"{n_unfinished} unfinished"] if n_unfinished else [])
+        total = n_err + n_verify + n_unfinished
+        self.log(f"Finished: {status} ({total} error(s)" + (f": {', '.join(detail)})" if total else ")"),
+                 "warning" if status != "done" else "info")
         self._finish(status, err)
 
     def _execute(self) -> None:

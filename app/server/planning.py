@@ -125,7 +125,7 @@ def plan_account(account_id: int) -> dict:
         else:
             src = wiring.source_of_account(acc)
             src.open()
-            folders = [f for f in src.folders() if f.kind in PHASES]
+            folders = [f for f in src.folders() if f.kind in PHASES and not getattr(f, "skip", None)]
             out["source"] = {"kind": src_kind, "ok": True, "msg": f"{len(folders)} folder(s) found"}
     except ConnectorError as e:
         out.update(status="error", source={"kind": src_kind, "ok": False, "error_kind": e.kind, "msg": str(e)})
