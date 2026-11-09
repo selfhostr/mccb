@@ -23,8 +23,10 @@ def convert(e: DavError) -> ConnectorError:
 
 
 class DavSession(TargetSession):
-    def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT"):
+    def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT",
+                 labels: dict[str, str] | None = None):
         self.dav_kind = dav_kind  # caldav | carddav
+        self.labels = labels if labels is not None else {}  # collection to create -> its name (shared by the target)
         self.component = component  # VTODO: a calendar that accepts tasks
         self.config = config
         self.password = secrets.get("password") or ""
@@ -92,9 +94,13 @@ class DavSession(TargetSession):
             elif home is None:  # the URL names one collection: no home to create others in
                 out[folder_key(f.path)] = FolderPlan(default)
             else:
-                out[folder_key(f.path)] = FolderPlan(home + collection_slug(self.dav_kind, self.component, label),
-                                                     label=label, fallback=default)
+                url = home + collection_slug(self.dav_kind, self.component, label)
+                self.labels[url] = label
+                out[folder_key(f.path)] = FolderPlan(url, label=label, fallback=default)
         return out
+
+    def _default_label(self) -> str:
+        return "Contacts" if self.dav_kind == "carddav" else "Tasks" if self.component == "VTODO" else "Calendar"
 
     def has_folder(self, name: str) -> bool | None:
         try:
@@ -104,7 +110,8 @@ class DavSession(TargetSession):
 
     def ensure_folder(self, name: str, flag: str | None = None, label: str | None = None) -> None:
         try:
-            self._c().ensure_collection(self.dav_kind, name, self.component, label)
+            # without a label (a collection gone since the plan): the name it was planned under, never "PST Import"
+            self._c().ensure_collection(self.dav_kind, name, self.component, label or self.labels.get(name) or self._default_label())
         except DavError as e:
             if e.status == 403:  # signed in already: a refused creation (MDaemon, shared homes), not a bad password
                 raise ConnectorError(str(e), ConnectorError.REJECTED) from e
@@ -177,9 +184,10 @@ class DavTarget(Target):
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
         self.secrets = secrets
+        self.labels: dict[str, str] = {}
 
     def session(self) -> DavSession:
-        return DavSession(self.dav_kind, self.config, self.secrets, self.component)
+        return DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
 
     def for_item(self, item: str) -> "DavTarget":
         """The target to use for this item kind (wiring.py): tasks need a calendar that accepts VTODO."""

@@ -36,6 +36,9 @@ class FakeMDaemon:
         self.refuse = refuse_mkcalendar
         self.drop = drop
         self.puts: list[str] = []
+        self.broken: set[str] = set()  # listed by the home, "Invalid Path" when opened (seen on a real MDaemon)
+        self.methods: list[tuple[str, str]] = []
+        self.mkcalendar_names: list[str] = []
 
     def by_name(self, name: str) -> dict:
         return next(c["items"] for c in self.cols.values() if c["name"] == name)
@@ -59,6 +62,9 @@ class FakeMDaemon:
     def __call__(self, req: httpx.Request) -> httpx.Response:
         path = unquote(req.url.path)
         with self.lock:
+            self.methods.append((req.method, path))
+            if path in self.broken or path.rsplit("/", 1)[0] + "/" in self.broken:
+                return httpx.Response(404, text="<d:error xmlns:d='DAV:'><m>Invalid Path</m></d:error>")
             if req.method == "PROPFIND":
                 depth = req.headers.get("depth")
                 if path == HOME:
@@ -77,6 +83,9 @@ class FakeMDaemon:
                 if self.refuse:
                     return httpx.Response(403)
                 name = ET.fromstring(req.content).find(".//{DAV:}displayname").text
+                self.mkcalendar_names.append(name)
+                if path in self.cols:
+                    return httpx.Response(405)
                 self.cols[path] = {"name": name, "items": {}}
                 return httpx.Response(201)
             folder, _, name = path.rpartition("/")
@@ -248,3 +257,50 @@ def test_items_of_a_calendar_now_skipped_leave_the_checks(client, mdaemon):
     j = run_job(client, jid)
     assert j["status"] == "done", log_of(client, jid)
     assert db.q1("SELECT status FROM items WHERE item_key='old-1'")["status"] == "skipped"
+
+
+def test_listed_collection_that_will_not_open_is_never_created_again(client, mdaemon):
+    """Real MDaemon: the home lists 'Calendar' (b64=Q2FsZW5kYXI/) but PROPFIND, PUT and MKCALENDAR on it answer 404.
+    No MKCALENDAR over it (named 'PST Import'), a clear folder error, and a run that does not end 'done'."""
+    from app.server import db
+    broken = HOME + "b64=Q2FsZW5kYXI/"
+    mdaemon.broken.add(broken)
+    CALS["Calendrier"] = []  # the default calendar of the source is empty, as in the real case
+    aid = cal_account(client)
+    jid = start(client, aid)
+    j = run_job(client, jid)
+    log = log_of(client, jid)
+    assert j["status"] == "done_with_errors", log
+    assert ("MKCALENDAR", broken) not in mdaemon.methods and "PST Import" not in log + str(mdaemon.mkcalendar_names)
+    assert "lists the calendar 'Calendar'" in log and "refuses to open it (PROPFIND -> HTTP 404)" in log
+    assert "Finished: done_with_errors (1 error(s): 0 item error(s), 1 folder error(s))" in log
+    assert "Calendrier" in (j.get("error") or "")
+    # the other calendars still go to their collections
+    assert set(mdaemon.by_name("Travail")) == {"work-1.ics", "work-2.ics"}
+    # "retry errors": the folder is tried again and still reported, even without any item in error
+    assert client.post(f"/api/jobs/{jid}/retry-errors").status_code == 200
+    j = run_job(client, jid)
+    log = log_of(client, jid)
+    assert j["status"] == "done_with_errors" and log.count("refuses to open it") == 2, log
+    assert ("MKCALENDAR", broken) not in mdaemon.methods
+    assert db.q1("SELECT mode FROM jobs WHERE id=?", (jid,))["mode"] == "errors"
+
+
+def test_collection_gone_since_the_plan_is_recreated_under_its_name(client, mdaemon):
+    """A collection created for a source calendar, then deleted: recreated under that calendar's name."""
+    from app.connectors.base import OutgoingItem
+    target = registry.make_target("caldav", {"url": f"https://dav.test{HOME}", "login": "u"}, {"password": "p"})
+    session = target.session()
+    session.connect()
+    plan = session.plan_folders([SourceFolder(["Calendrier"], CALENDAR, special="default", ref="c"),
+                                 SourceFolder(["Projets"], CALENDAR, ref="p")])
+    url = plan["Projets"].name
+    session.ensure_folder(url, label="Projets")
+    path = url.split("dav.test", 1)[1]
+    del mdaemon.cols[path]
+    other = target.session()
+    other.connect()
+    other.ensure_folder(url)  # the runner after a 404 on PUT: no label at hand
+    assert mdaemon.cols[path]["name"] == "Projets" and "PST Import" not in mdaemon.mkcalendar_names
+    other.put(url, OutgoingItem(CALENDAR, ics("p-1", "P"), "<x>", name="p-1.ics"))
+    assert set(mdaemon.by_name("Projets")) == {"p-1.ics"}

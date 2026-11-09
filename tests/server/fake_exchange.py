@@ -358,6 +358,7 @@ class FakeGraph:
         self.expire_next_token = False
         self.fail: dict[str, tuple[int, str]] = {}  # "POST:/calendar/events" -> (status, code)
         self.delta_expired = False
+        self.delta_calls: list[dict] = []
         self.forbid: set[str] = set()
         self.base_versions: list[str] = []
         # tenant directory: users as Graph returns them, the userPurpose of each ("shared", 404, 403; absent: "user")
@@ -498,6 +499,14 @@ class FakeGraph:
         if (g := re.match(r"^/messages/([^/]+)/\$value$", path)):
             m2 = self.messages.get(g.group(1))
             return httpx.Response(200, content=m2["mime"]) if m2 else self._err(404, "ErrorItemNotFound")
+        if (g := re.match(r"^/messages/([^/]+)$", path)) and method == "GET":
+            m2 = self.messages.get(g.group(1))
+            if m2 is None:
+                return self._err(404, "ErrorItemNotFound")
+            out = {k: v for k, v in m2.items() if k != "mime"}
+            if "singleValueExtendedProperties" not in (params.get("$expand") or ""):
+                out.pop("singleValueExtendedProperties", None)
+            return httpx.Response(200, json=out)
         if (g := re.match(r"^/messages/([^/]+)$", path)) and method == "PATCH":
             m2 = self.messages.get(g.group(1))
             if m2 is None:
@@ -531,8 +540,8 @@ class FakeGraph:
                 self.contacts[cid] = dict(body, id=cid, folder=fid)
                 return httpx.Response(201, json={"id": cid})
             return self._collection(request, path, params, [c for c in self.contacts.values() if c.get("folder") == fid], "")
-        if path == "/contacts/delta":
-            return self._simple_delta(request, list(self.contacts.values()), params)
+        if (g := re.match(r"^/contactFolders/([^/]+)/contacts/delta$", path)):  # no /contacts/delta in v1.0
+            return self._tracked(request, [c for c in self.contacts.values() if c.get("folder") == g.group(1)], params)
         if (g := re.match(r"^(?:/contactFolders/[^/]+)?/contacts/([^/]+)$", path)):
             c = self.contacts.get(g.group(1))
             return httpx.Response(200, json=c) if c else self._err(404, "ErrorItemNotFound")
@@ -556,6 +565,8 @@ class FakeGraph:
                 self.tasks[tid] = dict(body, id=tid, listId=g.group(1))
                 return httpx.Response(201, json={"id": tid})
             return self._page(request, [x for x in self.tasks.values() if x["listId"] == g.group(1)], params)
+        if (g := re.match(r"^/todo/lists/([^/]+)/tasks/delta$", path)):
+            return self._tracked(request, [x for x in self.tasks.values() if x["listId"] == g.group(1)], params)
         if (g := re.match(r"^/todo/lists/([^/]+)/tasks/([^/]+)$", path)):
             x = self.tasks.get(g.group(2))
             return httpx.Response(200, json=x) if x else self._err(404, "ErrorItemNotFound")
@@ -606,7 +617,18 @@ class FakeGraph:
             rows = rows[int(params["$deltatoken"]):]
         return self._simple_delta(request, rows, params, base=int(params.get("$deltatoken") or 0))
 
+    def _tracked(self, request, rows, params) -> httpx.Response:
+        base = int(params.get("$deltatoken") or 0)
+        return self._simple_delta(request, rows[base:], params, base=base)
+
     def _simple_delta(self, request, rows, params, base=0) -> httpx.Response:
+        if "$expand" in params:  # Exchange Online, whatever the documentation of message delta says
+            return self._err(400, "BadRequest", "Parsing OData Select and Expand failed: Value cannot be null. "
+                                                "(Parameter 'initialState')")
+        if "$filter" in params or "$orderby" in params and params["$orderby"] != "receivedDateTime desc":
+            return self._err(400, "BadRequest", "simulated server: unsupported query on a delta")
+        self.delta_calls.append(dict(params))
+        rows = [{k: v for k, v in r.items() if k != "singleValueExtendedProperties"} for r in rows]
         skip = int(params.get("$skiptoken") or 0)
         page = rows[skip:skip + self.page_limit]
         body: dict = {"value": page}

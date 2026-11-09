@@ -33,6 +33,7 @@ RETRIES = 6
 RETRY_DEFAULT = 10.0
 RETRY_MAX_WAIT = 300.0
 PAGE = 100
+DELTA_DETAILS_MAX = 200  # changed messages read one by one; more: the normal listing
 PROP_IMPORT = f"String {{{xb.IMPORT_GUID}}} Name {xb.IMPORT_PROP}"
 # the import id header, as Exchange names an x-header of a MIME message when it stores it as a property
 PROP_HEADER = "String {00020386-0000-0000-C000-000000000046} Name X-PST-Import-Id"
@@ -658,15 +659,23 @@ class GraphSource(Source):
                 yield it
 
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
-        """Delta query, per folder: the cursor is the @odata.deltaLink. Removed items are not reported. Events have
-        no per-calendar delta in v1.0 (calendarView only, with a time window): always a full listing."""
-        if folder.kind == CALENDAR:
+        """Delta query, per folder: the cursor is the @odata.deltaLink. Removed items are not reported.
+
+        Exchange Online refuses $expand on a delta query ("Parsing OData Select and Expand failed ... initialState"),
+        whatever the documentation says: the delta round asks for plain fields only, and the size and the answered /
+        forwarded state of the messages it reports are read message by message (a few), or by the normal listing
+        when they are many. With no usable cursor (first delta pass after a full copy, expired state), the round
+        starts the change tracking and the folder is listed in full, as by iter_items.
+        Events have no per-calendar delta in v1.0 (calendarView only, with a time window), and the default contact
+        folder has none (contactFolders/{id}/contacts/delta only): always a full listing."""
+        if folder.kind == CALENDAR or (folder.kind == CONTACTS and not folder.ref):
             return Changes(list(self.iter_items(folder)), None, reset=True)
         c = self._c()
         url, params, make = self._listing(folder)
+        first = {k: v for k, v in params.items() if k not in ("$top", "$expand")}
         reset = not cursor
-        link, query = (cursor, None) if cursor else (c.url(f"{url}/delta"), {k: v for k, v in params.items() if k != "$top"})
-        items: list[SourceItem] = []
+        link, query = (cursor, None) if cursor else (c.url(f"{url}/delta"), first)
+        rows: list[dict] = []
         while True:
             try:
                 body = c.get_json(link, query)
@@ -675,19 +684,34 @@ class GraphSource(Source):
                     if not cursor or reset:
                         raise
                     reset = True  # the state token expired: a full round
-                    link, query = c.url(f"{url}/delta"), {k: v for k, v in params.items() if k != "$top"}
-                    items = []
+                    link, query = c.url(f"{url}/delta"), first
+                    rows = []
                     continue
                 raise
             query = None
-            for o in body.get("value") or []:
-                it = make(folder, o)
-                if it is not None:
-                    items.append(it)
+            if not reset:
+                rows.extend(o for o in body.get("value") or [] if not o.get("@removed") and o.get("id"))
             if body.get("@odata.nextLink"):
                 link = body["@odata.nextLink"]
                 continue
-            return Changes(items, body.get("@odata.deltaLink"), reset=reset)
+            delta_link = body.get("@odata.deltaLink")
+            break
+        if reset or (folder.kind == MAIL and len(rows) > DELTA_DETAILS_MAX):
+            # after the round has started the tracking: what changes during the listing comes with the next round
+            return Changes(list(self.iter_items(folder)), delta_link, reset=True)
+        if folder.kind == MAIL:
+            rows = [d for d in (self._message_details(str(o["id"])) for o in rows) if d is not None]
+        items = [it for it in (make(folder, o) for o in rows) if it is not None]
+        return Changes(items, delta_link, reset=False)
+
+    def _message_details(self, rid: str) -> dict | None:
+        """One message with the fields of the listing (extended properties included); None if gone since."""
+        try:
+            return self._c().get_json(f"/messages/{rid}", {"$select": MESSAGE_FIELDS, "$expand": MESSAGE_EXPAND})
+        except GraphError as e:
+            if e.status == 404:
+                return None
+            raise
 
     # -- reading
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:

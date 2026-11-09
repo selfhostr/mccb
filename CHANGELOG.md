@@ -17,6 +17,11 @@
 - Listing a tenant needs the application permission `User.Read.All` (or `Directory.Read.All`), with admin consent. Migrating a single mailbox does not.
 - The project moved to the selfhostr organisation: repository `github.com/selfhostr/mccb`, image `ghcr.io/selfhostr/mccb`, site and documentation on `mccb.selfhostr.io`. Old GitHub links redirect. To keep receiving updates, change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
 
+### Fixed
+- Final resync (delta) from Microsoft 365: Exchange Online refused the change query of mail (HTTP 400 "Parsing OData Select and Expand failed"). It now works after a full copy, including the first resync; the default contact folder, which has no change query, is listed in full.
+- A CalDAV or CardDAV collection the server lists but will not open (seen on MDaemon) is no longer "created" again under the name "PST Import": the folder is reported with a clear error.
+- A folder that could not be created on the target now counts in the final line and ends the job as done with errors, even when it holds no item.
+
 ## 2.0.0
 mccb 2.0.0 grows from a PST migrator into a mailbox, calendar and contact migration tool: Exchange (EWS and Microsoft Graph), JMAP, Google and file sources join IMAP and CalDAV/CardDAV, with planning, a command line and a new web UI. A Repair tab detects and fixes damaged messages in mailboxes. It also scales much further on large machines. Read "Upgrading from 1.x" below before updating.
 
