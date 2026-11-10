@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
+mccb 2.2.0 makes the interface simpler: one "Add a server" picker, forms in a side panel, and Settings on one page. A server of any kind can now be saved once and shared by mailboxes, New migration takes several mailboxes at once, and Duplicates works on mailboxes added by hand.
 
 ### Added
 - A server of any kind (IMAP, Exchange, JMAP...) can be saved once on the Servers page and shared by mailboxes: it holds the address and the common settings, each mailbox keeps its own login and password. `/api/source-connections` accepts these kinds, and a connection lists the names of its stored secrets (`secret_names`).
