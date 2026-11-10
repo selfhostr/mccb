@@ -9,9 +9,8 @@
 	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
-	import Button from '../../lib/ui/Button.svelte';
+	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
-	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
 	import Panel from '../../lib/ui/Panel.svelte';
@@ -35,6 +34,7 @@
 
 	const psts = $derived([...data.psts.values()].sort((a, b) => b.id - a.id));
 	const valid = $derived(psts.filter((p) => p.status === 'valid').length);
+	const empty = $derived(!data.loading && !psts.length && !uploads.items.length);
 	const totalSize = $derived(psts.reduce((sum, p) => sum + (p.size ?? 0), 0));
 
 	function take(list: FileList | null | undefined) {
@@ -62,43 +62,44 @@
 	}
 </script>
 
-<PageHeader
-	title={m.files_page_title()}
-	sentence={data.loading ? m.common_loading() : psts.length ? m.files_page_summary({ total: psts.length, valid, size: fmtBytes(totalSize) }) : m.files_page_empty()}
-/>
+<PageHeader title={m.files_page_title()} sentence={psts.length ? m.files_page_summary({ total: psts.length, valid, size: fmtBytes(totalSize) }) : undefined}>
+	{#snippet actions()}
+		<IconButton variant="outline" icon={Server} label={m.files_fetch_open()} onclick={() => (fetching = true)} data-testid="fetch-open" />
+		<IconButton variant="primary" icon={Upload} label={m.files_drop_choose()} onclick={() => picker?.click()} data-testid="file-choose" />
+	{/snippet}
+</PageHeader>
 
 <div class="flex flex-col gap-4">
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class={`flex flex-wrap items-center justify-between gap-3 rounded-card border border-dashed px-4 py-4 transition-colors duration-200 ${over ? 'border-ink bg-ghost' : 'border-line-strong'}`}
+	<!-- The whole frame takes a drop and a click; with no file yet it is also the empty page. -->
+	<button
+		type="button"
+		class={`flex w-full items-center justify-center gap-3 rounded-card border border-dashed px-4 text-ink-2 transition-colors duration-200 hover:border-ink-3 hover:text-ink ${empty ? 'min-h-48 flex-col' : 'min-h-14'} ${over ? 'border-ink bg-ghost text-ink' : 'border-line-strong'}`}
 		ondragover={(e) => {
 			e.preventDefault();
 			over = true;
 		}}
 		ondragleave={() => (over = false)}
 		ondrop={onDrop}
+		onclick={() => picker?.click()}
 		data-testid="dropzone"
 	>
-		<p class="m-0 min-w-0 flex-1 basis-64 text-ink-2">{m.files_drop_sentence()}</p>
-		<div class="flex flex-wrap gap-2">
-			<Button variant="primary" icon={Upload} onclick={() => picker?.click()}>{m.files_drop_choose()}</Button>
-			<Button icon={Server} onclick={() => (fetching = true)} data-testid="fetch-open">{m.files_fetch_open()}</Button>
-		</div>
-		<input
-			bind:this={picker}
-			class="sr-only"
-			type="file"
-			multiple
-			accept={FILE_ACCEPT}
-			tabindex="-1"
-			aria-label={m.files_drop_choose()}
-			onchange={(e) => {
-				take(e.currentTarget.files);
-				e.currentTarget.value = '';
-			}}
-			data-testid="file-input"
-		/>
-	</div>
+		<FileArchive size={empty ? 20 : 16} class="shrink-0" />
+		<span class="min-w-0">{m.files_drop_sentence()}</span>
+	</button>
+	<input
+		bind:this={picker}
+		class="sr-only"
+		type="file"
+		multiple
+		accept={FILE_ACCEPT}
+		tabindex="-1"
+		aria-label={m.files_drop_choose()}
+		onchange={(e) => {
+			take(e.currentTarget.files);
+			e.currentTarget.value = '';
+		}}
+		data-testid="file-input"
+	/>
 
 	<InboxPanel />
 
@@ -121,8 +122,6 @@
 				</ul>
 			{/if}
 		</Panel>
-	{:else if !data.error}
-		<EmptyState icon={FileArchive} title={m.files_list_empty_title()} description={m.files_list_empty_text()} />
 	{/if}
 </div>
 

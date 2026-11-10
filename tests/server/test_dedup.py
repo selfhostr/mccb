@@ -337,6 +337,56 @@ def test_api_boxes_runs_and_history(client, box, servers):
     assert client.get("/api/dedup/runs/999").status_code == 404
 
 
+def test_a_mailbox_added_by_hand_without_any_migration(client, servers):
+    """One mailbox or a CSV file, the same list as the repair tab: listed, analysed and cleaned without a migration."""
+    from app.server import db, dedup_runs
+    imap, dav = servers
+    _seed(imap, dav)
+    sid = db.q1("SELECT id FROM servers")["id"]
+    db.ex("DELETE FROM accounts")
+    assert client.get("/api/dedup/boxes").json() == []
+    made = client.post("/api/repair/boxes", json={"server_id": sid, "email": "solo@example.com", "password": "pw"})
+    assert made.status_code == 201
+    bid = made.json()["id"]
+    assert db.q1("SELECT password_enc FROM repair_boxes WHERE id=?", (bid,))["password_enc"] != "pw"
+    csv = client.post("/api/repair/boxes/import-csv", data={"server_id": str(sid)},
+                      files={"file": ("m.csv", b"email;password\nbatch@example.com;pw2\n", "text/csv")}).json()
+    assert csv["created"] == 1
+    boxes = client.get("/api/dedup/boxes").json()
+    assert [(b["email"], b["source"], b["usable"]) for b in boxes] == [
+        ("batch@example.com", "repair", True), ("solo@example.com", "repair", True)]
+    key = f"repair:{bid}"
+    run = client.post("/api/dedup/runs", json={"box_keys": [key], "mode": "scan", "kinds": ["mail"]}).json()["runs"][0]
+    # the mailbox cannot leave the list nor change its login while a duplicates run works on it
+    assert client.delete(f"/api/repair/boxes/{bid}").status_code == 409
+    assert client.put(f"/api/repair/boxes/{bid}", json={"password": "new"}).status_code == 409
+    db.ex("UPDATE dedup_runs SET status='running' WHERE id=?", (run["id"],))
+    dedup_runs.execute(run["id"])
+    assert client.get(f"/api/dedup/runs/{run['id']}").json()["totals"]["mail"]["duplicates"] == 2
+    res = client.post("/api/dedup/runs", json={"box_keys": [key], "mode": "dedup", "kinds": ["mail"],
+                                               "confirm": True}).json()
+    db.ex("UPDATE dedup_runs SET status='running' WHERE id=?", (res["runs"][0]["id"],))
+    dedup_runs.execute(res["runs"][0]["id"])
+    assert len(imap.folders["INBOX"]) == 4
+    assert client.delete(f"/api/repair/boxes/{bid}").status_code == 200
+    assert [b["email"] for b in client.get("/api/dedup/boxes").json()] == ["batch@example.com"]
+
+
+def test_a_migration_without_password_gives_way_to_the_same_mailbox_added_by_hand(client, box):
+    from app.server import db
+    from app.server.security import encrypt
+    now = time.time()
+    aid = db.ex("INSERT INTO accounts(server_id, email, created_at) VALUES (?,?,?)",
+                (box["server_id"], "nopw@example.com", now)).lastrowid
+    rid = db.ex("INSERT INTO repair_boxes(server_id, email, password_enc, created_at) VALUES (?,?,?,?)",
+                (box["server_id"], "NOPW@example.com", encrypt("pw"), now)).lastrowid
+    rows = [b for b in client.get("/api/dedup/boxes").json() if b["email"].lower() == "nopw@example.com"]
+    assert [(b["key"], b["usable"]) for b in rows] == [(f"repair:{rid}", True)]
+    db.ex("DELETE FROM repair_boxes WHERE id=?", (rid,))
+    rows = [b for b in client.get("/api/dedup/boxes").json() if b["email"].lower() == "nopw@example.com"]
+    assert [(b["key"], b["usable"]) for b in rows] == [(f"account:{aid}", False)]
+
+
 def test_recover_requeues(env):
     from app.server import db, dedup_runs
     now = time.time()

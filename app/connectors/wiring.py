@@ -64,12 +64,25 @@ def source_config(acc) -> dict:
     return {**own, **shared_config}
 
 
+def shares_settings(kind: str) -> bool:
+    """True for a kind without connection-scoped fields: its source connection is a server shared by mailboxes. It
+    holds any part of the settings (address, security, a service login), each mailbox keeps the rest, its own
+    secrets included. False: a directory connection (a tenant), which owns all the secrets."""
+    spec = registry.get(kind)
+    return spec is not None and spec.source is not None and not registry.split_fields(spec.source, "connection")
+
+
 def source_secrets(acc) -> dict:
-    """Secrets of the account's source: those of its connection when linked (none if the row is gone)."""
+    """Secrets of the account's source: those of its connection when linked (none if the row is gone). A shared
+    server adds the mailbox's own secrets, its own winning."""
     if _connection_id(acc) is None:
         return load_secrets(acc["source_secret_enc"])
     conn = connection_of(acc)
-    return load_secrets(conn["secret_enc"]) if conn is not None else {}
+    if conn is None:
+        return {}
+    if shares_settings(source_kind(acc)):
+        return {**load_secrets(acc["source_secret_enc"]), **load_secrets(conn["secret_enc"])}
+    return load_secrets(conn["secret_enc"])
 
 
 def source_of_account(acc, ctx: dict | None = None) -> Source:

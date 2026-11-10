@@ -26,7 +26,7 @@
 	}
 </script>
 
-<Dialog {title} {onclose}>
+<Dialog {title} {onclose} center>
 	<p class="m-0">{text}</p>
 	{#snippet actions()}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>

@@ -250,16 +250,16 @@ test.describe('migrations', () => {
 		let dialog = page.getByRole('dialog');
 		await expect(dialog.getByText('From', { exact: true })).toBeVisible();
 		await expect(dialog.getByText('To', { exact: true })).toBeVisible();
-		await dialog.getByRole('textbox', { name: /^Email address/ }).fill('new.one@example.com');
+		await dialog.getByRole('textbox', { name: 'Destination address' }).fill('new.one@example.com');
 		await dialog.locator('input[type=password]').fill('pw');
-		await dialog.getByRole('button', { name: 'Add a mailbox' }).click();
+		await dialog.getByTestId('new-submit').click();
 		await expect(dialog).toHaveCount(0);
 
 		// Saving opens the panel of the new mailbox: no source yet, so the start waits for one.
 		const panel = page.getByTestId('job-panel');
 		await expect(panel).toContainText('new.one@example.com');
 		await expect(panel.getByTestId('account-start')).toBeDisabled();
-		await expect(panel.getByTestId('start-hint')).toHaveText('Choose where the mail comes from first.');
+		await expect(panel.getByTestId('start-hint')).toHaveText('Choose where the mail comes from first');
 		await expect(row(page, 'new.one@example.com')).toContainText('No source yet');
 
 		const select = panel.getByRole('combobox', { name: /^PST file for/ });
@@ -278,9 +278,9 @@ test.describe('migrations', () => {
 		await page.getByRole('button', { name: 'New migration', exact: true }).click();
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('new-source').selectOption({ index: 1 });
-		await dialog.getByRole('textbox', { name: /^Email address/ }).fill('with.file@example.com');
+		await dialog.getByRole('textbox', { name: 'Destination address' }).fill('with.file@example.com');
 		await dialog.locator('input[type=password]').fill('pw');
-		await dialog.getByRole('button', { name: 'Add a mailbox' }).click();
+		await dialog.getByTestId('new-submit').click();
 		await expect(page.getByTestId('job-panel').getByTestId('account-start')).toBeEnabled();
 	});
 

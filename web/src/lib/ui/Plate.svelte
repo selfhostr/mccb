@@ -24,6 +24,6 @@
 </script>
 
 <span class={`inline-flex max-w-full items-center gap-1.5 text-xs font-semibold whitespace-nowrap ${TONES[tone]} ${className}`} {title}>
-	<Icon size={13} />
+	<Icon size={14} />
 	<span class="truncate">{label}</span>
 </span>

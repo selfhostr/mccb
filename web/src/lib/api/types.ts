@@ -226,6 +226,8 @@ export interface EndpointInput {
 	config?: Record<string, unknown>;
 	/** Omitted keeps the stored secrets, {} clears them, a value replaces that field (empty removes it). */
 	secrets?: Record<string, string>;
+	/** A saved connection (server) that holds the shared settings; config and secrets give the mailbox's part. */
+	connection_id?: number;
 }
 
 export type ConnectorErrorKind = 'auth' | 'config' | 'unreachable' | 'transient' | 'rejected' | 'quota' | 'folder_missing';
@@ -668,6 +670,8 @@ export interface SourceConnection {
 	kind: string;
 	config: Record<string, unknown>;
 	has_secret: boolean;
+	/** Names of the secrets the server holds (never their values): a mailbox only gives the others. */
+	secret_names?: string[];
 	notes: string | null;
 	last_test: number | null;
 	last_test_result: CheckResult | null;

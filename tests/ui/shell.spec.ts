@@ -1,4 +1,4 @@
-import { expect, noOverflow, openMailbox, ready, row, test } from './helpers';
+import { expect, mock, noOverflow, openMailbox, ready, row, test } from './helpers';
 
 test.describe('at 390 px', () => {
 	test.use({ viewport: { width: 390, height: 844 } });
@@ -147,10 +147,9 @@ test.describe('settings', () => {
 		await ready(page, '/settings');
 		await page.getByTestId('theme').selectOption('light');
 		await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-		await page.getByTestId('appearance-more').locator('summary').click();
 		await page.getByTestId('density').selectOption('comfortable');
 		await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable');
-		await page.getByRole('checkbox', { name: /Mask addresses/ }).check();
+		await page.getByRole('checkbox', { name: /^Mask addresses/ }).check();
 		await page.reload();
 		await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
@@ -171,16 +170,24 @@ test.describe('settings', () => {
 		await expect(page.locator('[data-server="Production"]').getByTestId('server-verdict')).toContainText('Check failed');
 	});
 
-	test('lists the connector catalogue, and tolerates a server without the route', async ({ page }) => {
+	test('draws the kinds of server from the catalogue, and tolerates a server without the route', async ({ page }) => {
 		await ready(page, '/servers');
-		await expect(page.getByTestId('section-servers')).toBeVisible();
-		await expect(page.getByTestId('connectors')).toContainText('Future mail service');
-		await expect(page.getByTestId('connectors')).toContainText('Any IMAP mailbox.');
+		await page.getByTestId('server-add').click();
+		// Plain IMAP is always offered; a kind is offered only when the catalogue has it (Microsoft 365 is off by default).
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="imap"]')).toBeVisible();
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="m365"]')).toHaveCount(0);
+
+		await mock(page.request, 'reset', { tenant: true });
+		await page.reload();
+		await page.getByTestId('server-add').click();
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="m365"]')).toBeVisible();
 
 		await page.route('**/api/connectors', (route) => route.fulfill({ status: 404, json: { detail: 'not found' } }));
 		await page.reload();
-		await expect(page.getByTestId('section-servers')).toBeVisible();
-		await expect(page.getByTestId('connectors')).toHaveCount(0);
+		await expect(page.getByRole('heading', { level: 1 })).toHaveText('Servers');
+		await page.getByTestId('server-add').click();
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="imap"]')).toBeVisible();
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="m365"]')).toHaveCount(0);
 	});
 
 	test('a wrong login is refused, then signing in works', async ({ page, context }) => {

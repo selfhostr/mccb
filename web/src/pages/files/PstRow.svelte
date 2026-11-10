@@ -64,16 +64,16 @@
 
 <li class="file-row" data-pst={pst.filename}>
 	<div class="file-name">
-		<p class="m-0 truncate font-semibold" title={name}>{name}</p>
+		<p class="m-0 truncate font-medium" title={name}>{name}</p>
 		{#if totals}
 			<p class="m-0 text-xs text-ink-2" data-testid="pst-totals">
 				{m.files_list_totals({ mail: fmtNum(totals.mail ?? 0), calendar: fmtNum(totals.calendar ?? 0), contacts: fmtNum(totals.contacts ?? 0) })}
 			</p>
 		{/if}
 		{#if pst.created_at || linked}
-			<p class="m-0 text-xs text-ink-3">
+			<p class="m-0 flex flex-wrap gap-x-3 text-xs text-ink-3">
 				{#if pst.created_at}<RelTime value={pst.created_at} />{/if}
-				{#if linked}<span> {m.files_list_linked({ count: linked })}</span>{/if}
+				{#if linked}<span>{m.files_list_linked({ count: linked })}</span>{/if}
 			</p>
 		{/if}
 		{#if from}<p class="m-0 text-xs text-ink-3" data-testid="pst-from">{from}</p>{/if}
@@ -99,7 +99,7 @@
 	<span class="file-kind text-xs text-ink-2" title={kind} data-testid="pst-format">{kind}</span>
 	<span class="file-size text-xs text-ink-2">{fmtBytes(pst.size)}</span>
 	<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} /></div>
-	<div class="file-bar flex items-center gap-2.5">
+	<div class="file-bar flex items-center gap-3">
 		{#if fetching}
 			<span class="min-w-0 flex-1"><Progress value={percent ?? 0} label={name} /></span>
 			{#if pst.status === 'fetching'}

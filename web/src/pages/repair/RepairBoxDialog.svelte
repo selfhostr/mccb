@@ -1,5 +1,9 @@
 <script lang="ts">
-	/** Add a mailbox to repair, or change its password and login. Tested right after it is saved. */
+	/**
+	 * Add a mailbox by hand (one list for the Repair and Duplicates tabs), or change its password and login.
+	 * Tested right after it is saved. `oncsv` offers the CSV import instead; `onchange` runs after a save and a test.
+	 */
+	import FileUp from '@lucide/svelte/icons/file-up';
 	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post, put } from '../../lib/api/client.ts';
@@ -13,7 +17,9 @@
 	import Field from '../../lib/ui/Field.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 
-	let { box = null, onclose }: { box?: RepairBox | null; onclose: () => void } = $props();
+	type Editable = Pick<RepairBox, 'id' | 'server_id' | 'email' | 'login'>;
+
+	let { box = null, oncsv, onchange, onclose }: { box?: Editable | null; oncsv?: () => void; onchange?: () => void; onclose: () => void } = $props();
 
 	const initialServer = untrack(() => box?.server_id ?? data.servers[0]?.id ?? 0);
 	const initialLogin = untrack(() => (box?.login && box.login !== box.email ? box.login : ''));
@@ -34,8 +40,9 @@
 				: await post<RepairBox>('/repair/boxes', { server_id: Number(serverId), email: email.trim(), password, ...(login ? { login } : {}) });
 			toast(m.migrations_account_saved(), 'signal');
 			onclose();
-			if (!box || password || login !== initialLogin) void repairs.test([saved.id]);
+			if (!box || password || login !== initialLogin) void repairs.test([saved.id]).then(() => onchange?.());
 			else await repairs.refresh();
+			onchange?.();
 		} catch (err) {
 			error = errorText(err);
 		} finally {
@@ -44,7 +51,7 @@
 	}
 </script>
 
-<Dialog title={box ? m.migrations_account_edit_title({ email: prefs.email(box.email) }) : m.repair_add_title()} {onclose}>
+<Dialog title={box ? m.migrations_account_edit_title({ email: prefs.email(box.email) }) : m.repair_add()} {onclose}>
 	<form id="repair-box-form" class="flex flex-col gap-3" onsubmit={submit}>
 		{#if !box}
 			<Field label={m.repair_box_server()}>
@@ -67,6 +74,7 @@
 		{#if error}<ErrorNotice title={m.migrations_account_save_failed()} message={error} />{/if}
 	</form>
 	{#snippet actions()}
+		{#if !box && oncsv}<span class="mr-auto"><Button variant="ghost" icon={FileUp} onclick={oncsv} data-testid="repair-csv">{m.migrations_add_csv()}</Button></span>{/if}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
 		<Button variant="primary" type="submit" form="repair-box-form" loading={busy} data-testid="repair-box-save">{m.common_save()}</Button>
 	{/snippet}

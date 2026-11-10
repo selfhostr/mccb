@@ -4,12 +4,19 @@ test.use({ viewport: { width: 1280, height: 900 } });
 
 const state = (page: import('./helpers').Page) => mock(page.request, 'state');
 
+/** The notification form lives in a drawer: open it from its row. */
+const openNotifications = async (page: import('./helpers').Page) => {
+	await page.getByTestId('notify-open').click();
+	await expect(page.getByTestId('notifications-form')).toBeVisible();
+};
+
 test.describe('settings: notifications', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
 	test('ntfy first, with a plain warning about public topics and write-only secrets', async ({ page }) => {
 		await ready(page, '/settings');
 		const section = page.getByTestId('section-notifications');
+		await openNotifications(page);
 		await expect(section.getByTestId('notifications-form')).toBeVisible();
 		// Nothing typed yet: no warning, and nothing to save.
 		await expect(page.getByTestId('ntfy-public-warning')).toHaveCount(0);
@@ -51,16 +58,22 @@ test.describe('settings: notifications', () => {
 		expect(saved.intakePuts.at(-1).notifications.ntfy.token).toBe('');
 	});
 
-	test('webhook and e-mail are tucked away, the test shows each channel', async ({ page }) => {
+	test('webhook and e-mail fields appear when their channel is on, the test shows each channel', async ({ page }) => {
 		await ready(page, '/settings');
+		await openNotifications(page);
 		const form = page.getByTestId('notifications-form');
-		await expect(form.getByTestId('webhook-url')).toBeHidden();
-		await form.getByText('Webhook and e-mail').click();
-		await expect(form.getByTestId('webhook-url')).toBeVisible();
+		await expect(form.getByTestId('webhook-url')).toHaveCount(0);
+		await expect(form.getByTestId('email-host')).toHaveCount(0);
+		await form.getByRole('checkbox', { name: 'Send by e-mail' }).check();
+		await expect(form.getByTestId('email-host')).toBeVisible();
+		await form.getByRole('checkbox', { name: 'Send by e-mail' }).uncheck();
+		await expect(form.getByTestId('email-host')).toHaveCount(0);
 
+		await form.getByRole('checkbox', { name: /^Send notifications/ }).check();
 		await form.getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await page.getByTestId('ntfy-topic').fill('mccb-7f3k9');
 		await form.getByRole('checkbox', { name: 'Send to a webhook' }).check();
+		await expect(form.getByTestId('webhook-url')).toBeVisible();
 		await page.getByTestId('webhook-url').fill('https://hooks.example.com/fail');
 		// The test uses what is stored: edits are saved first.
 		await page.getByTestId('notify-test').click();
@@ -69,23 +82,25 @@ test.describe('settings: notifications', () => {
 		await expect(results.locator('[data-channel="webhook"]')).toContainText('ConnectError');
 		expect((await state(page)).notifyTests).toBe(1);
 
-		// The summary of the disclosure says what is on.
-		await expect(form.locator('summary', { hasText: 'Webhook and e-mail' })).toContainText('Webhook');
+		// The row behind the drawer says which channels are on.
+		await expect(page.getByTestId('notify-state')).toHaveText('ntfy, Webhook');
 	});
 
 	test('with nothing enabled the test is not offered, and the server refusal is shown', async ({ page }) => {
 		await ready(page, '/settings');
+		await openNotifications(page);
 		await expect(page.getByTestId('notify-test')).toBeDisabled();
 		await page.getByTestId('notifications-form').getByRole('checkbox', { name: 'Use ntfy' }).check();
 		await page.getByTestId('ntfy-topic').fill('abc');
 		await page.getByTestId('notifications-form').getByRole('checkbox', { name: /^Send notifications/ }).check();
 		await page.getByTestId('ntfy-topic').fill('');
 		await page.getByTestId('notify-save').click();
-		await expect(page.getByRole('alert')).toContainText('ntfy.topic is required');
+		await expect(page.getByRole('dialog').getByRole('alert')).toContainText('ntfy.topic is required');
 	});
 
 	test('events are grouped and toggles are saved', async ({ page }) => {
 		await ready(page, '/settings');
+		await openNotifications(page);
 		const form = page.getByTestId('notifications-form');
 		const events = page.getByTestId('notify-events');
 		await expect(events.locator('summary')).toContainText('On: 7');
@@ -121,17 +136,19 @@ test.describe('settings: drop folder and automatic import', () => {
 	test('automatic assignment, the import option and the default domains', async ({ page }) => {
 		await ready(page, '/settings');
 		const section = page.getByTestId('section-intake');
+		await expect(section.getByTestId('intake-chain-state')).toHaveText('Off');
+		await section.getByTestId('intake-chain-open').click();
 		await expect(section.getByTestId('intake-chain-options')).toHaveCount(0);
 		await section.getByRole('checkbox', { name: /^Assign files to mailboxes automatically/ }).check();
 		await expect(section.getByTestId('intake-chain-options')).toBeVisible();
 		await section.getByRole('checkbox', { name: /^Start the import too/ }).check();
 		await expect.poll(async () => (await state(page)).intake.auto_chain).toMatchObject({ enabled: true, start_import: true });
 
-		await section.getByText('Default domain per server').click();
+		await expect(section.getByTestId('intake-chain-state')).toHaveText('On, with import');
+		await expect(section.getByRole('heading', { name: 'Default domain per server' })).toBeVisible();
 		await page.getByTestId('domain-1').fill('@Example.com');
 		await page.getByTestId('domain-1').press('Tab');
 		await expect.poll(async () => (await state(page)).intake.auto_chain.default_domains).toEqual({ '1': 'Example.com' });
-		await expect(section.locator('summary', { hasText: 'Default domain per server' })).toContainText('Set: 1');
 
 		// A refusal puts the field back and says why.
 		await page.getByTestId('domain-2').fill('not a domain!');
@@ -144,14 +161,19 @@ test.describe('settings: drop folder and automatic import', () => {
 test.describe('settings: secondary options', () => {
 	test.beforeEach(async ({ signedIn }) => signedIn);
 
-	test('a disclosure shows a chevron and the options when opened', async ({ page }) => {
+	test('appearance options are listed in the page, a disclosure shows a chevron and its options when opened', async ({ page }) => {
 		await ready(page, '/settings');
-		const disclosure = page.getByTestId('appearance-more');
+		const appearance = page.getByTestId('section-appearance');
+		await expect(appearance.getByTestId('mask-addresses')).toBeVisible();
+		await expect(appearance.getByTestId('density')).toBeVisible();
+
+		await ready(page, '/files');
+		await page.getByTestId('fetch-open').click();
+		const disclosure = page.getByRole('dialog').locator('details', { hasText: 'More options' });
 		await expect(disclosure.locator('summary svg')).toBeVisible();
-		await expect(disclosure.getByRole('checkbox', { name: /Mask addresses/ })).toBeHidden();
+		await expect(disclosure.locator('[data-field="token"]')).toBeHidden();
 		await disclosure.locator('summary').click();
-		await expect(disclosure.getByRole('checkbox', { name: /Mask addresses/ })).toBeVisible();
-		await expect(disclosure.getByTestId('density')).toBeVisible();
+		await expect(disclosure.locator('[data-field="token"]')).toBeVisible();
 	});
 });
 
@@ -213,8 +235,8 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await ready(page, '/files');
 		const li = (name: string) => page.locator(`li[data-pst="${name}"]`);
 		await expect(li('a.pst').getByTestId('pst-from')).toHaveText('Taken from the drop folder');
-		await expect(li('a.pst').getByTestId('pst-chain')).toHaveText('Automatically assigned to alice@example.com, import started.');
-		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No mailbox matches this file name.');
+		await expect(li('a.pst').getByTestId('pst-chain')).toHaveText('Automatically assigned to alice@example.com, import started');
+		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No mailbox matches this file name');
 		await expect(li('c.pst').getByTestId('pst-chain')).toContainText('Several mailboxes match');
 		await expect(li('d.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment failed: queue full');
 		await expect(li('e.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment: brand_new_result');
@@ -229,7 +251,7 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await expect(dialog.locator('[data-field="token"]')).toBeHidden();
 
 		await page.getByTestId('fetch-submit').click();
-		await expect(dialog.getByRole('alert')).toContainText('Fill in: URL.');
+		await expect(dialog.getByRole('alert')).toContainText('Fill in: URL');
 
 		await dialog.locator('[data-field="url"]').fill('http://169.254.169.254/x.pst');
 		await page.getByTestId('fetch-submit').click();

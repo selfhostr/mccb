@@ -71,22 +71,47 @@ def _row(cid: int):
     return r
 
 
-def _spec(kind: str):
+def _spec(kind: str, directory: bool = True):
+    """directory=False: any kind that reads mailboxes can be saved as a connection (a server shared by mailboxes);
+    listing and matching mailboxes still need a directory."""
     spec = registry.get(kind)
-    if spec is None or spec.source is None:
+    if spec is None or spec.source is None or kind in (wiring.PST, wiring.FILES):
         raise HTTPException(422, f"unknown connector '{kind}'")
-    if spec.directory is None:
-        raise HTTPException(422, f"connector '{kind}' has no source connection")
+    if directory and spec.directory is None:
+        raise HTTPException(422, f"connector '{kind}' has no directory: it is checked with each mailbox")
     return spec
 
 
 def _connection_role(spec) -> registry.Role:
-    """The source role of the kind cut down to its connection-scoped fields."""
-    return dataclasses.replace(spec.source, fields=registry.split_fields(spec.source, "connection"))
+    """The source role of the kind cut down to its connection-scoped fields. A kind without any (see
+    wiring.shares_settings) takes any part of its settings, none required and no default: each mailbox gives the
+    rest, and the whole is validated when a mailbox is linked."""
+    shared = registry.split_fields(spec.source, "connection")
+    if shared:
+        return dataclasses.replace(spec.source, fields=shared)
+    return dataclasses.replace(spec.source, fields=tuple(
+        dataclasses.replace(f, required=False, default=None) for f in spec.source.fields))
+
+
+def _linked_change(r, config: dict) -> str | None:
+    """Why the new settings of a shared server cannot be saved while mailboxes are linked: one of them would miss a
+    setting, or would become another mailbox (its migration state hangs on the address: see registry.namespace)."""
+    role = registry.role_of(r["kind"], "source")
+    old = db.jload(r["config"], {}) or {}
+    for a in db.q("SELECT email, source_config FROM accounts WHERE source_connection_id=? AND source_kind=?",
+                  (r["id"], r["kind"])):
+        own = db.jload(a["source_config"], {}) or {}
+        try:
+            registry.normalize_config(role, {**own, **config})
+        except ConnectorError as e:
+            return f"{a['email']}: {e}"
+        if role.identity({**own, **config}) != role.identity({**own, **old}):
+            return "mailboxes are linked to this server: its address cannot change (create another server)"
+    return None
 
 
 def _validated(kind: str, config: dict | None, current: dict, secrets: dict | None) -> tuple[dict, dict]:
-    role = _connection_role(_spec(kind))
+    role = _connection_role(_spec(kind, directory=False))
     try:
         return registry.normalize_config(role, config), registry.merge_secrets(role, current, secrets)
     except ConnectorError as e:
@@ -257,6 +282,8 @@ def update_connection(cid: int, body: ConnectionIn):
                             for k in IDENTITY_KEYS):
         raise HTTPException(409, "accounts are linked to this connection: the tenant and the cloud cannot change "
                                  "(create another connection)")
+    if wiring.shares_settings(r["kind"]) and config != old_config and (why := _linked_change(r, config)):
+        raise HTTPException(409, why)
     sets: dict[str, Any] = {"config": db.jdump(config)}
     if body.name is not None:
         if not body.name.strip():
@@ -285,6 +312,7 @@ def delete_connection(cid: int):
 @router.post("/test")
 def test_unsaved(body: ProbeIn):
     """Tries a form without saving it; `id` fills the omitted secrets from that connection."""
+    _spec(body.kind)
     current: dict = {}
     if body.id is not None:
         r = _row(body.id)

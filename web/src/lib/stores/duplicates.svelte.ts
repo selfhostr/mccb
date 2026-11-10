@@ -1,6 +1,6 @@
 /**
- * The duplicates tab: the mailboxes mccb already knows (migration accounts and repair mailboxes), their runs,
- * a poll while one is active.
+ * The duplicates tab: the migration accounts and the mailboxes added by hand (the list of the repair store, which
+ * adds, edits and removes them), their runs, a poll while one is active.
  */
 import { SvelteSet } from 'svelte/reactivity';
 import { get, post } from '../api/client.ts';

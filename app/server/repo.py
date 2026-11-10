@@ -71,15 +71,22 @@ def source_view(r) -> dict:
     cid = r["source_connection_id"] if "source_connection_id" in r.keys() else None
     conn = db.q1("SELECT id, name, secret_enc FROM source_connections WHERE id=?", (cid,)) if cid is not None else None
     return {"kind": r["source_kind"], "config": db.jload(r["source_config"], {}) or {},
-            "has_secret": bool(conn["secret_enc"]) if conn is not None else bool(r["source_secret_enc"]),
+            "has_secret": bool(conn["secret_enc"] or r["source_secret_enc"]) if conn is not None
+            else bool(r["source_secret_enc"]),
             "connection": {"id": conn["id"], "name": conn["name"]} if conn is not None else None}
 
 
 def source_connection_view(r) -> dict:
     """A source connection (e.g. a Microsoft 365 tenant): never its secret, only has_secret."""
     n = db.q1("SELECT COUNT(*) AS n FROM accounts WHERE source_connection_id=?", (r["id"],))["n"]
+    from ..connectors import wiring  # here: wiring reads this package
+    try:
+        names = sorted(wiring.load_secrets(r["secret_enc"]))
+    except Exception:  # unreadable (key changed): shown as none, saving again replaces it
+        names = []
     return {"id": r["id"], "name": r["name"], "kind": r["kind"], "config": db.jload(r["config"], {}) or {},
-            "has_secret": bool(r["secret_enc"]), "notes": r["notes"] or "", "last_test": r["last_test"],
+            "has_secret": bool(r["secret_enc"]), "secret_names": names, "notes": r["notes"] or "",
+            "last_test": r["last_test"],
             "last_test_result": db.jload(r["last_test_result"], None), "accounts": n, "created_at": r["created_at"],
             "provisioned": db.jload(r["provisioned"], None) if "provisioned" in r.keys() else None}
 

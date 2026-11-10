@@ -47,7 +47,7 @@
 </script>
 
 <div class="file-name">
-	<p class="m-0 truncate font-semibold" title={name} data-testid="queue-name">{name}</p>
+	<p class="m-0 truncate font-medium" title={name} data-testid="queue-name">{name}</p>
 	<p class="m-0 text-xs text-ink-2">
 		<span title={m.files_queue_modified({ date: fmtAbsolute(new Date(item.lastModified)) })}>{m.files_queue_progress({ sent: fmtBytes(item.sentBytes), size: fmtBytes(item.size), percent })}</span>
 		{#if active && item.rate > 0}<span> {m.files_queue_rate({ rate: fmtBytes(item.rate), left: fmtDuration(item.eta) })}</span>{/if}
@@ -58,7 +58,7 @@
 <span class="file-kind text-xs text-ink-2">{kindOf(item.filename)}</span>
 <span class="file-size text-xs text-ink-2">{fmtBytes(item.size)}</span>
 <div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} /></div>
-<div class="file-bar flex items-center gap-2.5">
+<div class="file-bar flex items-center gap-3">
 	{#if item.status === 'needs_file'}
 		<Button icon={FolderOpen} onclick={() => picker?.click()}>{m.files_queue_select_file()}</Button>
 		<input

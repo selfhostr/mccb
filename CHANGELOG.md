@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- A server of any kind (IMAP, Exchange, JMAP...) can be saved once on the Servers page and shared by mailboxes: it holds the address and the common settings, each mailbox keeps its own login and password. `/api/source-connections` accepts these kinds, and a connection lists the names of its stored secrets (`secret_names`).
+- New migration takes several mailboxes at once, typed line by line or pasted as a list.
+- Duplicates also works on mailboxes added by hand, without a migration. The list is shared with Repair.
+- The sidebar folds down to its icons.
+
+### Changed
+- Simpler interface: one "Add a server" picker for every kind of server, forms open in a side panel, page headers hold a title and icon buttons, and Settings is one page (notifications, automatic assignment and API tokens open in a panel).
+- Repair and Duplicates are two tabs of one page, Maintenance.
+- The "Live" label is gone: the interface only says when it is reconnecting.
+- Short interface texts (toasts, empty states, status lines) no longer end with a period.
+
+### Fixed
+- Testing unsaved settings of a kind that has no directory answers 422 instead of 500.
+
 ## 2.1.0
 mccb 2.1.0 migrates a whole Microsoft 365 tenant from one screen, after a two-click Connect with Microsoft, and adds a Duplicates tab. Calendars, address books and task lists now keep their own collections on CalDAV and CardDAV targets. The project moved to the selfhostr organisation: change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
 

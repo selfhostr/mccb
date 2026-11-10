@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
-	 * Duplicates tab: mailboxes mccb already knows. Analyse first (writes nothing), read the counts,
-	 * then remove: the deletion is permanent, one copy of each is always kept.
+	 * Duplicates tab: the migration mailboxes and the mailboxes added by hand (one list shared with Repair, no
+	 * migration needed). Analyse first (writes nothing), read the counts, then remove: the deletion is permanent,
+	 * one copy of each is always kept.
 	 */
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -9,8 +10,13 @@
 	import Copy from '@lucide/svelte/icons/copy';
 	import CopyX from '@lucide/svelte/icons/copy-x';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
+	import FlaskConical from '@lucide/svelte/icons/flask-conical';
+	import KeyRound from '@lucide/svelte/icons/key-round';
+	import Plus from '@lucide/svelte/icons/plus';
 	import ScanSearch from '@lucide/svelte/icons/scan-search';
+	import Server from '@lucide/svelte/icons/server';
 	import Square from '@lucide/svelte/icons/square';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import { onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText } from '../../lib/api/client.ts';
@@ -21,22 +27,30 @@
 	import { dedupLook } from '../../lib/status.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import { duplicates } from '../../lib/stores/duplicates.svelte.ts';
+	import { repairs } from '../../lib/stores/repair.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
+	import Confirm from '../../lib/ui/Confirm.svelte';
 	import Dialog from '../../lib/ui/Dialog.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
+	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
+	import MaintenanceTabs from '../MaintenanceTabs.svelte';
 	import Panel from '../../lib/ui/Panel.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
 	import Progress from '../../lib/ui/Progress.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import RepairBoxDialog from '../repair/RepairBoxDialog.svelte';
+	import RepairCsvDialog from '../repair/RepairCsvDialog.svelte';
 	import DuplicatesDetail from './DuplicatesDetail.svelte';
 	import { KINDS, kindCount, kindLabel, planRemoval } from './helpers.ts';
 
 	onMount(() => duplicates.follow());
 
+	let dialog = $state.raw<{ kind: 'add' } | { kind: 'edit'; box: DedupBox } | { kind: 'csv' } | null>(null);
+	let removing = $state.raw<DedupBox | null>(null);
 	let confirming = $state.raw<string[] | null>(null);
 	let confirmBusy = $state(false);
 	let open = $state<string | null>(null);
@@ -51,16 +65,16 @@
 	/** A box can start a run when nothing else writes to it and it has a password. */
 	const free = (b: DedupBox) => b.usable && !b.busy && !b.active_run;
 
-	const sentence = $derived.by(() => {
-		if (!duplicates.loaded) return m.common_loading();
-		const found = boxes.filter((b) => !b.active_run && (b.last_run ?? b.last_scan)?.mode === 'scan' && (b.last_scan?.progress.duplicates ?? 0) > 0).length;
-		return m.dedup_page_summary({ total: boxes.length, found });
-	});
-
 	const plan = $derived(confirming ? planRemoval(boxes.filter((b) => confirming!.includes(b.key)), kinds) : null);
 	const removable = $derived(selected.some((b) => free(b) && b.last_scan));
 
+	/** A mailbox added by hand (not a migration): it can be tested, edited and removed from the list here. */
+	const byHand = (b: DedupBox) => b.source === 'repair';
+	const testing = (b: DedupBox) => byHand(b) && repairs.testing.has(b.ref_id);
+	const changed = () => void duplicates.refresh();
+
 	function connLook(box: DedupBox) {
+		if (testing(box)) return { icon: FlaskConical, tone: 'text-info-ink', label: m.migrations_test_running() };
 		const c = connectionOf(box);
 		if (c === 'ok') return { icon: CircleCheck, tone: 'text-signal-ink', label: m.migrations_test_status_ok() };
 		if (c === 'untested') return { icon: CircleDashed, tone: 'text-ink-3', label: m.migrations_test_never() };
@@ -76,7 +90,7 @@
 			return m.dedup_row_progress({ seen: fmtNum(p.seen), total: fmtNum(p.total), folder: p.folder ?? '' });
 		}
 		const run = box.last_run ?? box.last_scan;
-		if (!run) return m.dedup_row_never();
+		if (!run) return '';
 		const p = run.progress;
 		if (run.status === 'failed') return run.error ?? '';
 		if (run.mode === 'dedup') return m.dedup_row_removed({ count: fmtNum(p.deleted) });
@@ -120,6 +134,22 @@
 		}
 	}
 
+	async function test(box: DedupBox) {
+		await repairs.test([box.ref_id]);
+		await duplicates.refresh();
+	}
+
+	async function forget(box: DedupBox) {
+		try {
+			await repairs.remove(box.ref_id);
+			if (open === box.key) open = null;
+			await duplicates.refresh();
+			toast(m.repair_box_deleted({ email: prefs.email(box.email) }), 'signal');
+		} catch (err) {
+			toast(errorText(err), 'warning');
+		}
+	}
+
 	function toggleAll(e: Event & { currentTarget: HTMLInputElement }) {
 		if (e.currentTarget.checked) for (const b of boxes) duplicates.selected.add(b.key);
 		else duplicates.selected.clear();
@@ -136,24 +166,37 @@
 		return [
 			{ label: m.dedup_action_scan(), icon: ScanSearch, disabled: !can, onselect: () => run([box.key], 'scan') },
 			{ label: m.dedup_action_remove(), icon: CopyX, disabled: !can || !box.last_scan, onselect: () => ask([box.key]) },
-			...(active && box.active_run?.status !== 'stopping' ? [{ label: m.dedup_action_stop(), icon: Square, onselect: () => duplicates.stop(box.active_run!.id) }] : [])
+			...(active && box.active_run?.status !== 'stopping' ? [{ label: m.dedup_action_stop(), icon: Square, onselect: () => duplicates.stop(box.active_run!.id) }] : []),
+			...(byHand(box)
+				? [
+						{ label: m.migrations_row_test(), icon: FlaskConical, disabled: testing(box), onselect: () => test(box) },
+						{ label: m.migrations_row_edit(), icon: KeyRound, disabled: active, onselect: () => (dialog = { kind: 'edit', box }) },
+						{ label: m.migrations_row_delete(), icon: Trash2, danger: true, disabled: active, onselect: () => (removing = box) }
+					]
+				: [])
 		];
 	}
 </script>
 
 <div class="flex flex-col gap-5" data-testid="dedup-page">
-	<PageHeader title={m.dedup_title()} {sentence} />
+	<PageHeader title={m.shell_nav_maintenance()}>
+		{#snippet actions()}
+			{#if data.servers.length}
+				<IconButton variant="primary" icon={Plus} label={m.repair_add()} onclick={() => (dialog = { kind: 'add' })} data-testid="dedup-add" />
+			{/if}
+		{/snippet}
+	</PageHeader>
 
-	<Notice>{m.dedup_notice()}</Notice>
+	<MaintenanceTabs />
+
+	<Notice tone="note">{m.dedup_notice()}</Notice>
 
 	{#if duplicates.error && !duplicates.loaded}
 		<ErrorNotice title={m.dedup_load_failed()} message={duplicates.error} />
+	{:else if duplicates.loaded && !boxes.length && !data.servers.length && !data.loading}
+		<EmptyState icon={Server} title={m.migrations_empty_no_server_title()} description={m.repair_no_server_text()} />
 	{:else if duplicates.loaded && !boxes.length}
-		<EmptyState icon={Copy} title={m.dedup_empty_title()} description={m.dedup_empty_text()}>
-			{#snippet action()}
-				<Button variant="primary" href="/">{m.dedup_empty_action()}</Button>
-			{/snippet}
-		</EmptyState>
+		<EmptyState icon={Copy} title={m.dedup_empty_title()} description={m.dedup_empty_text()} />
 	{:else if boxes.length}
 		<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
 			<fieldset class="m-0 flex min-w-0 flex-wrap items-center gap-x-4 border-0 p-0" data-testid="dedup-kinds">
@@ -201,12 +244,12 @@
 						</label>
 						<button type="button" class="flex min-h-10 min-w-0 flex-1 basis-56 flex-col items-start justify-center text-left" onclick={() => (open = open === box.key ? null : box.key)} aria-expanded={open === box.key} data-testid="dedup-open">
 							<span class="flex min-w-0 items-center gap-1.5">
-								<span class={`inline-flex shrink-0 ${c.tone}`} title={c.label}>
+								<span class={`inline-flex shrink-0 ${c.tone}`} title={c.label} data-testid="dedup-conn-state" data-conn={testing(box) ? 'testing' : connectionOf(box)}>
 									<Icon size={14} aria-hidden="true" /><span class="sr-only">{c.label}</span>
 								</span>
-								<span class="truncate font-semibold">{email}</span>
+								<span class="truncate font-medium">{email}</span>
 							</span>
-							<span class="max-w-full truncate text-xs text-ink-2" data-testid="dedup-line">{serverName(box.server_id)} · {resultLine(box)}</span>
+							<span class="flex max-w-full gap-2 text-xs text-ink-2" data-testid="dedup-line"><span class="truncate">{serverName(box.server_id)}</span>{#if resultLine(box)}<span class="truncate text-ink-3">{resultLine(box)}</span>{/if}</span>
 						</button>
 						<span data-testid="dedup-state"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
 						<span class="w-32 shrink-0">
@@ -225,13 +268,24 @@
 	{/if}
 </div>
 
+{#if dialog?.kind === 'add'}
+	<RepairBoxDialog oncsv={() => (dialog = { kind: 'csv' })} onchange={changed} onclose={() => (dialog = null)} />
+{:else if dialog?.kind === 'edit'}
+	{@const b = dialog.box}
+	<RepairBoxDialog box={{ id: b.ref_id, server_id: b.server_id, email: b.email, login: b.login }} onchange={changed} onclose={() => (dialog = null)} />
+{:else if dialog?.kind === 'csv'}
+	<RepairCsvDialog onchange={changed} onclose={() => (dialog = null)} />
+{/if}
+{#if removing}
+	{@const target = removing}
+	<Confirm title={m.repair_delete_title()} text={m.repair_delete_text({ email: prefs.email(target.email) })} confirm={m.migrations_row_delete()} danger onconfirm={() => forget(target)} onclose={() => (removing = null)} />
+{/if}
 {#if confirming && plan}
-	<Dialog title={m.dedup_confirm_title()} onclose={() => (confirming = null)}>
+	<Dialog title={m.dedup_confirm_title()} onclose={() => (confirming = null)} center>
 		<div class="flex flex-col gap-3" data-testid="dedup-confirm">
 			<p class="m-0 font-semibold" data-testid="dedup-confirm-counts">{m.dedup_confirm_summary({ counts: kinds.map((k) => kindCount(k, plan.counts[k])).join(', '), boxes: plan.keys.length })}</p>
 			<p class="m-0 font-semibold text-warning-ink">{m.dedup_confirm_permanent()}</p>
 			<p class="m-0">{m.dedup_confirm_keep()}</p>
-			<p class="m-0 text-ink-2">{m.dedup_confirm_recheck()}</p>
 			{#if plan.unanalysed}<p class="m-0 text-ink-2">{m.dedup_confirm_unanalysed({ count: plan.unanalysed })}</p>{/if}
 		</div>
 		{#snippet actions()}

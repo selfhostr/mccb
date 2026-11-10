@@ -1,4 +1,6 @@
 <script lang="ts">
+	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post, put } from '../../lib/api/client.ts';
@@ -6,34 +8,45 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Dialog from '../../lib/ui/Dialog.svelte';
+	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import PolicyFields from './PolicyFields.svelte';
 	import Toggle from '../../lib/ui/Toggle.svelte';
-	import KindIcon from '../../lib/ui/KindIcon.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import { davDetected } from '../../lib/logic/dav.ts';
-	import { PROVIDERS, providerOf, type Provider } from '../../lib/logic/providers.ts';
+	import { providerOf, type Provider } from '../../lib/logic/providers.ts';
 
-	let { server = null, onclose, onsaved }: { server?: Server | null; onclose: () => void; onsaved?: (saved: Server) => void } = $props();
+	interface Props {
+		server?: Server | null;
+		/** Adding: the provider picked on the way in. Its preset fills host, port, security and the DAV addresses. */
+		provider?: Provider;
+		onclose: () => void;
+		onback?: () => void;
+		onsaved?: (saved: Server) => void;
+	}
+	let { server = null, provider: picked, onclose, onback, onsaved }: Props = $props();
 
 	const initial: ServerInput = untrack(() =>
 		server
 			? { ...server }
-			: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null }
+			: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null, ...(picked?.preset ?? {}) }
 	);
 	let form = $state<ServerInput>(initial);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
 	let policyError = $state<string | null>(null);
 	let policy = $state<PolicyFields>();
-	// Adding starts from a provider: the preset fills host, port, security and the address book URLs.
-	let provider = $state<Provider>(untrack(() => providerOf(server?.imap_host)));
-	function pick(next: Provider) {
-		provider = next;
-		Object.assign(form, { caldav_url: '', carddav_url: '' }, next.preset, { name: form.name && !PROVIDERS.some((p) => p.preset.name === form.name) ? form.name : (next.preset.name ?? '') });
-	}
+	const provider = untrack(() => picked ?? providerOf(server?.imap_host));
+	const LINKS = {
+		gmail_password: () => m.servers_link_gmail_password(),
+		gmail_imap: () => m.servers_link_gmail_imap(),
+		icloud_password: () => m.servers_link_icloud_password()
+	};
+	const note = $derived(
+		provider.id === 'gmail' ? m.servers_note_gmail() : provider.id === 'icloud' ? m.servers_note_icloud() : provider.note === 'oauth' ? m.settings_server_provider_oauth() : provider.note ? m.settings_server_provider_app_password({ name: provider.name }) : null
+	);
 
 	function onSecurity() {
 		if (form.imap_port === 993 || form.imap_port === 143) form.imap_port = form.imap_security === 'ssl' ? 993 : 143;
@@ -70,30 +83,19 @@
 	}
 </script>
 
-<Dialog title={server ? m.settings_server_edit_title({ name: server.name }) : m.settings_server_add_title()} {onclose} wide>
+<Dialog title={server ? m.settings_server_edit_title({ name: server.name }) : m.servers_kind_title({ name: provider.id === 'imap' ? m.servers_type_imap() : provider.name })} {onclose} wide>
 	<form id="server-form" class="flex flex-col gap-3" onsubmit={submit}>
-		{#if !server}
-			<fieldset class="m-0 border-0 p-0">
-				<legend class="mb-2 p-0 font-medium text-ink-2">{m.settings_server_provider()}</legend>
-				<div class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" data-testid="server-providers">
-					{#each PROVIDERS as item (item.id)}
-						<button
-							type="button"
-							role="radio"
-							aria-checked={provider.id === item.id}
-							class={`flex min-h-12 items-center gap-2 rounded-btn border px-2 text-left font-medium transition-colors duration-200 ${provider.id === item.id ? 'border-ink-3 bg-surface-2 text-ink' : 'border-line-strong text-ink-2 hover:text-ink'}`}
-							onclick={() => pick(item)}
-							data-provider={item.id}
-						>
-							<KindIcon icon={item.icon} size={28} />
-							<span class="min-w-0 truncate">{item.id === 'imap' ? m.settings_server_provider_other() : item.name}</span>
-						</button>
-					{/each}
-				</div>
-				{#if provider.note}
-					<div class="mt-2"><Notice><p class="m-0">{provider.note === 'oauth' ? m.settings_server_provider_oauth() : m.settings_server_provider_app_password({ name: provider.name })}</p></Notice></div>
+		{#if !server && note}
+			<div class="rounded-btn bg-surface-2 p-3 text-sm text-ink-2" data-testid="server-note">
+				<p class="m-0">{note}</p>
+				{#if provider.links?.length}
+					<p class="m-0 mt-1 flex flex-wrap gap-x-4 gap-y-1">
+						{#each provider.links as link (link.id)}
+							<a class="inline-flex min-h-10 items-center gap-1 font-medium" href={link.href} target="_blank" rel="noopener noreferrer" data-link={link.id}>{LINKS[link.id]()}<ExternalLink size={14} /></a>
+						{/each}
+					</p>
 				{/if}
-			</fieldset>
+			</div>
 		{/if}
 		<Field label={m.settings_server_name()}>
 			<input class="input" required bind:value={form.name} data-testid="server-name" />
@@ -129,8 +131,7 @@
 				<input class="input font-mono" bind:value={form.carddav_url} />
 			</Field>
 		{/if}
-		<details>
-			<summary class="flex min-h-10 cursor-pointer items-center font-medium text-ink-2">{m.settings_server_tuning()}</summary>
+		<Disclosure title={m.settings_server_tuning()}>
 			<div class="flex flex-col gap-3 pt-1">
 				<Field label={m.settings_server_tuning_mode()}>
 					<select class="input" bind:value={form.tuning}>
@@ -152,12 +153,13 @@
 					<textarea class="input" rows="2" bind:value={form.notes}></textarea>
 				</Field>
 			</div>
-		</details>
+		</Disclosure>
 		{#if server}<PolicyFields bind:this={policy} url={`/servers/${server.id}/policy`} server />{/if}
 		{#if policyError}<ErrorNotice title={m.policy_save_failed()} message={policyError} />{/if}
 		{#if error}<ErrorNotice title={m.settings_server_save_failed()} message={error} />{/if}
 	</form>
 	{#snippet actions()}
+		{#if onback}<span class="mr-auto"><Button variant="ghost" icon={ArrowLeft} onclick={onback}>{m.common_back()}</Button></span>{/if}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
 		<Button variant="primary" type="submit" form="server-form" loading={busy} data-testid="server-save">{m.common_save()}</Button>
 	{/snippet}

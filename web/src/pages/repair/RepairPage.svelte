@@ -7,7 +7,6 @@
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 	import CircleX from '@lucide/svelte/icons/circle-x';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
-	import FileUp from '@lucide/svelte/icons/file-up';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Plus from '@lucide/svelte/icons/plus';
@@ -27,12 +26,14 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import { repairs } from '../../lib/stores/repair.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
+	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Menu from '../../lib/ui/Menu.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
+	import MaintenanceTabs from '../MaintenanceTabs.svelte';
 	import Panel from '../../lib/ui/Panel.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
 	import Progress from '../../lib/ui/Progress.svelte';
@@ -55,12 +56,6 @@
 	const openBox = $derived(boxes.find((b) => b.id === open) ?? null);
 	const serverName = (id: number) => data.servers.find((s) => s.id === id)?.name ?? '';
 
-	const sentence = $derived.by(() => {
-		if (!repairs.loaded) return m.common_loading();
-		const damaged = boxes.filter((b) => !b.active_run && b.last_scan?.mode === 'scan' && b.last_scan.progress.affected > 0).length;
-		return m.repair_page_summary({ total: boxes.length, damaged });
-	});
-
 	function connLook(box: RepairBox) {
 		if (repairs.testing.has(box.id)) return { icon: FlaskConical, tone: 'text-info-ink', label: m.migrations_test_running() };
 		const c = connectionOf(box);
@@ -72,7 +67,7 @@
 	/** One line under the address: progress while it runs, else what the last run found or did. */
 	function resultLine(box: RepairBox): string {
 		const run = box.active_run ?? box.last_scan;
-		if (!run) return m.repair_row_never();
+		if (!run) return '';
 		const p = run.progress;
 		if (box.active_run) return m.repair_row_progress({ seen: p.seen, total: p.total, folder: p.folder ?? '' });
 		if (run.status === 'failed') return run.error ?? '';
@@ -127,32 +122,24 @@
 </script>
 
 <div class="flex flex-col gap-5" data-testid="repair-page">
-	<PageHeader title={m.repair_title()} {sentence}>
+	<PageHeader title={m.shell_nav_maintenance()}>
 		{#snippet actions()}
 			{#if data.servers.length}
-				<Button icon={FileUp} onclick={() => (dialog = { kind: 'csv' })} data-testid="repair-csv">{m.migrations_add_csv()}</Button>
-				<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })} data-testid="repair-add">{m.repair_add()}</Button>
+				<IconButton variant="primary" icon={Plus} label={m.repair_add()} onclick={() => (dialog = { kind: 'add' })} data-testid="repair-add" />
 			{/if}
 		{/snippet}
 	</PageHeader>
 
-	<Notice>{m.repair_notice()}</Notice>
+	<MaintenanceTabs />
+
+	<Notice tone="note">{m.repair_notice()}</Notice>
 
 	{#if repairs.error && !repairs.loaded}
 		<ErrorNotice title={m.repair_load_failed()} message={repairs.error} />
 	{:else if !data.servers.length && !data.loading}
-		<EmptyState icon={Server} title={m.migrations_empty_no_server_title()} description={m.repair_no_server_text()}>
-			{#snippet action()}
-				<Button variant="primary" href="/settings#servers">{m.migrations_empty_no_server_action()}</Button>
-			{/snippet}
-		</EmptyState>
+		<EmptyState icon={Server} title={m.migrations_empty_no_server_title()} description={m.repair_no_server_text()} />
 	{:else if repairs.loaded && !boxes.length}
-		<EmptyState icon={Wrench} title={m.repair_empty_title()} description={m.repair_empty_text()}>
-			{#snippet action()}
-				<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })}>{m.repair_add()}</Button>
-				<Button icon={FileUp} onclick={() => (dialog = { kind: 'csv' })}>{m.migrations_add_csv()}</Button>
-			{/snippet}
-		</EmptyState>
+		<EmptyState icon={Wrench} title={m.repair_empty_title()} description={m.repair_empty_text()} />
 	{:else if boxes.length}
 		<div class="flex flex-wrap items-center gap-1" role="group" aria-label={m.migrations_conn_group()} data-testid="repair-conn">
 			<span class="inline-flex min-h-10 items-center gap-1 px-2 text-sm text-ink-2"><CircleCheck size={14} class="text-signal-ink" />{m.migrations_conn_ok({ count: conn.ok })}</span>
@@ -192,9 +179,9 @@
 								<span class={`inline-flex shrink-0 ${c.tone}`} title={c.label} data-testid="repair-conn-state" data-conn={repairs.testing.has(box.id) ? 'testing' : connectionOf(box)}>
 									<Icon size={14} aria-hidden="true" /><span class="sr-only">{c.label}</span>
 								</span>
-								<span class="truncate font-semibold">{email}</span>
+								<span class="truncate font-medium">{email}</span>
 							</span>
-							<span class="truncate text-xs text-ink-2" data-testid="repair-line">{serverName(box.server_id)} · {resultLine(box)}</span>
+							<span class="flex max-w-full gap-2 text-xs text-ink-2" data-testid="repair-line"><span class="truncate">{serverName(box.server_id)}</span>{#if resultLine(box)}<span class="truncate text-ink-3">{resultLine(box)}</span>{/if}</span>
 						</button>
 						<span data-testid="repair-state"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
 						<span class="w-32 shrink-0">
@@ -214,7 +201,7 @@
 </div>
 
 {#if dialog?.kind === 'add'}
-	<RepairBoxDialog onclose={() => (dialog = null)} />
+	<RepairBoxDialog oncsv={() => (dialog = { kind: 'csv' })} onclose={() => (dialog = null)} />
 {:else if dialog?.kind === 'edit'}
 	<RepairBoxDialog box={dialog.box} onclose={() => (dialog = null)} />
 {:else if dialog?.kind === 'csv'}

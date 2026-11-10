@@ -97,7 +97,7 @@
 	<!-- Microsoft 365 side -->
 	<div class="min-w-0">
 		{#if box}
-			<p class="m-0 truncate font-semibold" title={prefs.text(box.display_name)}>{prefs.text(box.display_name) || prefs.email(box.mail)}</p>
+			<p class="m-0 truncate font-medium" title={prefs.text(box.display_name)}>{prefs.text(box.display_name) || prefs.email(box.mail)}</p>
 			<p class="m-0 truncate font-mono text-xs text-ink-2">{prefs.email(box.mail)}</p>
 			{#if plates.length}
 				<p class="m-0 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
@@ -105,7 +105,7 @@
 				</p>
 			{/if}
 		{:else}
-			<p class="m-0 text-sm text-ink-3 italic">{m.tenant_row_no_mailbox()}</p>
+			<p class="m-0 text-sm text-ink-3">{m.tenant_row_no_mailbox()}</p>
 		{/if}
 	</div>
 
@@ -132,18 +132,18 @@
 				{/if}
 			</p>
 		{:else}
-			<p class="m-0 text-sm text-ink-3 italic">{m.tenant_row_add_to_csv({ server })}</p>
+			<p class="m-0 text-sm text-ink-3">{m.tenant_row_add_to_csv({ server })}</p>
 		{/if}
 		{#if box && (onpick || (manual && onreset))}
 			<p class="m-0 mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
 				{#if onpick}
 					<button type="button" class={`${PICK} -ml-2`} disabled={busy} onclick={onpick} data-testid="tenant-pick">
-						<Pencil size={13} aria-hidden="true" />{account ? m.tenant_pick_change() : m.tenant_pick_choose()}
+						<Pencil size={14} aria-hidden="true" />{account ? m.tenant_pick_change() : m.tenant_pick_choose()}
 					</button>
 				{/if}
 				{#if manual && onreset}
 					<button type="button" class={PICK} disabled={busy || resetting} onclick={onreset} data-testid="tenant-pick-reset">
-						<Undo2 size={13} aria-hidden="true" />{m.tenant_pick_reset()}
+						<Undo2 size={14} aria-hidden="true" />{m.tenant_pick_reset()}
 					</button>
 				{/if}
 			</p>

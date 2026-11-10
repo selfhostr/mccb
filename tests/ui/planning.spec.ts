@@ -355,11 +355,15 @@ test.describe('API tokens', () => {
 		await context.grantPermissions(['clipboard-read', 'clipboard-write']);
 		await ready(page, '/settings');
 		const section = page.getByTestId('section-tokens');
-		await expect(section).toContainText('No token yet');
-		await section.getByTestId('token-name').fill('nas');
-		await section.getByTestId('token-create').click();
+		await expect(section.getByTestId('token-count')).toHaveText('None');
+		// Tokens are managed in a drawer opened from the Security group.
+		await section.getByTestId('tokens-open').click();
+		const drawer = page.getByRole('dialog', { name: 'API tokens' });
+		await expect(drawer).toContainText('No token yet');
+		await drawer.getByTestId('token-name').fill('nas');
+		await drawer.getByTestId('token-create').click();
 
-		const created = section.getByTestId('token-created');
+		const created = drawer.getByTestId('token-created');
 		await expect(created.getByTestId('token-value')).toContainText('mccb_');
 		await expect(created).toContainText('shown only once');
 		await created.getByRole('button', { name: 'Copy the token' }).click();
@@ -368,21 +372,26 @@ test.describe('API tokens', () => {
 		await expect(created).toHaveCount(0);
 
 		// The list never shows the token again.
-		const item = section.locator('[data-token="nas"]');
+		const item = drawer.locator('[data-token="nas"]');
 		await expect(item).toContainText('Active');
 		await expect(item).not.toContainText('xxxxxxxx');
 		await page.reload();
+		await expect(section.getByTestId('token-count')).toHaveText('Active: 1');
 		await expect(page.getByTestId('token-value')).toHaveCount(0);
 
-		await page.getByRole('button', { name: 'Revoke nas' }).click();
-		await page.getByRole('dialog').getByRole('button', { name: 'Revoke', exact: true }).click();
-		await expect(item).toContainText('Revoked');
+		await section.getByTestId('tokens-open').click();
+		await page.getByRole('dialog', { name: 'API tokens' }).getByRole('button', { name: 'Revoke nas' }).click();
+		await page.getByRole('dialog', { name: 'Revoke this token' }).getByRole('button', { name: 'Revoke', exact: true }).click();
+		const reopened = page.getByRole('dialog', { name: 'API tokens' });
+		await expect(reopened.locator('[data-token="nas"]')).toContainText('Revoked');
 		await expect(page.getByRole('button', { name: 'Revoke nas' })).toHaveCount(0);
 	});
 
 	test('the section fits a phone', async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await ready(page, '/settings');
+		await noOverflow(page);
+		await page.getByTestId('tokens-open').click();
 		await page.getByTestId('token-name').fill('a token with a rather long descriptive name');
 		await page.getByTestId('token-create').click();
 		await expect(page.getByTestId('token-created')).toBeVisible();

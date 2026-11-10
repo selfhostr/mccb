@@ -1,8 +1,8 @@
 """Duplicate runs: analysis and removal of duplicates in mailboxes already known to MCCB (see dedup.py,
 docs/duplicates.md).
 
-The mailboxes are the migration accounts whose target is their IMAP server, and the mailboxes of the repair tab: no
-password is asked again. A box is named by a key, "account:<id>" or "repair:<id>". A run works on the server of the
+The mailboxes are the migration accounts whose target is their IMAP server, and the mailboxes added by hand (one
+mailbox or a CSV file, table repair_boxes, the same list as the repair tab): no migration is needed. A box is named by a key, "account:<id>" or "repair:<id>". A run works on the server of the
 mailbox (the target of a migration), like the repair tab, and runs in a thread of the worker. Modes:
   scan   reads (EXAMINE, BODY.PEEK of four headers, RFC822.SIZE; PROPFIND and multiget for DAV), groups the copies
          per folder or collection, counts them and keeps a few examples. Writes nothing.
@@ -52,12 +52,15 @@ def max_parallel() -> int:
 
 # ------------------------------------------------------------------ mailboxes
 def _sources() -> list[dict]:
-    """Every mailbox MCCB knows a password for on a server, once per (server, address): a migration account first."""
+    """Every mailbox MCCB knows on a server, once per (server, address): a migration account first, unless it has no
+    password and a mailbox added by hand (table repair_boxes, shared with the repair tab) has one."""
     out: dict[tuple[int, str], dict] = {}
     for r in db.q("SELECT * FROM accounts WHERE target_kind IS NULL OR target_kind='' ORDER BY email, id"):
         out.setdefault((r["server_id"], r["email"].lower()), {"source": "account", "row": r})
     for r in db.q("SELECT * FROM repair_boxes ORDER BY email, id"):
-        out.setdefault((r["server_id"], r["email"].lower()), {"source": "repair", "row": r})
+        k = (r["server_id"], r["email"].lower())
+        if k not in out or (not out[k]["row"]["password_enc"] and r["password_enc"]):
+            out[k] = {"source": "repair", "row": r}
     return sorted(out.values(), key=lambda s: (s["row"]["email"].lower(), s["source"], s["row"]["id"]))
 
 
