@@ -1,5 +1,5 @@
-"""API of the repair tab: mailboxes to check and repair, their runs and a before/after preview.
-See docs/repair.md and docs/api.md."""
+"""API of the repair tab: mailboxes added by hand (the duplicates tab lists them too, see dedup_runs.py) to check
+and repair, their runs and a before/after preview. See docs/repair.md and docs/api.md."""
 from __future__ import annotations
 
 import time
@@ -31,6 +31,12 @@ def _box_or_404(bid: int):
 
 def _busy(bid: int) -> bool:
     return db.q1(f"SELECT id FROM repair_runs WHERE box_id=? AND status IN {ACTIVE}", (bid,)) is not None
+
+
+def _in_use(bid: int) -> bool:
+    """A repair run, or a duplicates run of the duplicates tab (same list of mailboxes), works on it now."""
+    return _busy(bid) or db.q1(f"SELECT id FROM dedup_runs WHERE box_key=? AND status IN {ACTIVE}",
+                               (f"repair:{bid}",)) is not None
 
 
 def _view(bid: int) -> dict:
@@ -75,7 +81,7 @@ def create_box(b: BoxIn):
 @router.put("/boxes/{bid}")
 def update_box(bid: int, b: BoxUpdate):
     cur = _box_or_404(bid)
-    if _busy(bid):
+    if _in_use(bid):
         raise HTTPException(409, "a run is active for this mailbox")
     sets: dict[str, object] = {}
     if b.server_id is not None and b.server_id != cur["server_id"]:
@@ -104,7 +110,7 @@ def update_box(bid: int, b: BoxUpdate):
 @router.delete("/boxes/{bid}")
 def delete_box(bid: int):
     _box_or_404(bid)
-    if _busy(bid):
+    if _in_use(bid):
         raise HTTPException(409, "a run is active for this mailbox")
     db.ex("DELETE FROM repair_boxes WHERE id=?", (bid,))
     return {"ok": True}
@@ -133,7 +139,7 @@ async def import_csv(file: UploadFile = File(...), server_id: int = Form(...)):
                 errors.append({"line": row.get("line"), "msg": f"missing password for {row['email']}"})
             continue
         if ex is not None:
-            if _busy(ex["id"]):
+            if _in_use(ex["id"]):
                 errors.append({"line": row.get("line"), "msg": f"a run is active for {row['email']}: not changed"})
                 continue
             db.ex("UPDATE repair_boxes SET password_enc=?, login=?, status='new', last_test=NULL, "

@@ -43,7 +43,7 @@ test.describe('connectors', () => {
 
 		// A required field left empty is said, not sent.
 		await page.getByTestId('route-save').click();
-		await expect(dialog.getByTestId('route-source-problem')).toContainText('Fill in: Server, User, Password.');
+		await expect(dialog.getByTestId('route-source-problem')).toContainText('Fill in: Server, User, Password');
 		expect((await state(page)).routeCalls).toEqual([]);
 
 		const src = dialog.getByTestId('route-source');

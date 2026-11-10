@@ -276,7 +276,7 @@
 </script>
 
 {#snippet info(text: string, testid: string)}
-	<div class="flex items-start gap-2 rounded-btn border border-line-strong bg-surface-2 p-2.5 text-sm text-ink-2" data-testid={testid}>
+	<div class="flex items-start gap-2 rounded-btn border border-line-strong bg-surface-2 p-3 text-sm text-ink-2" data-testid={testid}>
 		<span class="mt-0.5 text-info-ink"><Info size={14} /></span>
 		<p class="m-0 min-w-0">{text}</p>
 	</div>
@@ -287,7 +287,7 @@
 		<a class="inline-flex min-h-10 w-fit items-center gap-1.5 text-sm text-ink-2 no-underline hover:text-ink" href="/"><ArrowLeft size={14} />{m.shell_nav_migrations()}</a>
 		<div class="flex flex-wrap items-end justify-between gap-3">
 			<div class="flex min-w-0 flex-1 basis-80 flex-col gap-2">
-				<h1 class="m-0 flex flex-wrap items-center gap-x-2 gap-y-1 text-2xl">
+				<h1 class="m-0 flex flex-wrap items-center gap-x-2 gap-y-1 text-xl">
 					<span class="inline-flex min-w-0 items-center gap-2"><Building size={20} class="shrink-0 text-ink-3" /><span class="truncate">{m.tenant_title({ tenant: tenantName || '...' })}</span></span>
 					<ArrowRight size={20} class="shrink-0 text-ink-3" aria-hidden="true" />
 					<span class="sr-only">{m.tenant_title_to()}</span>
@@ -336,7 +336,7 @@
 
 		{#if noDav}
 			<div class="flex flex-wrap items-start gap-3 rounded-card border-2 border-warning/60 bg-warning-soft p-4 text-warning-ink" role="alert" data-testid="tenant-no-dav">
-				<span class="mt-0.5"><TriangleAlert size={22} /></span>
+				<span class="mt-0.5"><TriangleAlert size={20} /></span>
 				<div class="min-w-0 flex-1 basis-64">
 					<p class="m-0 text-base font-semibold">{m.tenant_banner_no_dav_title({ server: serverName })}</p>
 					<p class="m-0 mt-1 text-sm">{m.tenant_banner_no_dav_text()}</p>
@@ -434,7 +434,7 @@
 						{@const look = coverageLook(state)}
 						<span class="inline-flex items-center gap-1">
 							<span class={`relative inline-flex size-5 items-center justify-center ${look.tone}`} aria-hidden="true">
-								<Mail size={13} />
+								<Mail size={14} />
 								{#if look.mark}{@const Mark = look.mark}<span class="absolute -right-0.5 -bottom-0.5 inline-flex rounded-full bg-canvas"><Mark size={9} strokeWidth={3} /></span>{/if}
 							</span>
 							{look.label}

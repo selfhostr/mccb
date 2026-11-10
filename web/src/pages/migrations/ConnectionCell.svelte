@@ -39,7 +39,7 @@
 			{@const probe = result[protocol.key]}
 			{@const Icon = !probe ? Minus : probe.ok ? Check : X}
 			<span class={`inline-flex items-center gap-0.5 text-xs font-medium ${!probe ? 'text-ink-3' : probe.ok ? 'text-signal-ink' : 'text-warning-ink'}`}>
-				<Icon size={12} />{protocol.name}
+				<Icon size={14} />{protocol.name}
 			</span>
 		{/each}
 	</button>

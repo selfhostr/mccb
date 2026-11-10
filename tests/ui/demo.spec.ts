@@ -42,9 +42,14 @@ test.afterEach(async ({ page }) => {
 	expect(errors, 'console errors').toEqual([]);
 });
 
+// The page says nothing while it is live: only "Reconnecting" shows, until the event stream is open.
+const live = async (page: Page) => {
+	await expect(page.locator('#main')).toBeVisible();
+	await expect(page.getByTestId('live')).toHaveCount(0);
+};
 const open = async (page: Page, path = '/demo/') => {
 	await page.goto(path);
-	await expect(page.getByTestId('live')).toContainText('Live');
+	await live(page);
 };
 const api = <T = unknown>(page: Page, path: string, init?: Record<string, unknown>) =>
 	page.evaluate(
@@ -94,7 +99,7 @@ test('deep links load the app through 404.html, and navigation keeps the /demo p
 	await page.getByRole('navigation').getByRole('link', { name: 'Settings' }).click();
 	await expect(page).toHaveURL(ORIGIN + '/demo/settings');
 	await page.reload();
-	await expect(page.getByTestId('live')).toContainText('Live');
+	await live(page);
 	await expect(page).toHaveURL(ORIGIN + '/demo/settings');
 });
 
@@ -105,7 +110,7 @@ test('a write is accepted, and forgotten on reload', async ({ page }) => {
 	expect(made.status).toBe(201);
 	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(before + 1);
 	await page.reload();
-	await expect(page.getByTestId('live')).toContainText('Live');
+	await live(page);
 	expect((await api<unknown[]>(page, '/servers')).body).toHaveLength(before);
 });
 
@@ -130,7 +135,7 @@ test('login is skipped, and any password signs in again after signing out', asyn
 	await page.getByRole('button', { name: 'Sign out' }).click();
 	await page.getByTestId('login-password').fill('whatever');
 	await page.keyboard.press('Enter');
-	await expect(page.getByTestId('live')).toContainText('Live');
+	await live(page);
 });
 
 test('the badge shows at 390 px without horizontal overflow', async ({ page }) => {

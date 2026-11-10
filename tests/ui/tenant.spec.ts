@@ -6,6 +6,11 @@ test.use({ viewport: { width: 1280, height: 900 } });
 const state = (page: Page) => mock(page.request, 'state');
 const pair = (page: Page, mailbox: string) => page.locator(`[data-testid="tenant-row"][data-mailbox="${mailbox}"]`);
 const chip = (page: Page, name: string) => page.getByTestId(`tenant-chip-${name}`);
+/** The one add button, then the Microsoft 365 tile of the picker. */
+const addTenant = async (page: Page) => {
+	await page.getByTestId('server-add').click();
+	await page.getByRole('dialog').locator('[data-kind="m365"]').click();
+};
 const MATCH = '/tenants/1/migrate?server=3';
 
 test.describe('Microsoft 365 tenants', () => {
@@ -16,8 +21,7 @@ test.describe('Microsoft 365 tenants', () => {
 
 	test('Servers: the tenant is listed, its test names the missing optional permission', async ({ page }) => {
 		await ready(page, '/servers');
-		const section = page.getByTestId('section-tenants');
-		const item = section.locator('[data-source="Contoso"]');
+		const item = page.locator('[data-source="Contoso"]');
 		await expect(item).toBeVisible();
 		await expect(item.getByTestId('source-verdict')).toContainText('Verified');
 		await item.getByRole('button', { name: 'Test Contoso' }).click();
@@ -30,7 +34,7 @@ test.describe('Microsoft 365 tenants', () => {
 
 	test('Servers: add a tenant, test it before saving, a wrong secret is said in plain text', async ({ page }) => {
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('source-name').fill('Fabrikam');
 		await dialog.getByText('Enter the app details by hand').click();
@@ -44,7 +48,7 @@ test.describe('Microsoft 365 tenants', () => {
 		await expect(dialog.locator('[data-check="tasks"]')).toContainText('OK');
 		await dialog.getByTestId('source-save').click();
 		await expect(page.getByRole('dialog')).toHaveCount(0);
-		await expect(page.getByTestId('section-tenants').locator('[data-source="Fabrikam"]')).toBeVisible();
+		await expect(page.locator('[data-source="Fabrikam"]')).toBeVisible();
 		// The secret never comes back.
 		const list = await (await page.request.get('/api/source-connections')).text();
 		expect(list).not.toContain('full-secret');
@@ -53,7 +57,7 @@ test.describe('Microsoft 365 tenants', () => {
 
 	test('Connect with Microsoft: code, live steps, check list, then the matching screen', async ({ page }) => {
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await expect(dialog.getByTestId('provision-connect')).toBeVisible();
 		// The manual fields are folded away.
@@ -81,7 +85,7 @@ test.describe('Microsoft 365 tenants', () => {
 	test('Connect with Microsoft: an error is said, Retry restarts, Enter by hand opens the fields', async ({ page }) => {
 		await mock(page.request, 'provision', { fail: 'admin' });
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
 		// a translated sentence from error_code, the server's text below as the details
@@ -104,7 +108,7 @@ test.describe('Microsoft 365 tenants', () => {
 	test('Connect with Microsoft: a flow lost to a restart (404) or no answer at all says mccb no longer responds', async ({ page }) => {
 		await mock(page.request, 'provision', { fail: 'lost' });
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
 		await expect(dialog.getByTestId('error-summary')).toHaveText('mccb no longer responds (restarted?). Start again.', { timeout: 20_000 });
@@ -120,7 +124,7 @@ test.describe('Microsoft 365 tenants', () => {
 	test('Connect with Microsoft: permissions still propagating is a warning with Test again, not Retry', async ({ page }) => {
 		await mock(page.request, 'provision', { fail: 'propagation' });
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
 		await expect(dialog.getByTestId('provision-pending')).toContainText('still activating', { timeout: 20_000 });
@@ -134,7 +138,7 @@ test.describe('Microsoft 365 tenants', () => {
 	test('Connect with Microsoft is hidden when the server has no bootstrap app', async ({ page }) => {
 		await mock(page.request, 'reset', { tenant: true, provision: false });
 		await ready(page, '/servers');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		const dialog = page.getByRole('dialog');
 		await expect(dialog.getByTestId('provision-connect')).toHaveCount(0);
 		await expect(dialog.locator('[data-field="tenant_id"]')).toBeVisible();
@@ -152,7 +156,7 @@ test.describe('Microsoft 365 tenants', () => {
 		await page.getByRole('button', { name: 'Actions for Contoso' }).click();
 		await expect(page.getByRole('menuitem', { name: 'Remove the app from the tenant' })).toHaveCount(0);
 		await page.keyboard.press('Escape');
-		await page.getByTestId('source-add').click();
+		await addTenant(page);
 		let dialog = page.getByRole('dialog');
 		await dialog.getByTestId('provision-connect').click();
 		await expect(dialog.getByTestId('provision-done')).toBeVisible({ timeout: 20_000 });
@@ -175,7 +179,7 @@ test.describe('Microsoft 365 tenants', () => {
 		await page.getByRole('menuitem', { name: 'Delete' }).click();
 		await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
 		await expect(page.getByTestId('toast').filter({ hasText: 'mailboxes are linked to this tenant' })).toBeVisible();
-		await expect(page.getByTestId('section-tenants').locator('[data-source="Contoso"]')).toBeVisible();
+		await expect(page.locator('[data-source="Contoso"]')).toBeVisible();
 	});
 
 	test('the row menu goes to the matching screen', async ({ page }) => {
@@ -190,8 +194,9 @@ test.describe('Microsoft 365 tenants', () => {
 		await ready(page);
 		await page.getByRole('button', { name: 'New migration', exact: true }).click();
 		const dialog = page.getByRole('dialog');
-		await dialog.locator('[data-kind="__tenant"]').click();
-		await expect(dialog.getByTestId('tenant-pick')).toContainText('Contoso');
+		const tile = dialog.locator('[data-kind="connection-1"]');
+		await expect(tile).toContainText('Contoso');
+		await tile.click();
 		await dialog.getByTestId('tenant-go').click();
 		await expect(page).toHaveURL(/\/tenants\/1\/migrate/);
 	});
@@ -336,7 +341,7 @@ test.describe('Microsoft 365 tenants', () => {
 		await expect(found).toBeVisible();
 		await row.getByTestId('server-enable-dav').click();
 		await expect(found).toHaveCount(0);
-		await expect(row).toContainText('CalDAV and CardDAV enabled');
+		await expect(row.getByTestId('server-dav')).toBeVisible();
 		const servers = await (await page.request.get('/api/servers')).json();
 		expect(servers.find((x: { name: string }) => x.name === 'Yety').dav_enabled).toBe(true);
 	});

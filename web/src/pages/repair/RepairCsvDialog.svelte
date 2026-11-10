@@ -1,5 +1,5 @@
 <script lang="ts">
-	/** Many mailboxes at once: email;password;login. Each one is tested right away. */
+	/** Many mailboxes at once: email;password;login, into the list shared by Repair and Duplicates. Each one is tested right away. */
 	import Download from '@lucide/svelte/icons/download';
 	import Upload from '@lucide/svelte/icons/upload';
 	import { untrack } from 'svelte';
@@ -13,7 +13,7 @@
 	import Field from '../../lib/ui/Field.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 
-	let { onclose }: { onclose: () => void } = $props();
+	let { onchange, onclose }: { onchange?: () => void; onclose: () => void } = $props();
 
 	interface Result {
 		created: number;
@@ -40,7 +40,8 @@
 		try {
 			result = await post<Result>('/repair/boxes/import-csv', body);
 			await repairs.refresh();
-			if (result.ids.length) void repairs.test(result.ids);
+			onchange?.();
+			if (result.ids.length) void repairs.test(result.ids).then(() => onchange?.());
 		} catch (err) {
 			error = errorText(err);
 		} finally {
@@ -49,7 +50,7 @@
 	}
 </script>
 
-<Dialog title={m.repair_csv_title()} {onclose}>
+<Dialog title={m.migrations_add_csv()} {onclose}>
 	<form id="repair-csv-form" class="flex flex-col gap-3" onsubmit={submit}>
 		<p class="m-0 text-ink-2">{m.migrations_csv_columns()}</p>
 		<code class="rounded-plate bg-surface-2 p-2 font-mono text-xs">email;password;login</code>

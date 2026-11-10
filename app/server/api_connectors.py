@@ -2,6 +2,7 @@
 Secrets go in and never come out: views only carry has_secret."""
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
@@ -126,12 +127,14 @@ def _link_source(r, body: EndpointIn) -> None:
     kind = body.kind or conn["kind"]
     if kind != conn["kind"]:
         raise HTTPException(422, f"this source connection is for '{conn['kind']}'")
-    if body.secrets:
-        raise HTTPException(422, "the secrets of a linked source are those of its connection")
     try:
         role = registry.role_of(kind, "source")
     except ConnectorError as e:
         raise HTTPException(422, str(e)) from e
+    if wiring.shares_settings(kind):
+        return _link_shared(r, body, conn, role)
+    if body.secrets:
+        raise HTTPException(422, "the secrets of a linked source are those of its connection")
     mailbox = {f.name for f in registry.split_fields(role, "mailbox")}
     given = dict(body.config or {})
     extra = sorted(k for k in given if k not in mailbox)
@@ -144,6 +147,26 @@ def _link_source(r, body: EndpointIn) -> None:
     config = {k: v for k, v in merged.items() if k in mailbox}
     db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=NULL, source_connection_id=? "
           "WHERE id=?", (kind, db.jdump(config), conn["id"], r["id"]))
+
+
+def _link_shared(r, body: EndpointIn, conn, role) -> None:
+    """The account's source read through a server shared by mailboxes: what the server sets wins, the account keeps
+    the rest (its own login and secrets included). The whole is validated here."""
+    shared = db.jload(conn["config"], {}) or {}
+    kept = r["source_kind"] == conn["kind"] and r["source_connection_id"] == conn["id"]
+    try:
+        merged = registry.normalize_config(role, {**(body.config or {}), **shared})
+        partial = dataclasses.replace(role, fields=tuple(dataclasses.replace(f, required=False) for f in role.fields))
+        secrets = registry.merge_secrets(partial, _stored(r["source_secret_enc"]) if kept else {}, body.secrets)
+    except ConnectorError as e:
+        raise HTTPException(422, str(e)) from e
+    have = {**secrets, **_stored(conn["secret_enc"])}
+    for f in role.fields:
+        if f.secret and f.required and not have.get(f.name):
+            raise HTTPException(422, f"'{f.name}' is required")
+    config = {k: v for k, v in merged.items() if k not in shared}
+    db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=?, source_connection_id=? "
+          "WHERE id=?", (conn["kind"], db.jdump(config), wiring.dump_secrets(secrets), conn["id"], r["id"]))
 
 
 @router.get("/accounts/{aid:int}/target")

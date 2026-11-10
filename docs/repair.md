@@ -2,7 +2,7 @@
 
 By the end of this page you will have checked a mailbox that another migration tool damaged, and repaired it with every original kept aside.
 
-The **Repair** tab works on mailboxes that are already on an IMAP server. It needs no PST or other source file. Its list is separate from the migration accounts: a customer who calls about a broken mailbox does not have to be a migration of yours.
+The **Repair** tab works on mailboxes that are already on an IMAP server. It needs no PST or other source file. Its list is separate from the migration accounts (the [Duplicates](duplicates.md) tab shows it too): a customer who calls about a broken mailbox does not have to be a migration of yours.
 
 ## What it finds and fixes
 
@@ -18,7 +18,7 @@ Forwarded messages (`message/rfc822`) are kept exactly as they are.
 
 ## Check a mailbox
 
-1. Open **Repair** and click **Add a mailbox**, or **Import a CSV file** for many (`email;password;login`, like the [accounts](import-accounts.md)). Each mailbox is tested right away: a green check means the login works.
+1. Open **Maintenance**, tab **Repair**, and click **+** to add a mailbox, or **Import a CSV file** in the same panel for many (`email;password;login`, like the [accounts](import-accounts.md)). Each mailbox is tested right away: a green check means the login works.
 2. Select the mailboxes and click **Analyse**. The analysis only reads (`EXAMINE`, `BODY.PEEK`): nothing is changed, nothing is marked as read.
 3. Open a mailbox in the list to read the result: damage by kind, by folder, and examples. **Preview** shows one message as it is and as the repair would write it.
 

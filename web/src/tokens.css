@@ -85,5 +85,9 @@ html[data-density='comfortable'] {
 		--bar-h: 0px;
 		--side-w: 232px;
 	}
+	/* Icons only: the column is as wide as one 40 px target and its margins. */
+	:root[data-side='collapsed'] {
+		--side-w: 64px;
+	}
 }
 

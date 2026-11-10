@@ -68,7 +68,7 @@
 		<p class="m-0">{mode === 'delta' ? m.tenant_resync_text({ count, tenant, server }) : m.tenant_start_text({ count, tenant, server })}</p>
 
 		{#if noDav}
-			<div class="flex items-start gap-2 rounded-btn border border-warning/40 bg-warning-soft p-2.5 text-warning-ink" role="alert">
+			<div class="flex items-start gap-2 rounded-btn border border-warning/40 bg-warning-soft p-3 text-warning-ink" role="alert">
 				<span class="mt-0.5"><TriangleAlert size={16} /></span>
 				<p class="m-0 font-semibold">{m.tenant_banner_no_dav_title({ server })}</p>
 			</div>
@@ -79,7 +79,7 @@
 				{@const Icon = ICONS[kind]}
 				{@const counts = summary[kind]}
 				<li class="flex items-start gap-2 text-sm" data-kind={kind}>
-					<span class={`mt-0.5 ${counts.on === count ? 'text-signal-ink' : counts.on ? 'text-advisory-ink' : 'text-ink-3'}`}><Icon size={15} aria-hidden="true" /></span>
+					<span class={`mt-0.5 ${counts.on === count ? 'text-signal-ink' : counts.on ? 'text-advisory-ink' : 'text-ink-3'}`}><Icon size={16} aria-hidden="true" /></span>
 					<span class="min-w-0"><span class="font-medium">{kindName(kind)}</span>: <span class="text-ink-2">{detail(counts)}</span></span>
 				</li>
 			{/each}

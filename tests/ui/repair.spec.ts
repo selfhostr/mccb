@@ -5,7 +5,10 @@ test.describe('repair', () => {
 
 	test('add a mailbox, it is tested, analysed, previewed, then repaired after a confirmation', async ({ page }) => {
 		await ready(page, '/repair');
-		await expect(page.getByRole('link', { name: 'Repair' })).toHaveAttribute('aria-current', 'page');
+		// Repair and Duplicates are two tabs of one Maintenance page, one sidebar entry.
+		await expect(page.getByRole('link', { name: 'Maintenance' })).toHaveAttribute('aria-current', 'page');
+		await expect(page.getByRole('heading', { level: 1 })).toHaveText('Maintenance');
+		await expect(page.getByTestId('maintenance-tabs').getByRole('tab', { name: 'Repair' })).toHaveAttribute('aria-selected', 'true');
 		await page.getByTestId('repair-add').first().click();
 		await page.getByTestId('repair-box-email').fill('carol@example.com');
 		await page.getByTestId('repair-box-password').fill('secret');

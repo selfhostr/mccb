@@ -107,7 +107,7 @@
 			<span class={`inline-flex shrink-0 ${conn.tone}`} title={conn.label} data-testid="account-conn" data-conn={phase ? 'testing' : connectionOf(account)}>
 				<ConnIcon size={14} aria-hidden="true" /><span class="sr-only">{conn.label}</span>
 			</span>
-			<span class="truncate font-semibold" title={email} data-testid="account-email">{email}</span>
+			<span class="truncate font-medium" title={email} data-testid="account-email">{email}</span>
 		</span>
 		<span class="truncate text-xs text-ink-2">{route}</span>
 	</a>
