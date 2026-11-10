@@ -19,6 +19,7 @@
 	import { router } from '../../lib/router.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
+	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
@@ -38,8 +39,9 @@
 	import CsvDialog from './CsvDialog.svelte';
 	import ImportDialog from './ImportDialog.svelte';
 	import GettingStarted from './GettingStarted.svelte';
+	import NewMigrationDialog from './NewMigrationDialog.svelte';
 	import JobPanel from './JobPanel.svelte';
-	import ServerDialog from '../settings/ServerDialog.svelte';
+	import AddServer from '../settings/AddServer.svelte';
 	import RouteDialog from './RouteDialog.svelte';
 	import SelectionBar from './SelectionBar.svelte';
 	import TestDialog from './TestDialog.svelte';
@@ -250,11 +252,11 @@
 {/snippet}
 
 <!-- On a wide screen the list stays beside the panel instead of under it. -->
-<div class={`transition-[padding] duration-200 ${panelJob != null || panelAccount != null ? 'min-[1680px]:pr-[600px]' : ''}`}>
-<PageHeader title={m.migrations_page_title()} {sentence}>
+<div class={`${panelJob != null || panelAccount != null ? 'min-[1680px]:pr-[600px]' : ''}`}>
+<PageHeader title={m.migrations_page_title()} sentence={data.accounts.size ? sentence : undefined}>
 	{#snippet actions()}
 		{#if data.servers.length}
-			<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration">{m.migrations_add_label()}</Button>
+			<IconButton variant="primary" icon={Plus} label={m.migrations_add_label()} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration" />
 		{/if}
 	{/snippet}
 </PageHeader>
@@ -271,7 +273,7 @@
 			{#each [0, 1, 2, 3, 4, 5] as i (i)}<Skeleton class="h-[var(--row-h)]" />{/each}
 		</div>
 	{:else if !data.servers.length || !data.accounts.size}
-		<GettingStarted hasServer={!!data.servers.length} onserver={() => (dialog = { kind: 'server' })} onnew={() => (dialog = { kind: 'add' })} oncsv={() => (dialog = { kind: 'csv' })} />
+		<GettingStarted hasServer={!!data.servers.length} onserver={() => (dialog = { kind: 'server' })} />
 	{:else}
 		<div data-testid="overall"><Progress value={overallPercent} label={m.migrations_page_overall()} /></div>
 
@@ -433,9 +435,9 @@
 {/if}
 
 {#if dialog?.kind === 'server'}
-	<ServerDialog onclose={closeDialog} />
+	<AddServer onclose={closeDialog} />
 {:else if dialog?.kind === 'add'}
-	<AccountDialog defaultServer={server} onclose={closeDialog} oncsv={() => (dialog = { kind: 'csv' })} />
+	<NewMigrationDialog defaultServer={server} onclose={closeDialog} oncsv={() => (dialog = { kind: 'csv' })} />
 {:else if dialog?.kind === 'edit'}
 	<AccountDialog account={dialog.account} onclose={closeDialog} />
 {:else if dialog?.kind === 'csv'}

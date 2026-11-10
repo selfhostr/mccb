@@ -21,14 +21,14 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
   `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
 - Repair (see [Repair a damaged mailbox](repair.md)), a list separate from the accounts:
-  `GET/POST /api/repair/boxes {server_id,email,password,login?}`, `PUT/DELETE /api/repair/boxes/{id}` (409 while a run is active),
+  `GET/POST /api/repair/boxes {server_id,email,password,login?}`, `PUT/DELETE /api/repair/boxes/{id}` (409 while a repair or duplicates run is active),
   `POST /api/repair/boxes/{id}/test` → `{imap:{ok,msg,quota,uidplus}}`, `POST /api/repair/boxes/import-csv` (multipart file + server_id)
   → `{created,updated,errors,ids}`. Box = `{id,server_id,email,login,has_password,status,last_test,last_test_result,last_scan:Run|null,active_run:Run|null}`.
   `POST /api/repair/runs {box_ids,mode:'scan'|'repair'|'restore',folder?}` → 202 `{runs:[Run],skipped_busy:[id]}`; `GET /api/repair/runs/{id}`
   (with `report:{issues,folders,examples,errors,notes}`), `GET /api/repair/boxes/{id}/runs`, `POST /api/repair/runs/{id}/stop`.
   Run = `{id,box_id,mode,status:'queued'|'running'|'stopping'|'stopped'|'done'|'done_with_errors'|'failed',folder,progress:{total,seen,affected,repaired,restored,skipped,errors,folder,folders_done,folders_total},error,issues}`.
   `POST /api/repair/boxes/{id}/preview {folder,uid}` → `{issues,already,before:{subject,text,parts},after|null,fixes,left,error}` (reads only).
-- Duplicates (see [Remove duplicates](duplicates.md)), on the mailboxes already known (IMAP-target accounts and repair mailboxes):
+- Duplicates (see [Remove duplicates](duplicates.md)), on the IMAP-target accounts and the mailboxes added by hand (`/api/repair/boxes`, one list for both tabs; a mailbox with a password wins over an account without one, and no migration is needed):
   `GET /api/dedup/boxes` → `[Box]`, Box = `{key:'account:<id>'|'repair:<id>',source,ref_id,server_id,email,login,status,dav,usable,`
   `unusable_reason:null|'no_password',busy:null|'migration'|'repair',last_scan:Run|null,last_run:Run|null,active_run:Run|null}`.
   `POST /api/dedup/runs {box_keys,mode:'scan'|'dedup',kinds?:['mail','calendar','contacts'],confirm?}` → 202 `{runs:[Run],skipped_busy:[key]}`
@@ -62,15 +62,24 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   An account source gains `connection:{id,name}|null` (absent for a PST); `has_secret` is then that of the connection.
   `PUT /api/accounts/{id}/source {connection_id,config}` reads the source through that connection: `config` carries the
   mailbox fields only (others **422**, so do `secrets`); a `PUT` without `connection_id` drops the link.
+  Through a shared server (a connection of a kind without directory, see below) the account keeps its own settings and
+  secrets: `config` and `secrets` carry what the server does not set, the server's values win, and the whole is validated
+  (**422** names the missing field). `has_secret` is then true when the server or the account holds one.
   The CSV export writes the merged settings of a linked account (never the secret); importing them back keeps the link,
   other settings replace it.
-- Source connections (one credential for many accounts, v1: a Microsoft 365 tenant, see [Exchange](exchange.md)):
+- Source connections (one credential for many accounts: a Microsoft 365 tenant, see [Exchange](exchange.md); or a server
+  shared by mailboxes, for any other kind that reads mailboxes, PST and uploaded files excepted):
   `GET /api/source-connections` → `[Connection]`, `POST` `{name,kind,config,secrets,notes?}` → 201 Connection,
-  `GET/PUT/DELETE /api/source-connections/{id}`. Connection = `{id,name,kind,config,has_secret,notes,last_test,last_test_result,accounts,created_at}`
-  (`accounts`: linked count, never a secret). `config` holds the kind's `connection` fields only (others **422**), the kind
-  needs a directory. `PUT`: fields omitted are kept, `secrets` as for accounts; changing a connection field or the secret
+  `GET/PUT/DELETE /api/source-connections/{id}`. Connection = `{id,name,kind,config,has_secret,secret_names,notes,last_test,last_test_result,accounts,created_at}`
+  (`accounts`: linked count; `secret_names`: which secrets are stored, never their value). A kind with a directory:
+  `config` holds its `connection` fields only (others **422**). A kind without one (IMAP, JMAP, CalDAV...) is a shared
+  server: `config` and `secrets` take any part of the kind's settings, none required, and each mailbox gives the rest.
+  `PUT`: fields omitted are kept, `secrets` as for accounts; changing a connection field or the secret
   clears the last test. **409** when changing `tenant_id` or `cloud`, or deleting, while accounts are linked
-  (`detail:{msg,accounts}` on delete).
+  (`detail:{msg,accounts}` on delete); for a shared server, **409** when a linked mailbox would miss a setting or
+  would become another mailbox (its address cannot change: create another server).
+  The routes below (test, mailboxes, match, link, provision) need a directory: **422** for a shared server, which is
+  checked with each mailbox.
   `POST /api/source-connections/test {kind,config,secrets?,id?}` (unsaved; `id` fills omitted secrets) and
   `POST /api/source-connections/{id}/test` (stored, saves the result) → `{ok,checks:[{key,ok,level:'required'|'optional',msg,missing?}],tenant_name?}`;
   a refusal is an answer, not an HTTP error.

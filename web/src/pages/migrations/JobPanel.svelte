@@ -149,15 +149,17 @@
 
 			{#if job.error}<ErrorNotice title={m.jobs_panel_failed()} message={prefs.text(job.error)} />{/if}
 
+			{#if job.status !== 'done' && job.status !== 'done_with_errors'}
 			<ol class="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-xs" aria-label={m.jobs_phase_label()}>
 				{#each ORDER as phase, i (phase)}
 					{@const current = ORDER.indexOf(job.phase ?? 'precheck')}
-					{@const finished = job.status === 'done' || job.status === 'done_with_errors' || i < current}
+					{@const finished = i < current}
 					<li class={finished ? 'text-ink-2' : i === current ? 'font-semibold text-ink' : 'text-ink-3'} aria-current={i === current ? 'step' : undefined}>
 						{PHASE_LABEL[phase]}
 					</li>
 				{/each}
 			</ol>
+			{/if}
 
 			<div class="flex flex-col gap-2">
 				{#each streams as stream (stream.key)}
@@ -165,8 +167,7 @@
 						<div class="mb-1 flex justify-between gap-2">
 							<span class="font-medium">{stream.label}</span>
 							<span class="font-mono text-xs text-ink-2">
-								{m.jobs_stream_count({ done: fmtNum(stream.done), total: fmtNum(stream.total) })}
-								{#if stream.errors}<span class="text-advisory-ink">{m.jobs_stream_errors({ count: fmtNum(stream.errors) })}</span>{/if}
+								{m.jobs_stream_count({ done: fmtNum(stream.done), total: fmtNum(stream.total) })}{#if stream.errors}<span class="text-advisory-ink">{m.jobs_stream_errors({ count: fmtNum(stream.errors) })}</span>{/if}
 							</span>
 						</div>
 						<Progress value={pct(stream.done, stream.total)} tone={stream.errors ? 'advisory' : 'ink'} label={stream.label} />

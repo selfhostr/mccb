@@ -146,7 +146,7 @@
 					aria-label={m.migrations_row_content_toggle({ email, content: item.label })}
 					onclick={() => data.setOption(id, item.key, !item.on)}
 				>
-					<Icon size={15} />{item.label}
+					<Icon size={16} />{item.label}
 				</button>
 			{/each}
 		</div>

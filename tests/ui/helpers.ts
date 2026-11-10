@@ -49,7 +49,9 @@ export async function rowAction(page: Page, email: string, action: string | RegE
 
 export async function ready(page: Page, url = '/') {
 	await page.goto(url);
-	await expect(page.getByTestId('live')).toContainText('Live');
+	// The page says nothing while it is live: only "Reconnecting" shows, until the event stream is open.
+	await expect(page.locator('#main')).toBeVisible();
+	await expect(page.getByTestId('live')).toHaveCount(0);
 }
 
 export async function noOverflow(page: Page) {

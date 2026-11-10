@@ -264,7 +264,8 @@ def test_connection_crud_never_returns_the_secret(client):
     assert c["config"] == {"tenant_id": "contoso", "client_id": "app-1", "cloud": "global"}
     assert c["has_secret"] is True and c["accounts"] == 0 and c["notes"] == "client A" and c["last_test"] is None
     assert set(c) == {"id", "name", "kind", "config", "has_secret", "notes", "last_test", "last_test_result",
-                      "accounts", "created_at", "provisioned"}
+                      "accounts", "created_at", "provisioned", "secret_names"}
+    assert c["secret_names"] == ["client_secret"]
     for r in (client.get("/api/source-connections"), client.get(f"/api/source-connections/{c['id']}")):
         assert r.status_code == 200 and SECRET not in r.text
     r = no_secret(client.put(f"/api/source-connections/{c['id']}", json={"name": "Contoso Ltd"}))
@@ -285,9 +286,38 @@ def test_connection_validation(client, config, secrets):
     assert r.status_code == 422, r.text
 
 
-def test_connection_kind_needs_a_directory(client):
-    r = client.post("/api/source-connections", json={**BODY, "kind": "imap", "config": {"host": "h"}})
-    assert r.status_code == 422
+SHARED = {"name": "Old server", "kind": "imap", "config": {"host": "imap.old.test"}, "secrets": {}}
+
+
+def test_a_kind_without_directory_is_a_shared_server(client):
+    r = client.post("/api/source-connections", json=SHARED)
+    assert r.status_code == 201, r.text
+    c = r.json()
+    assert c["config"]["host"] == "imap.old.test" and c["has_secret"] is False and c["secret_names"] == []
+    # It is checked with each mailbox: the routes of a directory refuse it.
+    assert client.post(f"/api/source-connections/{c['id']}/test").status_code == 422
+    assert client.post("/api/source-connections/test", json={"kind": "imap", "config": {"host": "h"}}).status_code == 422
+    assert client.get(f"/api/source-connections/{c['id']}/mailboxes").status_code == 422
+    # A field the kind does not have, and files, are refused.
+    assert client.post("/api/source-connections", json={**SHARED, "secrets": {"client_secret": "x"}}).status_code == 422
+    assert client.post("/api/source-connections", json={**SHARED, "kind": "pst", "config": {}}).status_code == 422
+
+
+def test_a_mailbox_reads_through_a_shared_server_with_its_own_login(client):
+    _, ids = yeti(client, ("ann@contoso.test",))
+    cid = client.post("/api/source-connections", json=SHARED).json()["id"]
+    url = f"/api/accounts/{ids['ann@contoso.test']}/source"
+    # The server gives the address, the mailbox its login and password: the whole is validated.
+    assert client.put(url, json={"connection_id": cid, "config": {}, "secrets": {"password": SECRET}}).status_code == 422
+    assert client.put(url, json={"connection_id": cid, "config": {"login": "ann"}}).status_code == 422
+    r = no_secret(client.put(url, json={"connection_id": cid, "config": {"login": "ann"}, "secrets": {"password": SECRET}}))
+    assert r.status_code == 200, r.text
+    src = r.json()["source"]
+    assert src["kind"] == "imap" and src["connection"]["id"] == cid and src["has_secret"] is True
+    assert client.get(f"/api/source-connections/{cid}").json()["accounts"] == 1
+    # Another address would make it another mailbox: refused while it is linked.
+    assert client.put(f"/api/source-connections/{cid}", json={"config": {"host": "imap.other.test"}}).status_code == 409
+    assert client.put(f"/api/source-connections/{cid}", json={"name": "Renamed"}).status_code == 200
 
 
 def test_put_secrets_semantics_and_test_cleared(client, graph):

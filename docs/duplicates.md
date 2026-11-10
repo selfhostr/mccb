@@ -2,7 +2,7 @@
 
 By the end of this page you will have found the duplicate messages, events and contacts of a mailbox, and removed them with one copy of each kept.
 
-The **Duplicates** tab works on mailboxes MCCB already knows: the migration accounts whose target is their IMAP server, and the mailboxes of the [Repair](repair.md) tab. It uses their stored password and works on the server of the mailbox, the target of a migration. Nothing is asked again.
+The **Duplicates** tab of **Maintenance** needs no migration. It lists the migration mailboxes whose target is their IMAP server, and the mailboxes you add by hand with the **+** button (one mailbox, or a CSV file): that second list is shared with the [Repair](repair.md) tab. It uses the stored password and works on the server of the mailbox. Nothing is asked again.
 
 ## What counts as a duplicate
 
@@ -20,7 +20,7 @@ Messages already flagged as deleted by their owner are not looked at. The origin
 
 ## Analyse
 
-1. Open **Duplicates**, select the mailboxes, and choose the kinds (mail, calendar, contacts).
+1. Open **Maintenance**, tab **Duplicates**, select the mailboxes, and choose the kinds (mail, calendar, contacts).
 2. Click **Analyse**. The analysis only reads (`EXAMINE`, `BODY.PEEK`, `PROPFIND`, multiget): nothing is changed, nothing is marked as read.
 3. Open a mailbox in the list to read the result: copies by kind, by folder and collection, a few examples with the copy that would be kept, the log and the history of the runs.
 

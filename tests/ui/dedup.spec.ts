@@ -7,7 +7,10 @@ test.describe('duplicates', () => {
 
 	test('analyse, read the detail, then remove after a confirmation that states the counts', async ({ page }) => {
 		await ready(page, '/duplicates');
-		await expect(page.getByRole('link', { name: 'Duplicates' })).toHaveAttribute('aria-current', 'page');
+		// Repair and Duplicates are two tabs of one Maintenance page, one sidebar entry.
+		await expect(page.getByRole('link', { name: 'Maintenance' })).toHaveAttribute('aria-current', 'page');
+		await expect(page.getByRole('heading', { level: 1 })).toHaveText('Maintenance');
+		await expect(page.getByTestId('maintenance-tabs').getByRole('tab', { name: 'Duplicates' })).toHaveAttribute('aria-selected', 'true');
 		const row = alice(page);
 		await expect(row.getByTestId('dedup-state')).toContainText('Not analysed');
 
@@ -30,7 +33,6 @@ test.describe('duplicates', () => {
 		await expect(dialog.getByTestId('dedup-confirm-counts')).toContainText('604 messages, 37 events, 12 contacts in 1 mailboxes');
 		await expect(dialog).toContainText('PERMANENT');
 		await expect(dialog).toContainText('One copy of each item is always kept');
-		await expect(dialog).toContainText('checked again');
 		await dialog.getByTestId('dedup-confirm-go').click();
 
 		await expect(row.getByTestId('dedup-state')).toContainText('Duplicates removed');

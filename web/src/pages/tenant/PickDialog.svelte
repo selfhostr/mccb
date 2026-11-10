@@ -143,7 +143,7 @@
 					{#if c.block === 'current'}<Check size={14} class="shrink-0 text-signal-ink" />{/if}
 				</label>
 			{:else}
-				<p class="m-0 px-3 py-2 text-sm text-ink-3 italic">{m.tenant_pick_none()}</p>
+				<p class="m-0 px-3 py-2 text-sm text-ink-3">{m.tenant_pick_none()}</p>
 			{/each}
 			<label class="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-1.5 hover:bg-surface-2" data-testid="tenant-pick-new">
 				<input type="radio" name="tenant-pick" value={NEW} bind:group={picked} onchange={chooseNew} />

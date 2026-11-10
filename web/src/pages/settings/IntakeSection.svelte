@@ -3,6 +3,7 @@
 	 * Drop folder and automatic assignment. Every control saves at once: a toggle answers on the spot and goes
 	 * back with a message if the server refuses.
 	 */
+	import Settings from '@lucide/svelte/icons/settings';
 	import { onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText } from '../../lib/api/client.ts';
@@ -10,19 +11,24 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import { intake } from '../../lib/stores/intake.svelte.ts';
 	import CopyButton from '../../lib/ui/CopyButton.svelte';
-	import Disclosure from '../../lib/ui/Disclosure.svelte';
+	import Dialog from '../../lib/ui/Dialog.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Field from '../../lib/ui/Field.svelte';
-	import Section from '../../lib/ui/Section.svelte';
+	import Help from '../../lib/ui/Help.svelte';
+	import IconButton from '../../lib/ui/IconButton.svelte';
+	import SettingRow from '../../lib/ui/SettingRow.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
-	import Toggle from '../../lib/ui/Toggle.svelte';
 
 	onMount(() => {
 		if (!intake.settings) void intake.load();
 	});
 
 	const settings = $derived(intake.settings);
+	let editing = $state(false);
+	const chainState = $derived(
+		!settings?.auto_chain.enabled ? m.settings_state_off() : settings.auto_chain.start_import ? m.settings_intake_chain_state_start() : m.settings_state_on()
+	);
 
 	async function change(patch: IntakeSettingsPatch, shown: Partial<IntakeSettings>): Promise<boolean> {
 		const before = intake.settings;
@@ -50,60 +56,61 @@
 	}
 </script>
 
-<Section id="intake" title={m.settings_intake_title()} sentence={m.settings_intake_sentence()}>
+<div data-testid="section-intake-body">
 	{#if settings}
-		<div class="flex flex-col gap-1">
-			<Toggle
-				checked={settings.inbox.enabled}
-				label={m.settings_intake_inbox()}
-				hint={m.settings_intake_inbox_hint()}
-				onchange={(v) => change({ inbox: { enabled: v } }, { inbox: { ...settings.inbox, enabled: v } })}
-			/>
-			<div class="flex items-center gap-1 pl-10">
+		<div class="divide-y divide-line">
+			<SettingRow label={m.settings_intake_inbox()}>
+				<span class="check"><input class="switch" type="checkbox" checked={settings.inbox.enabled} onchange={(e) => change({ inbox: { enabled: e.currentTarget.checked } }, { inbox: { ...settings.inbox, enabled: e.currentTarget.checked } })} /></span>
+			</SettingRow>
+			<SettingRow as="div" label={m.settings_intake_folder()}>
 				<code class="min-w-0 truncate rounded-plate bg-surface-2 px-2 py-1 font-mono text-xs" data-testid="intake-path">{settings.inbox.path}</code>
 				<CopyButton text={settings.inbox.path} label={m.settings_intake_copy()} />
-			</div>
-			<Toggle
-				checked={settings.auto_chain.enabled}
-				label={m.settings_intake_chain()}
-				hint={m.settings_intake_chain_hint()}
-				onchange={(v) => change({ auto_chain: { enabled: v } }, { auto_chain: { ...settings.auto_chain, enabled: v } })}
-			/>
-			{#if settings.auto_chain.enabled}
-				<div class="pl-10" data-testid="intake-chain-options">
-					<Toggle
-						checked={settings.auto_chain.start_import}
-						label={m.settings_intake_start()}
-						hint={m.settings_intake_start_hint()}
-						onchange={(v) => change({ auto_chain: { start_import: v } }, { auto_chain: { ...settings.auto_chain, start_import: v } })}
-					/>
-					{#if data.servers.length}
-						<Disclosure title={m.settings_intake_domains()} summary={m.settings_intake_domains_set({ count: Object.keys(settings.auto_chain.default_domains).length })}>
-							<div class="flex flex-col gap-3">
-								<p class="m-0 text-ink-2">{m.settings_intake_domains_hint()}</p>
-								<div class="grid max-w-[460px] grid-cols-1 gap-3">
-									{#each data.servers as server (server.id)}
-										<Field label={server.name}>
-											<input
-												class="input font-mono"
-												autocomplete="off"
-												placeholder="example.com"
-												value={settings.auto_chain.default_domains[String(server.id)] ?? ''}
-												onchange={(e) => setDomain(server.id, e.currentTarget)}
-												data-testid={`domain-${server.id}`}
-											/>
-										</Field>
-									{/each}
-								</div>
-							</div>
-						</Disclosure>
-					{/if}
-				</div>
-			{/if}
+			</SettingRow>
+			<SettingRow as="div" label={m.settings_intake_chain()}>
+				<span class="text-ink-2" data-testid="intake-chain-state">{chainState}</span>
+				<IconButton icon={Settings} label={m.settings_intake_chain_configure()} onclick={() => (editing = true)} data-testid="intake-chain-open" />
+			</SettingRow>
 		</div>
 	{:else if intake.error}
-		<ErrorNotice title={m.settings_intake_load_failed()} message={intake.error} onretry={() => intake.load()} />
+		<div class="p-4"><ErrorNotice title={m.settings_intake_load_failed()} message={intake.error} onretry={() => intake.load()} /></div>
 	{:else}
-		<Skeleton class="h-24" />
+		<div class="p-4"><Skeleton class="h-24" /></div>
 	{/if}
-</Section>
+
+	{#if editing && settings}
+		<Dialog title={m.settings_intake_chain()} onclose={() => (editing = false)}>
+			<div class="flex flex-col gap-5">
+				<div class="divide-y divide-line rounded-card border border-line-strong">
+					<SettingRow label={m.settings_intake_chain()} help={m.settings_intake_chain_hint()}>
+						<span class="check"><input class="switch" type="checkbox" checked={settings.auto_chain.enabled} onchange={(e) => change({ auto_chain: { enabled: e.currentTarget.checked } }, { auto_chain: { ...settings.auto_chain, enabled: e.currentTarget.checked } })} /></span>
+					</SettingRow>
+					{#if settings.auto_chain.enabled}
+						<SettingRow label={m.settings_intake_start()} help={m.settings_intake_start_hint()} data-testid="intake-chain-options">
+							<span class="check"><input class="switch" type="checkbox" checked={settings.auto_chain.start_import} onchange={(e) => change({ auto_chain: { start_import: e.currentTarget.checked } }, { auto_chain: { ...settings.auto_chain, start_import: e.currentTarget.checked } })} /></span>
+						</SettingRow>
+					{/if}
+				</div>
+				{#if settings.auto_chain.enabled && data.servers.length}
+					<div class="flex flex-col gap-3" role="group" aria-labelledby="intake-domains-title" data-testid="intake-domains">
+						<div class="relative flex items-center gap-1">
+							<h3 id="intake-domains-title" class="text-sm font-semibold">{m.settings_intake_domains()}</h3>
+							<Help text={m.settings_intake_domains_hint()} />
+						</div>
+						{#each data.servers as server (server.id)}
+							<Field label={server.name}>
+								<input
+									class="input font-mono"
+									autocomplete="off"
+									placeholder="example.com"
+									value={settings.auto_chain.default_domains[String(server.id)] ?? ''}
+									onchange={(e) => setDomain(server.id, e.currentTarget)}
+									data-testid={`domain-${server.id}`}
+								/>
+							</Field>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</Dialog>
+	{/if}
+</div>

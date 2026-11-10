@@ -1,5 +1,6 @@
 /**
- * The repair tab: its own list of mailboxes (not the migration accounts), their runs, a poll while one is active.
+ * The repair tab: the mailboxes added by hand (not the migration accounts; the duplicates tab lists them too),
+ * their runs, a poll while one is active.
  */
 import { SvelteSet } from 'svelte/reactivity';
 import { del, get, post } from '../api/client.ts';

@@ -5,6 +5,8 @@ export interface Prefs {
 	density: 'compact' | 'comfortable';
 	maskAddresses: boolean;
 	uploadConcurrency: number;
+	/** The left column on wide screens: full, or icons only. */
+	sidebar: 'open' | 'collapsed';
 }
 
 const KEY = 'mccb.prefs.v1';
@@ -12,7 +14,8 @@ const DEFAULTS: Prefs = {
 	theme: 'dark',
 	density: 'compact',
 	maskAddresses: false,
-	uploadConcurrency: 1
+	uploadConcurrency: 1,
+	sidebar: 'open'
 };
 
 function load(): Prefs {
@@ -41,6 +44,7 @@ class PrefStore {
 		const root = document.documentElement;
 		root.dataset.theme = this.value.theme;
 		root.dataset.density = this.value.density;
+		root.dataset.side = this.value.sidebar;
 	}
 
 	email = (v: string | null | undefined): string => (v ? (this.value.maskAddresses ? maskEmail(v) : v) : '');

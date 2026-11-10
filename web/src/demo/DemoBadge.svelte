@@ -20,7 +20,7 @@
 		<p class="m-0 py-2">{m.demo_footer_text()}</p>
 		<a class="inline-flex min-h-10 items-center gap-1.5 text-ink underline" href={INSTALL} target="_blank" rel="noopener" data-testid="demo-install">
 			{m.demo_footer_install()}
-			<ExternalLink size={13} />
+			<ExternalLink size={14} />
 		</a>
 	</footer>
 {/if}

@@ -45,23 +45,31 @@
 </script>
 
 <Dialog title={m.migrations_csv_title()} {onclose}>
-	<form id="csv-form" class="flex flex-col gap-3" onsubmit={submit}>
-		<p class="m-0 text-ink-2">{m.migrations_csv_columns()}</p>
-		<code class="rounded-plate bg-surface-2 p-2 font-mono text-xs">email;password;login</code>
-		<Field label={m.migrations_account_server()}>
-			<select class="input" bind:value={serverId}>
-				{#each data.servers as server (server.id)}
-					<option value={server.id}>{server.name}</option>
-				{/each}
-			</select>
-		</Field>
-		<Field label={m.migrations_csv_file()}>
-			<input bind:this={input} class="input py-2" type="file" accept=".csv,.txt" required />
-		</Field>
-		<div class="flex flex-wrap gap-2">
-			<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="mailboxes.csv">{m.migrations_csv_template()}</Button>
-			<Button variant="ghost" icon={Download} href="/api/accounts/export-csv" download="mailboxes-export.csv" data-testid="csv-export">{m.migrations_csv_export()}</Button>
-		</div>
+	<form id="csv-form" class="flex flex-col gap-4" onsubmit={submit}>
+		<ol class="m-0 flex list-decimal flex-col gap-3 pl-5 marker:text-ink-3">
+			<li><div class="flex flex-col items-start gap-1">
+				<span>{m.migrations_csv_step_template()}</span>
+				<Button variant="ghost" icon={Download} href="/api/accounts/csv-template" download="mailboxes.csv">{m.migrations_csv_template()}</Button>
+			</div></li>
+			<li><div class="flex flex-col gap-2">
+				<span>{m.migrations_csv_step_lines()}</span>
+				<code class="rounded-plate bg-surface-2 p-2 font-mono text-xs">email;password;login</code>
+			</div></li>
+			<li><div class="flex flex-col gap-3">
+				<span>{m.migrations_csv_step_import()}</span>
+				<Field label={m.migrations_account_server()}>
+					<select class="input" bind:value={serverId}>
+						{#each data.servers as server (server.id)}
+							<option value={server.id}>{server.name}</option>
+						{/each}
+					</select>
+				</Field>
+				<Field label={m.migrations_csv_file()}>
+					<input bind:this={input} class="input py-2" type="file" accept=".csv,.txt" required />
+				</Field>
+			</div></li>
+		</ol>
+		<p class="m-0 text-xs text-ink-3">{m.migrations_csv_after()}</p>
 		{#if error}<ErrorNotice title={m.migrations_csv_failed()} message={error} />{/if}
 		{#if result}
 			<p class="m-0" data-testid="csv-result">{m.migrations_csv_result({ created: result.created, updated: result.updated, errors: result.errors.length })}</p>
@@ -87,6 +95,7 @@
 		{/if}
 	</form>
 	{#snippet actions()}
+		<span class="mr-auto"><Button variant="ghost" icon={Download} href="/api/accounts/export-csv" download="mailboxes-export.csv" data-testid="csv-export">{m.migrations_csv_export()}</Button></span>
 		<Button variant="ghost" onclick={onclose}>{m.common_close()}</Button>
 		<Button variant="primary" icon={Upload} type="submit" form="csv-form" loading={busy}>{m.migrations_csv_import()}</Button>
 	{/snippet}
