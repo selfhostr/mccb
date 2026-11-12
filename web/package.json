@@ -17,7 +17,7 @@
     "licences": "node scripts/check-licences.mjs"
   },
   "devDependencies": {
-    "@inlang/paraglide-js": "^3.2.0",
+    "@inlang/paraglide-js": "^3.2.1",
     "@inlang/plugin-message-format": "^4.6.0",
     "@playwright/test": "^1.65.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
