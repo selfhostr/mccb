@@ -1,4 +1,4 @@
-libpff-python==20260926
+libpff-python==20261030
 icalendar==7.3.0
 vobject==0.9.9
 tzdata==2026.6
