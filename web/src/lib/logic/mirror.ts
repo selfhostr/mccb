@@ -1,4 +1,4 @@
-import type { Job, MirrorAccountPlan, MirrorCounts, MirrorKind, MirrorReport, MirrorSample } from '../api/types.ts';
+import type { Job, MirrorAccountPlan, MirrorCounts, MirrorKind, MirrorNote, MirrorReport, MirrorSample } from '../api/types.ts';
 
 /** Mirror mode: a rerun makes the destination identical to the source. The source is never written. */
 export const MIRROR_KINDS: MirrorKind[] = ['mail', 'calendar', 'contacts', 'tasks'];
@@ -125,6 +125,55 @@ export const blockedBy = (accounts: readonly MirrorAccountPlan[], code: string):
 
 /** Only a `too_many_deletes` block can be lifted from the dialog, so only then is the large-deletion box offered. */
 export const offersLargeDelete = (accounts: readonly MirrorAccountPlan[]): boolean => accounts.some((a) => a.blocked?.some((b) => b.code === 'too_many_deletes'));
+
+/** What a mirror run does that is worth knowing, without stopping it. The API message of each note is kept as the detail. */
+export const NOTE_CODES = ['soft_delete', 'hard_delete', 'no_copy_kept', 'shared_resource'] as const;
+export type NoteCode = (typeof NOTE_CODES)[number];
+
+/** `warning` is shown before Apply as something to read (a deletion that cannot be undone, or less safe than usual); `note` is plain information. */
+export type NoteTone = 'warning' | 'note';
+
+export const noteTone = (code: string): NoteTone => (code === 'soft_delete' || code === 'hard_delete' ? 'warning' : 'note');
+
+/** The wording of the interface for the codes it knows: a short label and a sentence of explanation. */
+export type NoteLabels = Record<NoteCode, { label: string; hint: string }>;
+
+export interface NoteLine {
+	code: string;
+	tone: NoteTone;
+	/** The label of a known code; for an unknown one, the message of the API as is. */
+	label: string;
+	/** The explanation of a known code. */
+	hint: string | null;
+	/** The message of the API, when it adds something to the label. */
+	detail: string | null;
+}
+
+export const isNoteCode = (code: string): code is NoteCode => (NOTE_CODES as readonly string[]).includes(code);
+
+/** One note as it is shown. An unknown code (a newer server) shows its API message in place of a label, or the code itself when it has none. */
+export function describeNote(note: MirrorNote, labels: NoteLabels): NoteLine {
+	const message = (note.message ?? '').trim();
+	if (!isNoteCode(note.code)) return { code: note.code, tone: 'note', label: message || note.code, hint: null, detail: null };
+	return { code: note.code, tone: noteTone(note.code), label: labels[note.code].label, hint: labels[note.code].hint, detail: message || null };
+}
+
+/** The notes of a list, warnings first, then in the order of the API; a code repeated with the same message is shown once. */
+export function noteLines(notes: readonly MirrorNote[] | null | undefined, labels: NoteLabels): NoteLine[] {
+	const seen = new Set<string>();
+	const lines: NoteLine[] = [];
+	for (const note of notes ?? []) {
+		if (!note || typeof note.code !== 'string') continue;
+		const key = `${note.code}\u0000${note.message ?? ''}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		lines.push(describeNote(note, labels));
+	}
+	return lines.map((line, index) => ({ line, index })).sort((a, b) => Number(b.line.tone === 'warning') - Number(a.line.tone === 'warning') || a.index - b.index).map((item) => item.line);
+}
+
+/** A soft or permanent deletion is announced: the mailbox is opened on it, whatever the size of the list. */
+export const hasWarningNote = (notes: readonly MirrorNote[] | null | undefined): boolean => (notes ?? []).some((n) => noteTone(n?.code) === 'warning');
 
 /** A percentage typed by hand, brought to a whole number from 1 to 100; the default when it is not a number. */
 export function clampPercent(value: number | string): number {

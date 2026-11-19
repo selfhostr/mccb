@@ -317,7 +317,7 @@ const MIRROR_MESSAGES = {
 	mirror_off: 'Mirror mode is off for this mailbox',
 	source_unlistable: 'The source could not be listed',
 	too_many_deletes: 'More deletions than the safety limit allows',
-	source_empty: 'The source is empty and the destination is not',
+	source_empty: 'Folder "Projects" is empty at the source and not at the destination',
 	no_prior_run: 'No migration has run for this mailbox',
 	uidvalidity_changed: 'The source folders changed identity since the last run',
 	target_unreachable: 'The destination did not answer',
@@ -347,7 +347,7 @@ function mirrorPlanOf(account, { maxPercent, allowLarge }) {
 			}
 		}
 	}
-	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(scenario.delete), blocked, sample };
+	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(scenario.delete), blocked, sample, notes: scenario.notes ?? [] };
 }
 
 function accountView(a) {
@@ -605,7 +605,8 @@ export async function control(path, body) {
 	if (path === '/__mock/mirror') {
 		// What the next mirror comparisons find, per mailbox id: { add, update, delete } by kind, `holds` (what the
 		// destination holds, the base of the safety limit), `block` (a code that stops the mailbox whatever the rest),
-		// `sample` (the number of lines), `fail` (the comparison answers an error).
+		// `sample` (the number of lines), `fail` (the comparison answers an error), `notes` ([{ code, message }] shown by the
+		// comparison and kept in the report of the run).
 		state.mirrorScenarios = new Map(Object.entries(body.scenarios ?? {}).map(([id, scenario]) => [Number(id), scenario]));
 		return send(200, { ok: true });
 	}
@@ -999,7 +1000,7 @@ export async function handle(req) {
 			// The report of the server: the options, what stopped the run, then the counters keyed by kind.
 			const skipped = fullCounts(scenario.skipped);
 			const errors = fullCounts(scenario.errors);
-			const outcome = { options: { max_delete_percent: options.maxPercent, allow_large_delete: options.allowLarge }, blocked: [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
+			const outcome = { options: { max_delete_percent: options.maxPercent, allow_large_delete: options.allowLarge }, blocked: [], notes: scenario.notes ?? [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
 			state.mirrorOutcomes.set(job.id, outcome);
 			job.mirror = outcome;
 			// The destination now matches the source.

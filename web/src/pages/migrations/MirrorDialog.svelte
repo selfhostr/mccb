@@ -20,7 +20,7 @@
 	import { errorText, post } from '../../lib/api/client.ts';
 	import type { MirrorAccountPlan, MirrorAction, MirrorKind, MirrorPlan, MirrorRun, RunInput } from '../../lib/api/types.ts';
 	import { fmtAbsolute, fmtNum, toDate } from '../../lib/format.ts';
-	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampPercent, DEFAULT_MAX_DELETE_PERCENT, mirrorRows, mirrorState, mirrorTotals, offersLargeDelete, readyIds, sampleLines } from '../../lib/logic/mirror.ts';
+	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampPercent, DEFAULT_MAX_DELETE_PERCENT, hasWarningNote, mirrorRows, mirrorState, mirrorTotals, offersLargeDelete, readyIds, sampleLines } from '../../lib/logic/mirror.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
@@ -32,6 +32,7 @@
 	import Notice from '../../lib/ui/Notice.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import MirrorNotes from './MirrorNotes.svelte';
 
 	interface Props {
 		ids: number[];
@@ -207,7 +208,7 @@
 					{@const rows = mirrorRows(account)}
 					{@const lines = sampleLines(account)}
 					<li class="border-b border-line" data-testid="mirror-account">
-						<details open={accounts.length <= 3 || !account.ready}>
+						<details open={accounts.length <= 3 || !account.ready || hasWarningNote(account.notes)}>
 							<summary class="flex min-h-10 cursor-pointer flex-wrap items-center gap-x-2 py-1">
 								<span class="min-w-0 truncate font-mono text-xs font-medium">{email(account)}</span>
 								<Plate tone={account.ready ? 'signal' : 'warning'} icon={account.ready ? CircleCheck : TriangleAlert} label={account.ready ? m.migrations_mirror_ready() : m.migrations_mirror_blocked()} />
@@ -250,6 +251,9 @@
 									</div>
 								{:else if account.ready}
 									<p class="m-0 text-ink-2">{m.migrations_mirror_uptodate()}</p>
+								{/if}
+								{#if account.notes?.length}
+									<div class="flex flex-col gap-2" data-testid="mirror-notes"><MirrorNotes notes={account.notes} /></div>
 								{/if}
 								{#if lines.length}
 									<Disclosure title={m.migrations_mirror_sample({ shown: lines.length, total: count(own.add + own.update + own.delete) })} data-testid="mirror-sample">
