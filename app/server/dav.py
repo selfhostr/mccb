@@ -36,7 +36,12 @@ class DavIncomplete(DavError):
         self.partial = partial
 
 
-_OK_STATUS = re.compile(r"\s2\d\d(\s|$)")
+_STATUS = re.compile(r"\s([1-5]\d\d)(\s|$)")
+
+
+def _status_code(text: str) -> int | None:
+    m = _STATUS.search(" " + text)
+    return int(m.group(1)) if m else None
 
 
 def expand_template(template: str, email: str, login: str) -> str:
@@ -124,9 +129,10 @@ class DavClient:
 
     def _propfind(self, url: str, props: list[tuple[str, str]], depth: int, strict: bool = False
                   ) -> list[tuple[str, dict[str, ET.Element]]]:
-        """[(absolute href, {prop tag: element with a 200 status})]. A <response> with an error status of its own
-        (507: the listing was cut short, RFC 4918) is left out; `strict`: it raises DavIncomplete instead, whose
-        `partial` holds the rest."""
+        """[(absolute href, {prop tag: element with a 200 status})]. A <response> with an error status of its own is
+        left out. `strict`: a cut-short answer raises DavIncomplete instead (its `partial` holds the rest): a 5xx
+        status (507: the server cut the listing short, RFC 4918) on any response, or an error status on the
+        collection itself. A 4xx on one member (gone since, not readable) is only that member left out."""
         body = ET.Element(_q(NS_DAV, "propfind"))
         prop = ET.SubElement(body, _q(NS_DAV, "prop"))
         for ns, name in props:
@@ -146,8 +152,12 @@ class DavClient:
         for r in root.findall(_q(NS_DAV, "response")):
             href_el = r.find(_q(NS_DAV, "href"))
             status = (r.findtext(_q(NS_DAV, "status")) or "").strip()  # the response's own, not a propstat's
-            if status and not _OK_STATUS.search(" " + status):
-                problems.append(f"{(href_el.text or '').strip() if href_el is not None else '?'}: {status}")
+            code = _status_code(status) if status else None
+            if code is not None and not 200 <= code < 300:
+                raw = (href_el.text or "").strip() if href_el is not None else ""
+                itself = not raw or _slash(urljoin(base, raw)) == _slash(urljoin(base, url))
+                if code >= 500 or itself:
+                    problems.append(f"{raw or '?'}: {status}")
                 continue
             if href_el is None or not (href_el.text or "").strip():
                 continue
@@ -409,13 +419,19 @@ class DavClient:
     def _item_url(collection_url: str, filename: str) -> str:
         return _slash(collection_url) + quote(filename, safe="")
 
-    def put(self, collection_url: str, filename: str, content: str, kind: str, if_match: str | None = None) -> int:
+    def put(self, collection_url: str, filename: str, content: str, kind: str, if_match: str | None = None,
+            if_none_match: bool = False) -> int:
         """PUT of one resource. `if_match`: only over the resource that still has this etag (412 otherwise, raised
-        as a temporary DavError: nothing is overwritten, the next pass lists it again)."""
+        as a temporary DavError: nothing is overwritten, the next pass lists it again). `if_none_match`: only if
+        no resource has this name yet (412 otherwise, raised as DavError status 412, not temporary). The ETag the
+        server gives back is kept in `last_etag` ('' when it gives none)."""
         ctype = "text/calendar" if kind == "caldav" else "text/vcard"
         headers = {"Content-Type": f"{ctype}; charset=utf-8"}
         if if_match:
             headers["If-Match"] = if_match
+        if if_none_match:
+            headers["If-None-Match"] = "*"
+        self.last_etag = ""
         try:
             resp = self._request("PUT", self._item_url(collection_url, filename), content=content.encode("utf-8"),
                                  headers=headers)
@@ -424,7 +440,16 @@ class DavClient:
                 raise DavError(f"PUT {filename}: changed on the server since it was listed (HTTP 412), not "
                                "overwritten", temporary=True, status=412) from e
             raise
+        self.last_etag = (resp.headers.get("etag") or "").strip()
         return resp.status_code
+
+    def etag_of(self, collection_url: str, filename: str) -> str:
+        """The etag of one resource (PROPFIND Depth 0), '' when the server gives none."""
+        url = self._item_url(collection_url, filename)
+        for _href, p in self._propfind(url, [(NS_DAV, "getetag")], 0):
+            et = p.get(_q(NS_DAV, "getetag"))
+            return (et.text or "").strip() if et is not None else ""
+        return ""
 
     def exists(self, collection_url: str, filename: str) -> bool:
         return self.get(collection_url, filename) is not None

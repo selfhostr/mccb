@@ -9,8 +9,9 @@ from . import db, repo
 
 def create_jobs(account_ids: list[int], name: str | None = None, mode: str = "full",
                 priority: int = 0, mirror: dict | None = None) -> tuple[list[dict], list[dict], int | None]:
-    """(jobs, errors, batch_id). An account with an active job gives that job back; the batch is created with the
-    first new job only."""
+    """(jobs, errors, batch_id). An account with an active job gives that job back, marked `"existing": True` (it
+    was not created by this call: its mode and options are its own); the batch is created with the first new job
+    only."""
     jobs, errors = [], []
     batch_id = None
     for aid in account_ids:
@@ -28,7 +29,7 @@ def create_jobs(account_ids: list[int], name: str | None = None, mode: str = "fu
         active = db.q1("SELECT * FROM jobs WHERE account_id=? AND status IN ('queued','running','paused','stopping') "
                        "ORDER BY id DESC LIMIT 1", (aid,))
         if active:
-            jobs.append(repo.job_view(active))
+            jobs.append({**repo.job_view(active), "existing": True})
             continue
         if name and name.strip() and batch_id is None:
             batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",

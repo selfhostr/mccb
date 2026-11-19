@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "A job of this mailbox is not over yet",
 	"migrations_mirror_fix_job_active": "Wait for the job in progress to finish, or stop it, then compare again.",
+	"migrations_mirror_block_unknown_account": "This mailbox no longer exists",
+	"migrations_mirror_fix_unknown_account": "Reload the list of mailboxes: it was deleted meanwhile.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

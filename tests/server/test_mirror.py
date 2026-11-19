@@ -269,12 +269,13 @@ def test_source_empty_refused(client, box):
 def test_threshold(client, box):
     aid, src, dst = make(client)
     full(client, aid)
-    for i in range(4):                       # 4 of 14 mails = 28 % > 20 %
+    for i in range(4):                       # 4 of 14 mails = 28 % > 20 % (floor of the threshold lowered to 0)
         src.remove(f"in{i}@x")
-    acc = preview(client, aid)
+    acc = preview(client, aid, min_delete_count=0)
     assert "too_many_deletes" in codes(acc)
-    assert preview(client, aid, max_delete_percent=30)["ready"] is True
-    job, rep = mirror(client, aid)
+    assert "max_delete_percent" in str(acc["blocked"]) and "allow_large_delete" in str(acc["blocked"])  # the remedy
+    assert preview(client, aid, max_delete_percent=30, min_delete_count=0)["ready"] is True
+    job, rep = mirror(client, aid, min_delete_count=0)
     assert rep["mirror"]["mail"]["deleted"] == 0 and rep["mirror"]["mail"]["skipped_by_safety"] == 4
     assert len(ours(dst, "INBOX")) == 10
     job, rep = mirror(client, aid, allow_large_delete=True)
@@ -576,7 +577,7 @@ def test_threshold_denominator_leaves_out_excluded_folders(client, box):
     assert client.put(f"/api/accounts/{aid}/policy", json={"exclude_folders": ["Archive"]}).status_code == 200
     for i in range(3):
         src.remove(f"in{i}@x")
-    assert "too_many_deletes" in codes(preview(client, aid))
+    assert "too_many_deletes" in codes(preview(client, aid, min_delete_count=0))
 
 
 def test_a_folder_listing_nothing_is_refused_by_itself(client, box):
@@ -702,7 +703,7 @@ def test_real_mirror_run_is_audited(client, box, caplog):
     with caplog.at_level(logging.INFO):
         client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "dry_run": False,
                                        "max_delete_percent": 7, "allow_large_delete": True})
-    lines = [r.getMessage() for r in caplog.records if "audit" in r.getMessage().lower()]
+    lines = [r.getMessage() for r in caplog.records if "audit mirror run requested" in r.getMessage().lower()]
     assert len(lines) == 1, [r.getMessage() for r in caplog.records]
     line = lines[0]
     assert f"accounts=[{aid}]" in line and "allow_large_delete=True" in line and "max_delete_percent=7" in line
@@ -762,3 +763,224 @@ def test_backup_copies_are_private_and_purged(client, env):
     db.ex("UPDATE jobs SET status='done'")
     assert mm.purge_backups(days=30) == 1 and not (d / "job-7").exists()
     assert mm.purge_backups(days=0) == 0                      # 0: kept for ever
+
+
+# ------------------------------------------------------------------ second review
+def copies_of(dst, folder, uid):
+    return [c for c in ours(dst, folder) if f"UID:{uid}\r".encode() in c.raw]
+
+
+def test_update_by_replacement_converges_to_one_copy(client, box):
+    """M1: an Exchange-like target writes the new copy, then trashes the old one. That second step fails once: the
+    update is not replayed (no third copy), it is an error, and the next pass leaves exactly one up-to-date copy."""
+    aid, src, dst = make(client)
+    dst.by_import_id = True
+    dst.update_replaces = True
+    full(client, aid)
+    src.get("c3").version = "2"
+    src.get("c3").body = "new phone"
+    dst.fail_trash = 1
+    job, rep = mirror(client, aid)
+    assert dst.updates == 1, "update() replayed"
+    assert rep["mirror"]["contacts"]["errors"] == 1 and rep["mirror"]["contacts"]["updated"] == 0
+    job, rep = mirror(client, aid)
+    got = copies_of(dst, "Contacts", "c3")
+    assert len(got) == 1 and b"new phone" in got[0].raw, [c.raw for c in got]
+    assert rep["mirror"]["contacts"]["updated"] == 1
+    acc = preview(client, aid)
+    assert acc["to_update"]["contacts"] == 0 and acc["to_delete"]["contacts"] == 0, acc
+
+
+def test_update_with_two_copies_updates_one_and_trashes_the_other(client, box):
+    """M1: two copies of one item on the target (a trash that failed earlier): one is updated, the other goes to the
+    trash only once the update has succeeded."""
+    aid, src, dst = make(client)
+    dst.by_import_id = True
+    dst.update_replaces = True
+    full(client, aid)
+    [(ref, c)] = [(r, c) for r, c in dst.folders["Contacts"].items() if b"UID:c3\r" in c.raw]
+    dst.folders["Contacts"]["dup"] = mf.Copy("dup", c.ident, c.raw, [])
+    src.get("c3").version = "2"
+    src.get("c3").body = "new phone"
+    mirror(client, aid)
+    got = copies_of(dst, "Contacts", "c3")
+    assert len(got) == 1 and b"new phone" in got[0].raw and dst.updates == 1
+
+
+def test_update_is_never_replayed(client, box, monkeypatch):
+    """M1: update() goes through no replay at all: a transient failure is one error, tried again at the next pass."""
+    aid, src, dst = make(client)
+    full(client, aid)
+    src.get("c3").version = "2"
+    calls = []
+
+    def flaky(self, folder, ref, item):
+        calls.append(ref)
+        raise ConnectorError("timeout", ConnectorError.TRANSIENT)
+    monkeypatch.setattr(mf.StoreSession, "update", flaky)
+    job, rep = mirror(client, aid)
+    assert len(calls) == 1 and rep["mirror"]["contacts"]["errors"] == 1
+
+
+def test_small_collection_is_not_blocked_by_the_percentage(client, box):
+    """minor 1: the percentage applies only above min_delete_count deletions (10 by default)."""
+    aid, src, dst = make(client)
+    full(client, aid)
+    src.remove("c1")
+    src.remove("c2")                              # 2 of 5 contacts: 40 %, but only 2 deletions
+    acc = preview(client, aid)
+    assert acc["ready"] is True and acc["to_delete"]["contacts"] == 2, acc
+    for i in range(10):                           # 11 deletions of 30: 37 % above the floor
+        src.add("Big", f"b{i}@x")
+    for i in range(20):
+        src.add("Big", f"k{i}@x")
+    full(client, aid)
+    for i in range(10):
+        src.remove(f"b{i}@x")
+    src.remove("in0@x")
+    acc = preview(client, aid, max_delete_percent=20)
+    assert "too_many_deletes" in codes(acc), acc
+
+
+def test_one_empty_folder_can_be_allowed_by_itself(client, box):
+    """minor 1: an emptied folder is lifted by its key (allow_empty_folders), named in the block, not for all."""
+    aid, src, dst = make(client)
+    src.add("Solo", "solo@x")
+    for i in range(30):
+        src.add("INBOX", f"more{i}@x")
+    full(client, aid)
+    src.folders[(MAIL, "Solo")].clear()
+    src.folders[(MAIL, "Projects")].clear()
+    acc = preview(client, aid)
+    empty = [b for b in acc["blocked"] if b["code"] == "source_empty"]
+    assert {b.get("folder") for b in empty} == {"Solo", "Projects"}, acc
+    assert all("allow_empty_folders" in b["message"] for b in empty)
+    acc = preview(client, aid, allow_empty_folders=["Solo"])
+    assert [b.get("folder") for b in acc["blocked"] if b["code"] == "source_empty"] == ["Projects"], acc
+    job, rep = mirror(client, aid, allow_empty_folders=["Solo"])
+    assert ours(dst, "Solo") == [] and len(ours(dst, "Projects")) == 4
+
+
+def test_move_of_a_mail_gone_from_the_target_adds_it(client, box):
+    """minor 2: a mail deleted by hand on the target, then moved at the source: added to its new folder."""
+    aid, src, dst = make(client)
+    full(client, aid)
+    for ref, c in list(dst.folders["Projects"].items()):
+        if "pr0@x" in c.raw.decode():
+            del dst.folders["Projects"][ref]
+    src.move("pr0@x", "INBOX")
+    job, rep = mirror(client, aid)
+    assert [c for c in ours(dst, "INBOX") if "pr0@x" in c.raw.decode()]
+
+
+def test_shared_resource_counts_rows_of_a_skipped_folder(client, box):
+    """minor 3: a row whose folder is no longer migrated (skipped) still holds the shared resource."""
+    from app.server import db
+    aid, src, dst = make(client)
+    src.add("Team", "u1", kind=CONTACTS, subject="Shared")
+    src.add("Team", "t2", kind=CONTACTS, subject="Team only")
+    src.add("Contacts", "u1", kind=CONTACTS, subject="Shared")
+    dst.plan = {"Team": "Contacts"}
+    full(client, aid)
+    db.ex("UPDATE items SET status='skipped', error='folder not migrated' WHERE folder='Team'")
+    src.remove("u1", "Contacts")
+    mirror(client, aid)
+    assert copies_of(dst, "Contacts", "u1")
+
+
+def test_shared_resource_names_without_case(client, box):
+    """minor 3: "U1.vcf" and "u1.vcf" are one resource on a server that ignores case: kept while one is listed,
+    and the second is never written over the first."""
+    aid, src, dst = make(client)
+    dst.casefold = True
+    src.add("Team", "U1", kind=CONTACTS, subject="Shared upper")
+    src.add("Team", "t2", kind=CONTACTS, subject="Team only")
+    src.add("Contacts", "u1", kind=CONTACTS, subject="Shared lower")
+    dst.plan = {"Team": "Contacts"}
+    full(client, aid)
+    puts = [w for w in dst.writes if w[0] == "put" and w[2].casefold() == "u1.vcf"]
+    assert len(puts) == 1, dst.writes
+    from app.server import db  # rows of an earlier version: each with its own case
+    db.ex("UPDATE items SET hash='U1.vcf' WHERE folder='Team' AND hash='u1.vcf'")
+    src.remove("U1", "Team")
+    mirror(client, aid)
+    assert [c for c in ours(dst, "Contacts") if c.ident.casefold() == "u1.vcf"]
+
+
+def test_purge_survives_a_broken_link(client, env):
+    """minor 5: a dangling symbolic link in mirror-trash does not stop the purge."""
+    import os
+    import time
+    from app.server import mirror as mm
+    mm.backup_copy(8, "contacts", "y.vcf", b"x")
+    d = env.data_dir / "mirror-trash" / "job-8"
+    os.symlink(d / "nowhere", d / "contacts" / "dangling")
+    old = time.time() - 40 * 86400
+    for x in [d, *d.rglob("*")]:
+        os.utime(x, (old, old), follow_symlinks=False)
+    assert mm.purge_backups(days=30) == 1 and not d.exists()
+
+
+def test_rows_without_source_ref_get_it_back(client, box):
+    """minor 6: a row migrated before src_ref was kept gets it when the mirror lists its item again."""
+    from app.server import db
+    aid, src, dst = make(client)
+    full(client, aid)
+    db.ex("UPDATE items SET src_ref=NULL")
+    preview(client, aid)
+    assert db.q1("SELECT COUNT(*) n FROM items WHERE src_ref IS NULL")["n"] > 0  # the dry run writes nothing
+    mirror(client, aid)
+    assert db.q1("SELECT COUNT(*) n FROM items WHERE status='ok' AND src_ref IS NULL")["n"] == 0
+
+
+def test_audit_is_written_before_and_in_the_job_log(client, box, caplog, monkeypatch):
+    """minor 7: the audit line is written before the request runs (also when it fails), and the job log says who
+    asked and with which options."""
+    import logging
+    from app.server import mirror as mm
+    aid, src, dst = make(client)
+    full(client, aid)
+    r = client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "dry_run": False,
+                                       "max_delete_percent": 9})
+    jid = r.json()["jobs"][0]["id"]
+    log = "\n".join(x["msg"] for x in client.get(f"/api/jobs/{jid}/log").json()["lines"])
+    assert "requested by session" in log and "max_delete_percent=9" in log, log
+    run(client, jid)
+
+    def boom(*a, **kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(mm, "start", boom)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        try:
+            client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "dry_run": False})
+        except RuntimeError:
+            pass
+    assert [r for r in caplog.records if "AUDIT mirror run requested" in r.getMessage()]
+
+
+def test_job_started_meanwhile_is_job_active(client, box, monkeypatch):
+    """minor 8: a job created between the check and the creation is still reported as job_active, never as the
+    mirror job (its options would be lost)."""
+    from app.server import mirror as mm
+    from app.server import runs
+    aid, src, dst = make(client)
+    full(client, aid)
+    real = runs.create_jobs
+
+    def racing(ids, *a, **kw):
+        real(ids, None, "full")       # another request wins the race
+        return real(ids, *a, **kw)
+    monkeypatch.setattr(runs, "create_jobs", racing)
+    body = client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "dry_run": False}).json()
+    acc = body["accounts"][0]
+    assert "job_active" in codes(acc) and "job_id" not in acc and body["jobs"] == [], body
+    monkeypatch.setattr(runs, "create_jobs", real)
+    assert mm  # (imported for the patch target's module)
+
+
+def test_unknown_mailbox_has_its_own_code(client, box):
+    acc = preview(client, 99999)
+    assert codes(acc) == {"unknown_account"}
+    body = client.post("/api/runs", json={"account_ids": [99999], "mode": "mirror", "dry_run": False}).json()
+    assert codes(body["accounts"][0]) == {"unknown_account"}

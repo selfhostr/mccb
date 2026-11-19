@@ -33,6 +33,7 @@ class DavSession(TargetSession):
         self.password = secrets.get("password") or ""
         self.client: DavClient | None = None
         self._etags: dict[tuple[str, str], str] = {}  # (collection, name) -> etag seen by the last inventory()
+        self._written: dict[tuple[str, str], str] = {}  # (collection, name) -> etag of what this session wrote
 
     @property
     def connected(self) -> bool:
@@ -120,13 +121,49 @@ class DavSession(TargetSession):
             raise convert(e) from e
 
     def put(self, folder: str, item: OutgoingItem) -> str | None:
+        """A NEW resource only (If-None-Match: *): one already there under that name was not written by mccb (a
+        server that names an invitation by its UID) and is not overwritten, unless this session wrote it and it
+        still has the etag of that write (If-Match). The etag of the write is kept (written_version)."""
+        name = item.name or ""
+        text = item.raw.decode("utf-8", "replace")
+        c = self._c()
         try:
-            self._c().put(folder, item.name or "", item.raw.decode("utf-8", "replace"), self.dav_kind)
-            return item.name
+            c.put(folder, name, text, self.dav_kind, if_none_match=True)
         except DavError as e:
             if e.status in (404, 409):  # collection gone since the discovery: recreated then retried by the runner
                 raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
-            raise convert(e) from e
+            if e.status != 412:
+                raise convert(e) from e
+            mine = self._written.get((folder, name))
+            refused = ConnectorError(f"{name}: a resource of this name is already on the target and was not "
+                                     "written by mccb: not overwritten", ConnectorError.REJECTED)
+            if not mine:
+                raise refused from e
+            try:  # written by this session: replaced only while it is still what was written
+                c.put(folder, name, text, self.dav_kind, if_match=mine)
+            except DavError as e2:
+                if e2.status == 412:
+                    raise refused from e2
+                raise convert(e2) from e2
+        self._remember(folder, name)
+        return item.name
+
+    def _remember(self, folder: str, name: str) -> None:
+        c = self._c()
+        et = getattr(c, "last_etag", "") or ""
+        if not et:
+            try:
+                et = c.etag_of(folder, name)
+            except DavError:
+                et = ""
+        if et:
+            self._written[(folder, name)] = et
+        else:
+            self._written.pop((folder, name), None)
+
+    def written_version(self, folder: str, ref: str) -> str | None:
+        """The etag of what this session last wrote to `ref` (None: unknown)."""
+        return self._written.get((folder, ref))
 
     def find(self, folder: str, item: OutgoingItem) -> list[str]:
         if not item.name:
@@ -158,17 +195,19 @@ class DavSession(TargetSession):
                 return {}
             raise convert(e) from e
         out = {}
+        wanted = {n.casefold(): n for n in names or ()}  # some servers do not keep the case of a name
         for name, et in found.items():
-            if names and name in names:
+            asked = wanted.get(name.casefold())
+            if asked is not None:
                 self._etags[(folder, name)] = et
-                out[name] = [RemoteItem(name, version=et or None)]
+                out[asked] = [RemoteItem(name, version=et or None)]
         return out
 
     def delete_mode(self, folder: str) -> str:
         return DELETE_HARD  # no trash in DAV: the runner keeps a copy (read()) before deleting
 
     def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
-        if expected_import_id is not None and expected_import_id != ref:
+        if expected_import_id is not None and expected_import_id.casefold() != ref.casefold():
             raise ConnectorError(f"{ref} is not {expected_import_id}: not deleted", ConnectorError.REJECTED)
         try:
             sc = self._c().delete_item(folder, ref, self._etags.get((folder, ref)))
@@ -190,7 +229,8 @@ class DavSession(TargetSession):
             if e.status in (404, 409):
                 raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
             raise convert(e) from e
-        return ref  # the etag kept is now stale: another write without a new inventory gets 412, never overwrites
+        self._remember(folder, ref)  # the etag of the inventory stays: a second write without one gets 412
+        return ref
 
 
 def collection_slug(dav_kind: str, component: str, label: str) -> str:
@@ -219,6 +259,7 @@ def uid_name(raw: bytes, ext: str) -> str | None:
 
 class DavTarget(Target):
     capabilities = frozenset({CAP_READBACK, CAP_INVENTORY, CAP_DELETE, CAP_UPDATE})
+    names_resources = True  # an item IS its resource name: two items of one name are one resource
     dav_kind = "caldav"
     component = "VEVENT"
 

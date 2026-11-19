@@ -41,9 +41,13 @@ SUBJECT_MAX = 80
 MIRROR_OFF, SOURCE_UNLISTABLE, TOO_MANY_DELETES, SOURCE_EMPTY = "mirror_off", "source_unlistable", "too_many_deletes", "source_empty"
 NO_PRIOR_RUN, UIDVALIDITY_CHANGED, TARGET_UNREACHABLE = "no_prior_run", "uidvalidity_changed", "target_unreachable"
 JOB_ACTIVE = "job_active"  # a job of the mailbox is queued or running: no mirror job is created next to it
-FATAL = {MIRROR_OFF, NO_PRIOR_RUN, TARGET_UNREACHABLE}  # nothing at all is done
+UNKNOWN_ACCOUNT = "unknown_account"
+FATAL_UNKNOWN = {"code": UNKNOWN_ACCOUNT, "message": "unknown mailbox"}
+FATAL = {MIRROR_OFF, NO_PRIOR_RUN, TARGET_UNREACHABLE, UNKNOWN_ACCOUNT}  # nothing at all is done
 # notes (API contract): no block, what the pass will do that the user should know
 SOFT_DELETE, HARD_DELETE, NO_COPY_KEPT, SHARED_RESOURCE = "soft_delete", "hard_delete", "no_copy_kept", "shared_resource"
+TARGET_MODIFIED = "target_modified"
+GAVE_UP = "no longer at the source"  # items.error of a row given up: it holds no resource of anyone
 ACTIVE_STATUSES = ("queued", "running", "paused", "stopping")
 
 
@@ -51,14 +55,26 @@ ACTIVE_STATUSES = ("queued", "running", "paused", "stopping")
 class Options:
     max_delete_percent: int = 20
     allow_large_delete: bool = False
+    # the percentage applies only above this many deletions of a kind (None: MIRROR_MIN_DELETE_COUNT, 10)
+    min_delete_count: int | None = None
+    allow_empty_folders: list[str] = field(default_factory=list)  # folder keys whose empty listing is accepted
+
+    def __post_init__(self):
+        if self.min_delete_count is None:
+            from .config import settings
+            self.min_delete_count = settings.mirror_min_delete_count
+        self.allow_empty_folders = [str(k) for k in (self.allow_empty_folders or [])]
 
     def view(self) -> dict:
-        return {"max_delete_percent": self.max_delete_percent, "allow_large_delete": self.allow_large_delete}
+        return {"max_delete_percent": self.max_delete_percent, "allow_large_delete": self.allow_large_delete,
+                "min_delete_count": self.min_delete_count, "allow_empty_folders": list(self.allow_empty_folders)}
 
     @classmethod
     def of(cls, d: dict | None) -> "Options":
         d = d or {}
-        return cls(int(d.get("max_delete_percent", 20)), bool(d.get("allow_large_delete", False)))
+        n = d.get("min_delete_count")
+        return cls(int(d.get("max_delete_percent", 20)), bool(d.get("allow_large_delete", False)),
+                   int(n) if n is not None else None, list(d.get("allow_empty_folders") or []))
 
 
 # ------------------------------------------------------------------ read-only wrappers
@@ -191,6 +207,7 @@ class Action:
     add: list[str] = field(default_factory=list)
     remove: list[str] = field(default_factory=list)
     ident: str = ""                  # the key of inventory() the item was found under (import id or resource name)
+    orig: "Action | None" = None     # move: the add it replaced (done instead when the target has no copy to move)
 
     @property
     def counted(self) -> bool:
@@ -209,11 +226,12 @@ class Analysis:
     unfinished: list[tuple[str, dict]] = field(default_factory=list)
     moves: list[tuple[str, Action, dict]] = field(default_factory=list)
     rows: dict[str, list[dict]] = field(default_factory=dict)   # phase -> every row of its kind (shared resources)
+    backfill: list[tuple[int, str]] = field(default_factory=list)  # (row id, src_ref) to record (job only)
     gone_ids: dict[str, set[int]] = field(default_factory=dict)  # phase -> ok rows no longer listed (before safety)
 
-    def block(self, code: str, message: str) -> None:
+    def block(self, code: str, message: str, **extra) -> None:
         if not any(b["code"] == code and b["message"] == message for b in self.blocked):
-            self.blocked.append({"code": code, "message": message})
+            self.blocked.append({"code": code, "message": message, **extra})
 
     def note(self, code: str, message: str) -> None:
         if not any(n["code"] == code and n["message"] == message for n in self.notes):
@@ -284,7 +302,8 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
         an.actions[phase] = []
         an.skipped[phase] = 0
         rows_all = [dict(r) for r in db.q(
-            "SELECT id, item_key, folder, target, status, error, hash, source_ref, version, stamp, subject, src_ref "
+            "SELECT id, item_key, folder, target, status, error, hash, source_ref, version, stamp, subject, src_ref, "
+            "target_etag "
             "FROM items "
             "WHERE account_id=? AND pst_key=? AND kind=?", (account_id, pst_key, kind))]
         an.rows[phase] = rows_all
@@ -343,6 +362,9 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
                         continue  # left out by a filter of the policy: not added, as in a normal run
                     adds.append(Action("add", phase, row=r, folder=f, item=it))
                 elif r["status"] == "ok":
+                    if not r.get("src_ref") and ref_json(it.ref):
+                        # migrated before src_ref was kept: recorded now, so that exists() can confirm it later
+                        an.backfill.append((r["id"], ref_json(it.ref)))
                     if phase == MAIL:
                         src = canon_flags(it.flags)
                         if r["version"] is None:
@@ -401,17 +423,21 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
         held = 0
         for fk, n_ok, n_listed, gone_f in per_folder:
             gone_f = [r for r in gone_f if r["id"] not in paired]
-            if gone_f and n_listed == 0 and n_ok and not opts.allow_large_delete:
-                msg = f"{phase} folder '{fk}': the source lists nothing while {n_ok} item(s) were migrated"
-                an.block(SOURCE_EMPTY, msg)
+            if gone_f and n_listed == 0 and n_ok and not opts.allow_large_delete and fk not in opts.allow_empty_folders:
+                msg = (f"{phase} folder '{fk}': the source lists nothing while {n_ok} item(s) were migrated; if it "
+                       f"was emptied on purpose, run again with allow_empty_folders: [\"{fk}\"]")
+                an.block(SOURCE_EMPTY, msg, kind=phase, folder=fk)
                 held += len(gone_f)
                 log(f"Mirror: deletions held back, {msg}", "warning")
                 continue
             dels.extend(Action("delete", phase, row=r) for r in gone_f)
-        if dels and tracked and len(dels) * 100 > opts.max_delete_percent * tracked and not opts.allow_large_delete:
+        if (dels and tracked and len(dels) > opts.min_delete_count
+                and len(dels) * 100 > opts.max_delete_percent * tracked and not opts.allow_large_delete):
+            need = -(-len(dels) * 100 // tracked)  # the smallest whole percentage that lets them through
             msg = (f"{phase}: {len(dels)} of {tracked} migrated item(s) of the folders mirrored would be deleted "
-                   f"(more than {opts.max_delete_percent} %)")
-            an.block(TOO_MANY_DELETES, msg)
+                   f"(more than {opts.max_delete_percent} %); if that is expected, run again with "
+                   f"max_delete_percent: {need} or allow_large_delete: true")
+            an.block(TOO_MANY_DELETES, msg, kind=phase, needed_percent=need)
             held += len(dels)
             log(f"Mirror: deletions held back, {msg}", "warning")
             dels = []
@@ -475,15 +501,18 @@ def _confirm_gone(an: Analysis, source, folders: list[SourceFolder], retry, log,
     for phase, acts in an.actions.items():
         held = [a for a in acts if a.action == "delete" and a.row["id"] not in gone]
         for a in held:
-            log(f"Mirror: {phase} key={a.row['item_key']} not listed but not confirmed gone at the source: kept",
-                "warning")
+            why = ("not confirmed gone at the source" if a.row.get("src_ref") else
+                   "confirmation impossible: unknown source reference (migrated before it was recorded; it is "
+                   "recorded when the item is listed again)")
+            log(f"Mirror: {phase} key={a.row['item_key']} not listed but {why}: kept", "warning")
         if held:
             an.skipped[phase] = an.skipped.get(phase, 0) + len(held)
             ids = {id(a) for a in held}
             an.actions[phase] = [a for a in acts if id(a) not in ids]
     for phase, add, r in an.moves:
         if r["id"] in gone:
-            an.actions.setdefault(phase, []).append(Action("move", phase, row=r, folder=add.folder, item=add.item))
+            an.actions.setdefault(phase, []).append(Action("move", phase, row=r, folder=add.folder, item=add.item,
+                                                           orig=add))
         else:  # the old copy is still at the source: the new one is a copy, the old one stays
             an.actions.setdefault(phase, []).append(add)
     an.moves = []
@@ -533,10 +562,45 @@ def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, r
                     log(f"Mirror: {phase} key={a.row['item_key']} changed at the source and no longer on the "
                         "target: added again", "warning")
                     a.action = "add"
+                elif a.action == "move" and not a.refs and a.orig is not None:
+                    # nothing to move on the target (deleted there by hand): the mail is added to its new folder
+                    log(f"Mirror: {phase} key={a.row['item_key']} moved at the source, no copy on the target: added "
+                        "to its new folder", "warning")
+                    acts_p = an.actions[phase]
+                    acts_p[next(i for i, x in enumerate(acts_p) if x is a)] = a.orig
     for phase in an.actions:
         # nothing to do on an item the target no longer has, except recording a deletion
         an.actions[phase] = [a for a in an.actions[phase]
                              if a.action in ("add", "delete") or a.refs or a.action == "record"]
+    _target_modified(an, log)
+
+
+def _norm_etag(v: str | None) -> str:
+    v = (v or "").strip()
+    return v[2:] if v.startswith("W/") else v
+
+
+def _target_modified(an: Analysis, log) -> None:
+    """An event, contact or task whose version on the target is no longer the one mccb wrote (items.target_etag,
+    DAV) was changed there since, by someone else: it is neither deleted nor overwritten (target_modified)."""
+    for phase, acts in an.actions.items():
+        if phase == MAIL:
+            continue
+        out, held = [], 0
+        for a in acts:
+            mine = (a.row or {}).get("target_etag")
+            seen = a.refs[0].version if a.refs else None
+            if a.action in ("delete", "update") and mine and seen and _norm_etag(seen) != _norm_etag(mine):
+                held += 1
+                log(f"Mirror: {phase} key={a.row['item_key']} was changed on the target since mccb wrote it: not "
+                    f"{'deleted' if a.action == 'delete' else 'overwritten'}", "warning")
+                continue
+            out.append(a)
+        if held:
+            an.actions[phase] = out
+            an.skipped[phase] = an.skipped.get(phase, 0) + held
+            an.note(TARGET_MODIFIED, f"{phase}: {held} item(s) were changed on the target since mccb wrote them: "
+                    "they are neither deleted nor overwritten")
 
 
 def _shared_resources(an: Analysis, log) -> None:
@@ -548,15 +612,19 @@ def _shared_resources(an: Analysis, log) -> None:
             continue
         groups: dict[tuple[str, str], list[dict]] = {}
         for r in an.rows.get(phase, []):
-            if r["status"] == "ok" and r.get("hash"):
-                groups.setdefault((r["target"] or "", r["hash"]), []).append(r)
+            # holders of a resource: our items, and those of a folder no longer migrated (skipped: still at the
+            # source, their copy still on the target); not a row given up before it was ever written
+            holds = r["status"] == "ok" or (r["status"] == "skipped" and (r.get("error") or "") != GAVE_UP)
+            if holds and r.get("hash"):  # names compared without case: some DAV servers ignore it
+                groups.setdefault((r["target"] or "", r["hash"].casefold()), []).append(r)
         deleting = {a.row["id"] for a in acts if a.action == "delete"}
         gone = an.gone_ids.get(phase, set())
         out, released, held = [], 0, 0
         for a in acts:
             row = a.row or {}
-            by_name = a.refs and row.get("hash") and a.ident == row["hash"]  # found by its resource name
-            others = [r for r in groups.get((row.get("target") or "", row.get("hash") or ""), [])
+            # found by its resource name
+            by_name = a.refs and row.get("hash") and a.ident.casefold() == row["hash"].casefold()
+            others = [r for r in groups.get((row.get("target") or "", (row.get("hash") or "").casefold()), [])
                       if r["id"] != row.get("id")] if by_name else []
             if a.action == "delete" and any(r["id"] not in deleting for r in others):
                 a.action, a.refs = "release", []
@@ -680,7 +748,7 @@ def preview_account(account_id: int, opts: Options) -> dict:
     out = {"account_id": account_id, "email": acc["email"] if acc else None, "ready": False,
            "to_add": zero(), "to_update": zero(), "to_delete": zero(), "blocked": [], "sample": [], "notes": []}
     if acc is None:
-        out["blocked"].append({"code": NO_PRIOR_RUN, "message": "unknown mailbox"})
+        out["blocked"].append(dict(FATAL_UNKNOWN))
         return out
     out["blocked"] = preflight(acc)
     if out["blocked"]:
@@ -732,14 +800,15 @@ def preview_account(account_id: int, opts: Options) -> dict:
     return out
 
 
-def start(account_ids: list[int], opts: Options, name: str | None = None, priority: int = 0) -> dict:
+def start(account_ids: list[int], opts: Options, name: str | None = None, priority: int = 0,
+          requested_by: str = "") -> dict:
     """POST /api/runs {mode: "mirror", dry_run: false}: one job per account that may mirror. The job checks every
-    rule again when it runs (the source may have changed since)."""
+    rule again when it runs (the source may have changed since). `requested_by` goes to the log of each job."""
     from . import runs
     accounts, ok = [], []
     for aid in account_ids:
         acc = db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
-        blocked = preflight(acc) if acc is not None else [{"code": NO_PRIOR_RUN, "message": "unknown mailbox"}]
+        blocked = preflight(acc) if acc is not None else [dict(FATAL_UNKNOWN)]
         busy = job_active_block(aid) if acc is not None else None
         if busy:  # runs.create_jobs would give that job back, and the options of this request would be lost
             blocked.append(busy)
@@ -748,6 +817,19 @@ def start(account_ids: list[int], opts: Options, name: str | None = None, priori
         if not blocked:
             ok.append(aid)
     jobs, errors, _ = runs.create_jobs(ok, name, "mirror", priority, mirror=opts.view()) if ok else ([], [], None)
+    # a job started by another request between the check above and create_jobs: given back, not created here
+    for j in [j for j in jobs if j.get("existing")]:
+        for a in accounts:
+            if a["account_id"] == j["account_id"]:
+                a["ready"] = False
+                a["blocked"].append({"code": JOB_ACTIVE, "message": f"job {j['id']} ({j.get('mode')}, "
+                                     f"{j.get('status')}) is not over: wait for it or stop it before a mirror pass",
+                                     "job_id": j["id"]})
+    jobs = [j for j in jobs if not j.get("existing")]
+    from . import repo
+    for j in jobs:
+        repo.log(j["id"], f"Mirror requested by {requested_by or 'the API'}: "
+                 + " ".join(f"{k}={v}" for k, v in opts.view().items()))
     for e in errors:
         for a in accounts:
             if a["account_id"] == e["account_id"]:
@@ -796,10 +878,18 @@ def purge_backups(days: int | None = None) -> int:
         return 0
     limit = time.time() - days * 86400
     n = 0
+    def mtime(x) -> float:
+        try:
+            return x.lstat().st_mtime  # a link is not followed: a dangling one is only its own date
+        except OSError:
+            return 0.0
     for d in root.iterdir():
-        if not (d.is_dir() and d.name.startswith("job-")):
+        if d.is_symlink() or not (d.is_dir() and d.name.startswith("job-")):
             continue
-        newest = max([d.stat().st_mtime] + [x.stat().st_mtime for x in d.rglob("*")])
+        try:
+            newest = max([mtime(d)] + [mtime(x) for x in d.rglob("*")])
+        except OSError:  # removed meanwhile, unreadable: left for the next purge
+            continue
         if newest < limit:
             shutil.rmtree(d, ignore_errors=True)
             n += 1

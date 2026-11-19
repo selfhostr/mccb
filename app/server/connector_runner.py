@@ -80,7 +80,8 @@ class TargetPool(AppendPool):
                     if found:
                         return AppendResult(t.item_id, True, uid=found[0], size=t.size, msg="already present")
                 uid = session.put(t.target, item)
-                return AppendResult(t.item_id, True, uid=uid, size=t.size)
+                return AppendResult(t.item_id, True, uid=uid, size=t.size,
+                                    version=session.written_version(t.target, uid) if uid else None)
             except Exception as e:  # noqa: BLE001 - classified, reported per item
                 err = as_connector_error(e)
                 if err.kind != ConnectorError.FOLDER_MISSING:
@@ -542,12 +543,23 @@ class ConnectorJobRunner(JobRunner):
             digest = hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:32]
             raw, name = got.raw, got.name or self.targets[phase].resource_name(got.raw, f"{digest}.{DAV_EXT[phase]}")
             mark = name  # as on the PST path: the hash column of a DAV item is its resource name
-            other = db.q1("SELECT folder FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? AND hash=? "
-                          "AND status IN ('ok','inflight') AND NOT (folder=? AND item_key=?) LIMIT 1",
-                          (self.account_id, self.pst_key, kind, target, name, fkey, key))
-            if other is not None:  # one resource for both on the target; the mirror deletes it only when both go
-                self.log(f"'{got.subject}' ({fkey}) has the resource name '{name}' of an item of '{other['folder']}' "
-                         f"in {target}: one copy for both on the target", "warning")
+            other = None
+            if getattr(self.targets[phase], "names_resources", False):  # the name IS the item there (DAV)
+                other = db.q1("SELECT folder, hash FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? "
+                              "AND hash=? COLLATE NOCASE AND status IN ('ok','inflight') "
+                              "AND NOT (folder=? AND item_key=?) LIMIT 1",
+                              (self.account_id, self.pst_key, kind, target, name, fkey, key))
+            if other is not None:
+                # the resource is already the copy of another item (same UID in two source folders): never written
+                # over; both rows carry it, the mirror deletes it only when both go (mirror.py, shared resources)
+                self.upsert_item(kind, key, fkey, "ok", target=target, subject=got.subject, hash=other["hash"],
+                                 size=len(raw), source_ref=it.alt_key, version=mm.version_of(phase, it),
+                                 src_ref=mm.ref_json(it.ref))
+                w = (f"shared_resource: '{got.subject}' ({fkey}) has the resource name '{name}' of an item of "
+                     f"'{other['folder']}' in {target}: not written over it, one copy for both")
+                self.report["warnings"].append(w)
+                self.log(w, "warning")
+                return
         if self._size_gate(kind, key, fkey, len(raw), got.subject, target, it.alt_key):
             return
         warnings = db.jdump(got.warnings) if got.warnings else None
@@ -556,6 +568,8 @@ class ConnectorJobRunner(JobRunner):
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=target, subject=got.subject, hash=mark,
                                    size=len(raw), warnings=warnings, source_ref=it.alt_key,
                                    version=mm.version_of(phase, it), src_ref=mm.ref_json(it.ref))
+        if kind != MAIL:  # the etag of an earlier write no longer says anything about this one
+            db.ex("UPDATE items SET target_etag=NULL WHERE id=? AND target_etag IS NOT NULL", (item_id,))
         self._submit(pool, TargetTask(item_id, target, raw, list(got.flags), date, len(raw), import_id, kind=phase,
                                       name=name))
 
@@ -591,7 +605,9 @@ class ConnectorJobRunner(JobRunner):
             for p in phases:
                 stats[p]["skipped_by_safety"] = an.skipped.get(p, 0)
             for r in an.gone_unfinished:  # confirmed gone by the source (exists), never after a listing error
-                self.set_item(r["id"], "skipped", "no longer at the source")
+                self.set_item(r["id"], "skipped", mm.GAVE_UP)
+            for row_id, ref in an.backfill:  # rows migrated before src_ref was kept (the dry run writes nothing)
+                db.ex("UPDATE items SET src_ref=? WHERE id=? AND src_ref IS NULL", (ref, row_id))
             for p in phases:
                 self._mirror_apply(p, an, sessions[p], stats[p])
         finally:
@@ -708,14 +724,38 @@ class ConnectorJobRunner(JobRunner):
             if got is None:
                 continue
             item = OutgoingItem(phase, got.raw, import_id, name=a.row["hash"])
-            ok = True
-            for r in a.refs:
-                ok = self._mirror_act(session, st, "update", key, lambda: session.update(target, r.ref, item))[1] and ok
-            if ok:
-                db.ex("UPDATE items SET version=?, subject=?, size=?, job_id=?, updated_at=? WHERE id=?",
-                      (a.item.version, got.subject, len(got.raw), self.job_id, now(), a.row["id"]))
-                st["updated"] += 1
-                self.log(f"Mirror update {phase} key={key} ref={','.join(r.ref for r in a.refs)} in '{target}': ok")
+            # ONE copy is updated, and never replayed: a target that replaces the item (Exchange, Graph) writes a
+            # new copy and then trashes the old one; a replay after a failure in between would write yet another
+            # copy. A failure is one error, the next pass starts again from what inventory() then finds.
+            first = a.refs[0].ref
+            self.check()
+            try:
+                session.ensure()
+                new = session.update(target, first, item)
+            except ConnectorError as e:
+                if e.kind in (ConnectorError.AUTH, ConnectorError.QUOTA):
+                    raise JobFailed(f"Target: {e}") from e
+                st["errors"] += 1
+                self._item_log(f"Mirror update {phase} key={key} ref={first} in '{target}': failed ({e})", "error")
+                continue
+            # other copies of the same item (a trash that failed in an earlier pass): to the trash, now that one
+            # copy is up to date; never the one just written
+            extra = [r.ref for r in a.refs[1:] if r.ref not in (first, new)]
+            if extra:
+                if session.delete_mode(target) == DELETE_HARD:
+                    self.log(f"Mirror update {phase} key={key}: {len(extra)} older copy(ies) left on the target (it "
+                             "would delete them for good)", "warning")
+                else:
+                    res, good = self._mirror_act(session, st, "trash older copies", key,
+                                                 lambda: session.delete_many(target, extra, {r: a.ident for r in extra}))
+                    self.log(f"Mirror update {phase} key={key}: older copies {','.join(extra)} in '{target}': "
+                             + ("to the trash" if good and set(res or {}) >= set(extra) else "not all removed"),
+                             "info" if good else "error")
+            db.ex("UPDATE items SET version=?, subject=?, size=?, target_etag=?, job_id=?, updated_at=? WHERE id=?",
+                  (a.item.version, got.subject, len(got.raw), session.written_version(target, new or first),
+                   self.job_id, now(), a.row["id"]))
+            st["updated"] += 1
+            self.log(f"Mirror update {phase} key={key} ref={first} -> {new or first} in '{target}': ok")
         for a in an.of(phase, "release"):  # its resource is also the copy of another item still at the source
             self.set_item(a.row["id"], "deleted", "mirror: deleted at the source; its resource on the target is "
                           "shared with another item still at the source: kept")

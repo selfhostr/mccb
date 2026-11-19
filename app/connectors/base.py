@@ -299,6 +299,11 @@ class TargetSession(abc.ABC):
             out[ref] = self.delete(folder, ref, (expected_import_ids or {}).get(ref))
         return out
 
+    def written_version(self, folder: str, ref: str) -> str | None:
+        """The version (DAV: etag) of what this session last wrote to `ref`, None when unknown. Kept by the runner
+        (items.target_etag): the mirror then touches the item only while the target still has that version."""
+        return None
+
     def delete_mode(self, folder: str) -> str:
         """How delete() works in this folder: DELETE_TRASH (moved to the trash of the target, recoverable there),
         DELETE_SOFT (marked, still there) or DELETE_HARD (gone: the runner keeps a copy first, see mirror.py)."""
@@ -328,6 +333,8 @@ class TargetSession(abc.ABC):
 class Target(abc.ABC):
     """Settings of a target (thread-safe, holds no connection). Makes the sessions."""
     capabilities: frozenset[str] = frozenset()
+    # True: an event, contact or task IS its resource name there (DAV): two items of one name are one resource
+    names_resources: bool = False
 
     @abc.abstractmethod
     def session(self) -> TargetSession:

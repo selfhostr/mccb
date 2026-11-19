@@ -322,7 +322,7 @@ export type MirrorAction = 'add' | 'update' | 'delete';
 export type MirrorCounts = Partial<Record<MirrorKind, number>>;
 
 export interface MirrorBlock {
-	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable, job_active. */
+	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable, job_active, unknown_account. */
 	code: string;
 	message: string;
 	/** job_active: the job still queued or running. */

@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "Uma tarefa desta caixa de e-mail ainda não terminou",
 	"migrations_mirror_fix_job_active": "Aguarde o término da tarefa em andamento, ou interrompa-a, e depois compare novamente.",
+	"migrations_mirror_block_unknown_account": "Esta caixa de e-mail não existe mais",
+	"migrations_mirror_fix_unknown_account": "Recarregue a lista de caixas de e-mail: ela foi excluída nesse meio-tempo.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

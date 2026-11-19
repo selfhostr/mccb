@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "Ein Auftrag dieses Postfachs ist noch nicht beendet",
 	"migrations_mirror_fix_job_active": "Warten Sie, bis der laufende Auftrag beendet ist, oder stoppen Sie ihn, und vergleichen Sie dann erneut.",
+	"migrations_mirror_block_unknown_account": "Dieses Postfach existiert nicht mehr",
+	"migrations_mirror_fix_unknown_account": "Laden Sie die Liste der Postfächer neu: es wurde inzwischen gelöscht.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

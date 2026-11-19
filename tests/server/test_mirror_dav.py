@@ -218,6 +218,61 @@ def test_dav_update_and_delete_use_if_match(client):
         s.close()
 
 
+@needs_dav
+def test_dav_first_write_never_overwrites_a_resource_it_did_not_write(client):
+    """M2 (second review): the first PUT goes with If-None-Match: *; a resource already there under that name
+    (an invitation the target named by its UID) is not overwritten, unless it is exactly what mccb writes (a PUT
+    whose answer was lost)."""
+    from app.connectors.base import CALENDAR, ConnectorError, OutgoingItem
+    user = create_user(prefix="dnm")
+    c = client_of(user)
+    try:
+        coll = c.ensure_collection("caldav", home(user) + "cal/", "VEVENT", "Cal")
+        c.put(coll, "x.ics", ics("x", "native invitation"), "caldav")
+    finally:
+        c.close()
+    s = dav_session(user)
+    try:
+        with pytest.raises(ConnectorError) as err:
+            s.put(coll, OutgoingItem(CALENDAR, ics("x", "from the source").encode(), "<ns-x>", name="x.ics"))
+        assert err.value.kind == ConnectorError.REJECTED and "not written by mccb" in str(err.value)
+        assert "native invitation" in s.read(coll, "x.ics").decode()
+        raw = ics("y", "ours").encode()
+        assert s.put(coll, OutgoingItem(CALENDAR, raw, "<ns-y>", name="y.ics")) == "y.ics"
+        assert s.written_version(coll, "y.ics")
+        assert s.put(coll, OutgoingItem(CALENDAR, raw, "<ns-y>", name="y.ics")) == "y.ics"  # written by this session
+    finally:
+        s.close()
+
+
+@needs_dav
+def test_dav_item_changed_on_the_target_is_left_alone(client, env, dav):
+    """M2 (second review): the etag of OUR write is kept; an item whose etag on the target differs (changed there
+    since mccb wrote it) is neither deleted nor overwritten (note target_modified)."""
+    accounts, src, dst, (cal, todo, book) = dav
+    tree = contents(dst, "caldav")
+    [(tcal, _n)] = find(tree, "SUMMARY:Event 3\r")
+    t = client_of(dst)
+    try:
+        t.put(tcal, "e3.ics", ics("e3", "Event 3 edited on the target"), "caldav")
+        t.put(tcal, "e1.ics", ics("e1", "Event 1 edited on the target"), "caldav")
+    finally:
+        t.close()
+    c = client_of(src)
+    try:
+        c._request("DELETE", cal + "e3.ics")
+        c.put(cal, "e1.ics", ics("e1", "Event 1 changed at the source"), "caldav")
+    finally:
+        c.close()
+    acc = preview(client, accounts["caldav"])
+    assert "target_modified" in {n["code"] for n in acc["notes"]}, acc
+    assert acc["to_delete"]["calendar"] == 0 and acc["to_update"]["calendar"] == 0, acc
+    job, rep = mirror(client, accounts["caldav"])
+    tree = contents(dst, "caldav")
+    assert find(tree, "Event 3 edited on the target") and find(tree, "Event 1 edited on the target")
+    assert rep["mirror"]["calendar"]["deleted"] == 0 and rep["mirror"]["calendar"]["skipped_by_safety"] == 2
+
+
 # ------------------------------------------------------------------ without a server (httpx.MockTransport)
 MS_HEAD = '<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">'
 COLL_OK = ('<D:response><D:href>/u/c/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype>'
@@ -256,6 +311,32 @@ def test_truncated_multistatus_makes_an_incomplete_listing():
     listing = s.mirror_listing(SourceFolder(path=["Cal"], kind=CALENDAR, ref="http://dav.test/u/c/"))
     assert listing.complete is False and [i.ref for i in listing.items] == ["a.ics"]
     assert "507" in (listing.problem or "")
+
+
+def listing_with(extra):
+    import httpx
+    from app.connectors.base import CALENDAR, SourceFolder
+    s = dav_source(lambda req: httpx.Response(207, content=(MS_HEAD + COLL_OK + res("a.ics", "1") + extra
+                                                            + "</D:multistatus>").encode()))
+    return s.mirror_listing(SourceFolder(path=["Cal"], kind=CALENDAR, ref="http://dav.test/u/c/"))
+
+
+def test_an_error_on_one_child_is_no_incomplete_listing():
+    """minor 4: a 404 or 403 on one member is that member left out, not a listing cut short."""
+    for status in ("404 Not Found", "403 Forbidden"):
+        listing = listing_with(f'<D:response><D:href>/u/c/b.ics</D:href><D:status>HTTP/1.1 {status}</D:status>'
+                               "</D:response>")
+        assert listing.complete is True and [i.ref for i in listing.items] == ["a.ics"], status
+
+
+def test_an_error_on_the_collection_or_a_5xx_is_an_incomplete_listing():
+    """minor 4: an error status on the collection itself, or a 5xx anywhere: incomplete."""
+    listing = listing_with('<D:response><D:href>/u/c/</D:href><D:status>HTTP/1.1 403 Forbidden</D:status>'
+                           "</D:response>")
+    assert listing.complete is False
+    listing = listing_with('<D:response><D:href>/u/c/b.ics</D:href><D:status>HTTP/1.1 503 Busy</D:status>'
+                           "</D:response>")
+    assert listing.complete is False
 
 
 def test_complete_multistatus_makes_a_complete_listing():

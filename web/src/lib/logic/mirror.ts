@@ -89,7 +89,7 @@ export function sampleLines(account: Pick<MirrorAccountPlan, 'sample'>, limit = 
 }
 
 /** The reasons that stop a mirror run. What to do about each one is said in the interface; the message comes from the API. */
-export const BLOCK_CODES = ['mirror_off', 'source_unlistable', 'too_many_deletes', 'source_empty', 'no_prior_run', 'uidvalidity_changed', 'target_unreachable', 'job_active'] as const;
+export const BLOCK_CODES = ['mirror_off', 'source_unlistable', 'too_many_deletes', 'source_empty', 'no_prior_run', 'uidvalidity_changed', 'target_unreachable', 'job_active', 'unknown_account'] as const;
 export type BlockCode = (typeof BLOCK_CODES)[number];
 
 /**

@@ -182,6 +182,11 @@ class Store:
         # resource name is ignored; False: known by their resource name (DAV)
         self.by_import_id = False
         self.plan: dict[str, str] = {}   # source folder ("A/B") -> target folder, when not the same name
+        # True: update() writes a new copy, then moves the old one to the trash (Exchange-like)
+        self.update_replaces = False
+        self.fail_trash = 0              # update(): so many next moves of the old copy to the trash fail
+        self.casefold = False            # resource names compared without case (some DAV servers)
+        self.updates = 0                 # update() calls
 
     def native(self, folder: str, raw: bytes, ident: str = "") -> str:
         ref = str(next(self._ref))
@@ -222,14 +227,17 @@ class StoreSession(TargetSession):
         with self.s.lock:
             box = self.s.folders.setdefault(folder, {})
             ident = item.import_id if item.kind == MAIL or self.s.by_import_id else item.name
-            if item.kind != MAIL:  # DAV-like: same name overwrites
+            if item.kind != MAIL and not self.s.by_import_id:  # DAV-like: same name overwrites
                 for ref, c in list(box.items()):
-                    if c.ident == ident:
+                    if self._same(c.ident, ident):
                         del box[ref]
             ref = str(next(self.s._ref))
             box[ref] = Copy(ref, ident, item.raw, list(item.flags))
             self.s.writes.append(("put", folder, ident))
             return ref
+
+    def _same(self, a, b):
+        return a.casefold() == b.casefold() if self.s.casefold else a == b
 
     def find(self, folder, item):
         ident = item.import_id if item.kind == MAIL or self.s.by_import_id else item.name
@@ -253,8 +261,12 @@ class StoreSession(TargetSession):
         out: dict[str, list[RemoteItem]] = {}
         with self.s.lock:
             for c in self.s.folders.get(folder, {}).values():
-                if c.ident.startswith(f"<{namespace}-") or (names and c.ident in names):
+                if c.ident.startswith(f"<{namespace}-"):
                     out.setdefault(c.ident, []).append(RemoteItem(c.ref, list(c.flags)))
+                    continue
+                for n in names or ():
+                    if self._same(c.ident, n):
+                        out.setdefault(n, []).append(RemoteItem(c.ref, list(c.flags)))
         return out
 
     def delete_mode(self, folder):
@@ -266,7 +278,7 @@ class StoreSession(TargetSession):
             if c is None:
                 return self.delete_mode(folder)
             assert c.ours, "deleting native content of the target"
-            if expected_import_id is not None and c.ident != expected_import_id:
+            if expected_import_id is not None and not self._same(c.ident, expected_import_id):
                 raise ConnectorError("not the expected item", ConnectorError.REJECTED)
             if folder == self.s.trash:
                 c.flags = sorted(set(c.flags) | {"\\Deleted", MIRROR_DELETED_FLAG})
@@ -279,6 +291,16 @@ class StoreSession(TargetSession):
             return DELETE_TRASH
 
     def update(self, folder, ref, item):
+        self.s.updates += 1
+        if self.s.update_replaces:  # a new copy first, then the old one to the trash
+            with self.s.lock:
+                assert self.s.folders[folder][ref].ours
+            new = self.put(folder, item)
+            if self.s.fail_trash:
+                self.s.fail_trash -= 1
+                raise ConnectorError("trash refused for now", ConnectorError.TRANSIENT)
+            self.delete(folder, ref, item.import_id)
+            return new
         with self.s.lock:
             c = self.s.folders[folder][ref]
             assert c.ours
@@ -304,6 +326,10 @@ class StoreSession(TargetSession):
 
 class StoreTarget(Target):
     capabilities = frozenset({CAP_INVENTORY, CAP_DELETE, CAP_UPDATE, CAP_SET_FLAGS, CAP_MOVE})
+
+    @property
+    def names_resources(self):
+        return not self.store.by_import_id
 
     def __init__(self, config, secrets, ctx=None):
         self.store = TARGETS[config["name"]]

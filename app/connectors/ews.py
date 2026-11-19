@@ -1683,7 +1683,7 @@ class EwsSession(TargetSession):
             # both series are there for a moment, with the same UID: the exceptions go to the new one only
             exclude = self._series_occurrences(self._folder_xml(folder), pim.ics_to_event(item.raw))
         new = self._put(folder, item, exclude)
-        if old is not None:
+        if old is not None and new and new != ref:  # never the copy just written
             self.delete(folder, ref, item.import_id)
         return new
 

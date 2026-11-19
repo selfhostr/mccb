@@ -183,6 +183,7 @@ class AppendResult:
     msg: str = ""
     uid: str | None = None
     size: int = 0
+    version: str | None = None  # TargetSession.written_version() of the write (items.target_etag)
 
 
 class AppendPool:
@@ -1339,6 +1340,8 @@ class JobRunner:
                 self._bytes_done += r.size or size
                 self._ok_items += 1
                 self._ok_buf.append(("ok", r.item_id))
+                if r.version:
+                    db.ex("UPDATE items SET target_etag=? WHERE id=?", (r.version, r.item_id))
             elif r.kind == "cancel":
                 self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():

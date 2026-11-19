@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "此邮箱的一个任务尚未结束",
 	"migrations_mirror_fix_job_active": "请等待当前任务结束或将其停止，然后重新比较。",
+	"migrations_mirror_block_unknown_account": "此邮箱已不存在",
+	"migrations_mirror_fix_unknown_account": "请重新加载邮箱列表：它已在此期间被删除。",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

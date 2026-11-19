@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "Задание для этого почтового ящика ещё не завершено",
 	"migrations_mirror_fix_job_active": "Дождитесь окончания текущего задания или остановите его, затем сравните снова.",
+	"migrations_mirror_block_unknown_account": "Этот почтовый ящик больше не существует",
+	"migrations_mirror_fix_unknown_account": "Обновите список почтовых ящиков: он был удалён за это время.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

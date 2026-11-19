@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "Un'attività di questa casella non è ancora terminata",
 	"migrations_mirror_fix_job_active": "Attendi la fine dell'attività in corso, oppure interrompila, poi confronta di nuovo.",
+	"migrations_mirror_block_unknown_account": "Questa casella non esiste più",
+	"migrations_mirror_fix_unknown_account": "Ricarica l'elenco delle caselle: nel frattempo è stata eliminata.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

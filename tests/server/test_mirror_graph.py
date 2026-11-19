@@ -691,6 +691,18 @@ def test_update_writes_the_new_copy_before_trashing_the_old(tenant, monkeypatch)
     assert tenant.dst.messages[ids["mail"]]["parentFolderId"] != "mf-deleteditems"
 
 
+def test_update_of_a_series_twice_with_the_same_content_keeps_it(tenant):
+    """M1 (second review): Graph gives the existing event back for a transactionId already used. A second update
+    with the same content returns the series it just wrote: that one is never deleted."""
+    s = target()
+    rid = s.put("calendar:@default", item(CALENDAR, pim.event_to_ics(weekly()), "w1"))
+    raw = pim.event_to_ics(weekly("Weekly 2"))
+    new = s.update("calendar:@default", rid, item(CALENDAR, raw, "w1"))
+    again = s.update("calendar:@default", new, item(CALENDAR, raw, "w1"))
+    assert again == new and new in tenant.dst.events and tenant.dst.events[new]["subject"] == "Weekly 2"
+    assert [x["id"] for k, x in tenant.dst.trash if k == "event"] == [rid]
+
+
 def test_update_contact_task_and_draft(tenant):
     s = target()
     ids = put_all(s, tenant.dst)

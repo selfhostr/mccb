@@ -1461,7 +1461,8 @@ class GraphSession(TargetSession):
         path = self._mirror_item_path(folder, kind, ref)
         if kind == MAIL:  # the new copy first: a failed write leaves the old one where it was, never only trashed
             new = self.put(folder, item)
-            self.delete(folder, ref)
+            if new and new != ref:  # never the copy just written
+                self.delete(folder, ref)
             return new
         if kind == CONTACTS:
             body = contact_json(pim.vcard_to_contact(item.raw), item.import_id)
@@ -1496,7 +1497,8 @@ class GraphSession(TargetSession):
         # a series: its exceptions cannot be patched reliably, a new series replaces it (written first, as a mail)
         salt = hashlib.sha256(item.raw).hexdigest()[:16]
         new = self._put_event(self._folder(folder), event, item.import_id, transaction=f"{item.import_id}:{salt}")
-        self.delete(folder, ref)
+        if new and new != ref:  # Graph gives the event of a transactionId already used back: that one stays
+            self.delete(folder, ref)
         return new
 
     def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:

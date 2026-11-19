@@ -279,6 +279,8 @@
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
 	"migrations_mirror_block_job_active": "Una tarea de este buzón aún no ha terminado",
 	"migrations_mirror_fix_job_active": "Espere a que termine la tarea en curso, o deténgala, y vuelva a comparar.",
+	"migrations_mirror_block_unknown_account": "Este buzón ya no existe",
+	"migrations_mirror_fix_unknown_account": "Vuelva a cargar la lista de buzones: se ha eliminado mientras tanto.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

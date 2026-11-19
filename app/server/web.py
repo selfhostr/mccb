@@ -585,23 +585,32 @@ class RunIn(BaseModel):
     dry_run: bool = True
     max_delete_percent: int = Field(20, ge=0, le=100)
     allow_large_delete: bool = False
+    # max_delete_percent applies only above this many deletions of a kind (default: MIRROR_MIN_DELETE_COUNT, 10)
+    min_delete_count: int | None = Field(None, ge=0)
+    # folder keys (as named by a source_empty block) whose empty listing is accepted: their items are deleted
+    allow_empty_folders: list[str] = Field(default_factory=list, max_length=1000)
 
 
 @app.post("/api/runs")
 def create_runs(body: RunIn, request: Request):
     if body.mode == "mirror":
         from . import mirror
-        opts = mirror.Options(body.max_delete_percent, body.allow_large_delete)
+        opts = mirror.Options(body.max_delete_percent, body.allow_large_delete, body.min_delete_count,
+                              body.allow_empty_folders)
         if body.dry_run:
             return {"accounts": [mirror.preview_account(aid, opts) for aid in body.account_ids]}
-        out = mirror.start(body.account_ids, opts, body.name, body.priority)
-        # audit trail of every real mirror request (it deletes on the targets): who, which mailboxes, which options
+        # audit trail of every real mirror request (it deletes on the targets), written BEFORE it runs: who, which
+        # mailboxes, which options. The client address is the one the rest of the app uses (uvicorn's proxy
+        # headers, see main()); the job log of each job created gets the same line.
         via = getattr(request.state, "via", "session")
         who = f"token {getattr(request.state, 'token_prefix', '?')}" if via == "token" else "session"
-        log.warning("AUDIT mirror run requested: accounts=%s jobs=%s allow_large_delete=%s max_delete_percent=%s "
-                    "via=%s (%s) from=%s", list(body.account_ids), [j["id"] for j in out["jobs"]],
-                    opts.allow_large_delete, opts.max_delete_percent, via, who,
-                    request.client.host if request.client else "?")
+        ip = request.client.host if request.client else "?"
+        options = " ".join(f"{k}={v}" for k, v in opts.view().items())
+        log.warning("AUDIT mirror run requested: accounts=%s %s via=%s (%s) from=%s", list(body.account_ids), options,
+                    via, who, ip)
+        out = mirror.start(body.account_ids, opts, body.name, body.priority, requested_by=f"{who} from {ip}")
+        log.warning("AUDIT mirror run answered: accounts=%s jobs=%s", list(body.account_ids),
+                    [j["id"] for j in out["jobs"]])
         return out
     jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
