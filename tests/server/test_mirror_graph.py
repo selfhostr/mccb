@@ -302,7 +302,8 @@ def test_source_is_never_written(tenant):
         assert listing.complete
         for it in listing.items[:2]:
             src.fetch(f, it, "<x>")
-        src.exists(f, [it.ref for it in listing.items] + ["nope"])
+        keys = [it.key for it in listing.items] + ["nope-key"]
+        src.exists(f, keys, {**{it.key: it.ref for it in listing.items}, "nope-key": "nope"})
     inbox = folder(src, "Inbox")
     cur = src.changed_since(inbox, None).cursor
     tenant.src.remove_message("msg-0")
@@ -367,14 +368,30 @@ def test_exists_tells_gone_from_moved(tenant):
     inbox = folder(src, "Inbox")
     tenant.src.remove_message("msg-0")
     tenant.src.move_message("msg-1", "mf-sub")
-    assert src.exists(inbox, ["msg-0", "msg-1", "msg-2"]) == {"msg-0": m365.GONE, "msg-1": m365.MOVED,
+    assert src.probe(inbox, ["msg-0", "msg-1", "msg-2"]) == {"msg-0": m365.GONE, "msg-1": m365.MOVED,
                                                                "msg-2": m365.HERE}
     contacts = next(f for f in src.folders() if f.kind == CONTACTS and not f.ref)
-    assert src.exists(contacts, ["c1"]) == {"c1": m365.HERE}
+    assert src.probe(contacts, ["c1"]) == {"c1": m365.HERE}
     tenant.src.contacts["c1"]["folder"] = "cf-1"  # moved to Friends
-    assert src.exists(contacts, ["c1"]) == {"c1": m365.MOVED}
-    assert src.exists(folder(src, "Calendar"), ["ev-1", "ev-x"]) == {"ev-1": m365.HERE, "ev-x": m365.GONE}
-    assert src.exists(folder(src, "Tasks"), ["t1", "t9"]) == {"t1": m365.HERE, "t9": m365.GONE}
+    assert src.probe(contacts, ["c1"]) == {"c1": m365.MOVED}
+    assert src.probe(folder(src, "Calendar"), ["ev-1", "ev-x"]) == {"ev-1": m365.HERE, "ev-x": m365.GONE}
+    assert src.probe(folder(src, "Tasks"), ["t1", "t9"]) == {"t1": m365.HERE, "t9": m365.GONE}
+
+
+def test_exists_answers_by_key_with_the_recorded_refs(tenant):
+    """The interface: exists(folder, keys, refs) -> {key: still there}; refs are the SourceItem.ref recorded in
+    items.src_ref (JSON round trip: a str stays a str). Moved is True, no ref (or not an id) is True: kept."""
+    seed_source(tenant.src)
+    src = source()
+    inbox = folder(src, "Inbox")
+    keys = {it.ref: it.key for it in src.mirror_listing(inbox).items}
+    tenant.src.remove_message("msg-0")
+    tenant.src.move_message("msg-1", "mf-sub")
+    refs = {keys["msg-0"]: "msg-0", keys["msg-1"]: "msg-1", keys["msg-2"]: None, keys["msg-3"]: ["not", "an", "id"]}
+    assert src.exists(inbox, list(refs) + ["unknown"], refs) == {
+        keys["msg-0"]: False, keys["msg-1"]: True, keys["msg-2"]: True, keys["msg-3"]: True, "unknown": True}
+    assert src.exists(inbox, [keys["msg-0"]]) == {keys["msg-0"]: True}  # no refs at all: cannot tell
+    assert "exists" in __import__("app.connectors.base", fromlist=["x"]).READ_ONLY_SOURCE_METHODS
 
 
 def test_exists_never_says_gone_on_another_failure(tenant):
@@ -385,12 +402,12 @@ def test_exists_never_says_gone_on_another_failure(tenant):
                          (400, "ErrorInvalidIdMalformed")):
         tenant.src.fail["GET:/messages/msg-2"] = (status, code)
         with pytest.raises(ConnectorError):
-            src.exists(inbox, ["msg-2"])
+            src.exists(inbox, ["k2"], {"k2": "msg-2"})
     # an item 404 while the mailbox itself no longer answers: not a deletion
     tenant.src.remove_message("msg-0")
     tenant.src.fail["GET:/mailFolders/inbox"] = (404, "ErrorInvalidUser")
     with pytest.raises(ConnectorError):
-        src.exists(inbox, ["msg-0"])
+        src.exists(inbox, ["k0"], {"k0": "msg-0"})
 
 
 def test_delta_reports_removed_and_a_move_is_not_a_deletion(tenant):
@@ -398,13 +415,15 @@ def test_delta_reports_removed_and_a_move_is_not_a_deletion(tenant):
     src = source()
     inbox, work = folder(src, "Inbox"), folder(src, "Inbox", "Work")
     first = src.changed_since(inbox, None)
-    assert first.reset and first.removed_refs == []
+    assert first.reset and first.removed == []
     before = {i.ref: i.key for i in first.items}
     tenant.src.remove_message("msg-0")
     tenant.src.move_message("msg-1", "mf-sub")
     second = src.changed_since(inbox, first.cursor)
-    assert not second.reset and second.removed_refs == ["msg-0", "msg-1"]  # @removed: a hint, a move says it too
-    assert src.exists(inbox, second.removed_refs) == {"msg-0": m365.GONE, "msg-1": m365.MOVED}
+    # @removed: a hint (keys), a move says it too
+    assert not second.reset and second.removed == [before["msg-0"], before["msg-1"]]
+    refs = {before[r]: r for r in ("msg-0", "msg-1")}
+    assert src.exists(inbox, second.removed, refs) == {before["msg-0"]: False, before["msg-1"]: True}
     moved = [i for i in src.mirror_listing(work).items if i.ref == "msg-1"][0]
     assert moved.key != before["msg-1"]  # the key holds the folder: the ref (ImmutableId) tells the move
 
@@ -425,9 +444,11 @@ def test_core_flow_deletes_only_what_a_get_says_gone(tenant):
     def mirror_pass():
         listed = {i.key for i in src.mirror_listing(inbox).items}
         missing = {k: v for k, v in tracked.items() if k not in listed}
-        states = src.exists(inbox, [ref for ref, _rid in missing.values()])
+        there = src.exists(inbox, list(missing), {k: ref for k, (ref, _rid) in missing.items()})
         s.inventory("mail:@inbox", NS)
-        return {ref: s.delete("mail:@inbox", rid) for ref, rid in missing.values() if states[ref] == m365.GONE}
+        gone = [(ref, rid) for k, (ref, rid) in missing.items() if not there[k]]
+        done = s.delete_many("mail:@inbox", [rid for _ref, rid in gone], {rid: f"<{NS}-{ref}>" for ref, rid in gone})
+        return {ref: done[rid] for ref, rid in gone}
 
     tenant.src.fail["GET:/messages/msg-0"] = (500, "InternalServerError")  # the probe fails: nothing is deleted
     with pytest.raises(ConnectorError):
@@ -607,7 +628,7 @@ def test_send_invitations_refuses_event_deletion_and_update(tenant):
     with pytest.raises(ConnectorError) as err:
         s.delete("calendar:@default", rid)
     assert err.value.kind == ConnectorError.REJECTED and "Send invitations" in str(err.value)
-    assert isinstance(s.delete_many("calendar:@default", [rid])[rid], ConnectorError)
+    assert s.delete_many("calendar:@default", [rid]) == {}  # refused: missing from the answer
     with pytest.raises(ConnectorError) as err:
         s.update("calendar:@default", rid, item(CALENDAR, pim.event_to_ics(single("Two")), "e1"))
     assert "Send invitations" in str(err.value)
@@ -682,3 +703,89 @@ def test_set_flags_and_move(tenant):
     assert new == ids["mail"] and msg["parentFolderId"] == "mf-junkemail"
     assert [r.ref for r in s.inventory("mail:@junkemail", NS)[f"<{NS}-m1>"]] == [new]
     assert s.delete("mail:@junkemail", new) == DELETE_TRASH
+
+
+# ------------------------------------------------------------------ final interface: names, expected marks
+def test_inventory_by_resource_name_and_expected_marks(tenant):
+    """The runner records an event, a contact or a task by a resource name derived from its import id (items.hash):
+    inventory() answers by that name when `names` is given, delete() checks the expected import id or name."""
+    s = target()
+    ids = put_all(s, tenant.dst)
+    name = m365.resource_name_of(CALENDAR, f"<{NS}-e1>")
+    assert name.endswith(".ics") and m365.resource_name_of(CONTACTS, f"<{NS}-c1>").endswith(".vcf")
+    inv = s.inventory("calendar:@default", NS, {name})
+    assert {k: [r.ref for r in v] for k, v in inv.items()} == {name: [ids["event"]]}
+    assert s.inventory("calendar:@default", NS, {"other.ics"}) == {}
+    cname = m365.resource_name_of(CONTACTS, f"<{NS}-c1>")
+    assert list(s.inventory("contacts:@default", NS, {cname})) == [cname]
+    tname = m365.resource_name_of(TASKS, f"<{NS}-t1>")
+    assert list(s.inventory("tasks:@default", NS, {tname})) == [tname]
+    s.inventory("mail:@inbox", NS)
+    with pytest.raises(ConnectorError):  # another import id expected: refused
+        s.delete("mail:@inbox", ids["mail"], f"<{NS}-m9>")
+    assert s.delete_many("mail:@inbox", [ids["mail"]], {ids["mail"]: f"<{NS}-m9>"}) == {}
+    assert tenant.dst.messages[ids["mail"]]["parentFolderId"] == "mf-inbox"
+    assert s.delete("mail:@inbox", ids["mail"], f"<{NS}-m1>") == DELETE_TRASH
+    assert s.delete_many("contacts:@default", [ids["contact"]], {ids["contact"]: "wrong.vcf"}) == {}
+    assert s.delete_many("contacts:@default", [ids["contact"]], {ids["contact"]: cname}) == {ids["contact"]: DELETE_TRASH}
+
+
+def test_delete_many_answers_only_the_done(tenant):
+    s = target()
+    ids = put_all(s, tenant.dst)
+    s.inventory("mail:@inbox", NS)
+    got = s.delete_many("mail:@inbox", [ids["mail"], "theirs", "gone-already"])
+    assert got == {ids["mail"]: DELETE_TRASH, "gone-already": DELETE_TRASH}  # "theirs": refused, missing
+    assert tenant.dst.messages["theirs"]["parentFolderId"] == "mf-inbox"
+
+
+# ------------------------------------------------------------------ end to end, through the mirror of the runner
+SRV = {"name": "Prod", "imap_host": "imap.example.test", "imap_port": 993, "imap_security": "ssl", "verify_tls": True,
+       "dav_enabled": False, "workers": 1, "tuning": "manual", "notes": ""}
+
+
+def run_job(client, jid):
+    from app.server import runner
+    runner.run_job(jid, "test:inproc")
+    return client.get(f"/api/jobs/{jid}").json()
+
+
+def test_graph_to_graph_mirror_end_to_end(client, tenant):
+    seed_source(tenant.src)
+    # an emptied folder and more than 20 % deleted are held back by the mirror: other contacts stay
+    for i in range(2, 7):
+        tenant.src.contacts[f"c{i}"] = {"id": f"c{i}", "folder": None, "displayName": f"Bob {i}", "changeKey": f"c-ck{i}"}
+    sid = client.post("/api/servers", json=SRV).json()["id"]
+    aid = client.post("/api/accounts", json={"server_id": sid, "email": DST, "password": "pw"}).json()["id"]
+    for role, mailbox in (("source", SRC), ("target", DST)):
+        r = client.put(f"/api/accounts/{aid}/{role}", json={"kind": "m365_graph", "config": {**TENANT, "mailbox": mailbox},
+                                                            "secrets": {"client_secret": fx.FakeGraph.SECRET}})
+        assert r.status_code == 200, r.text
+    assert client.put(f"/api/accounts/{aid}", json={"mirror": True}).status_code == 200
+    job = run_job(client, client.post("/api/runs", json={"account_ids": [aid]}).json()[0]["id"])
+    assert job["status"] == "done", client.get(f"/api/jobs/{job['id']}/log").json()
+    dst = tenant.dst
+    inbox = lambda: {m["id"]: m for m in dst.messages.values() if m["parentFolderId"] == "mf-inbox"}  # noqa: E731
+    assert len(inbox()) == 4 and len(dst.events) == 1 and len(dst.contacts) == 6
+    dst.add_message("mf-inbox", MIME, id="native")  # arrived on the target: never ours
+    # at the source: one mail deleted for good, one read, one new, the event changed, the contact deleted
+    tenant.src.remove_message("msg-0")
+    tenant.src.messages["msg-2"]["isRead"] = True
+    tenant.src.add_message("mf-inbox", MIME.replace(b"<1@", b"<new@"), id="msg-new", internetMessageId="<new@x.test>")
+    tenant.src.events["ev-1"].update(subject="S moved", changeKey="e-ck2")
+    del tenant.src.contacts["c1"]
+    r = client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "dry_run": False})
+    assert r.status_code == 200, r.text
+    job = run_job(client, r.json()["jobs"][0]["id"])
+    log = client.get(f"/api/jobs/{job['id']}/log").json()
+    assert job["status"] == "done", "\n".join(f"{x['level']} {x['msg']}" for x in log["lines"])
+    rep = client.get(f"/api/jobs/{job['id']}/report").json()["mirror"]
+    assert rep["mail"]["deleted"] == 1 and rep["mail"]["added"] == 1 and rep["mail"]["errors"] == 0, (rep, log)
+    assert rep["calendar"]["updated"] == 1 and rep["contacts"]["deleted"] == 1, (rep, log)
+    assert "native" in inbox() and len(inbox()) == 5  # 4 - 1 + 1, and the native one
+    trashed = [m for m in dst.messages.values() if m["parentFolderId"] == "mf-deleteditems"]
+    assert len(trashed) == 1 and MIRROR_DELETED_FLAG in trashed[0]["categories"]
+    assert sum(1 for m in inbox().values() if m["isRead"]) >= 1  # the read flag followed
+    assert [e["subject"] for e in dst.events.values()] == ["S moved"]
+    assert "Ann" not in [c.get("displayName") for c in dst.contacts.values()] and len(dst.contacts) == 5 and [k for k, _x in dst.trash] == ["contact"]
+    assert tenant.src.mutations == [] and dst.purged == []
