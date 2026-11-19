@@ -50,6 +50,8 @@ def job_view(r) -> dict:
         "priority": r["priority"] if "priority" in r.keys() else 0,
         "batch_id": r["batch_id"] if "batch_id" in r.keys() else None,
         "pause_reason": r["pause_reason"] if "pause_reason" in r.keys() else None,
+        # mirror job: {options, <kind>: {added, updated, deleted, skipped_by_safety, errors}, blocked} (else null)
+        "mirror": db.jload(r["mirror"], None) if "mirror" in r.keys() else None,
     }
 
 
@@ -99,6 +101,10 @@ def target_view(r) -> dict:
             "has_secret": bool(r["target_secret_enc"])}
 
 
+def _mirror_of(r) -> bool:
+    return bool(r["mirror"]) if "mirror" in r.keys() else False
+
+
 def account_view(r, with_job: bool = True) -> dict:
     job = None
     if with_job:
@@ -110,6 +116,8 @@ def account_view(r, with_job: bool = True) -> dict:
         "last_test_result": db.jload(r["last_test_result"], None),
         "pst_id": r["pst_id"], "source": source_view(r), "target": target_view(r),
         "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"])},
+        # mirror mode allowed for this account (PUT accepts it here or as options.mirror): docs/planning.md "Mirror"
+        "mirror": _mirror_of(r),
         "job": job,
     }
 

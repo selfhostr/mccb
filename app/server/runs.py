@@ -8,7 +8,7 @@ from . import db, repo
 
 
 def create_jobs(account_ids: list[int], name: str | None = None, mode: str = "full",
-                priority: int = 0) -> tuple[list[dict], list[dict], int | None]:
+                priority: int = 0, mirror: dict | None = None) -> tuple[list[dict], list[dict], int | None]:
     """(jobs, errors, batch_id). An account with an active job gives that job back; the batch is created with the
     first new job only."""
     jobs, errors = [], []
@@ -33,9 +33,11 @@ def create_jobs(account_ids: list[int], name: str | None = None, mode: str = "fu
         if name and name.strip() and batch_id is None:
             batch_id = db.ex("INSERT INTO batches(name, created_at) VALUES (?, ?)",
                              (name.strip(), time.time())).lastrowid
-        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at) "
-                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?)",
-                    (aid, db.jdump(repo.empty_progress()), mode, batch_id, priority, time.time()))
-        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if mode == "delta" else ""))
+        cur = db.ex("INSERT INTO jobs(account_id, status, phase, progress, mode, batch_id, priority, created_at, mirror) "
+                    "VALUES (?, 'queued', 'precheck', ?, ?, ?, ?, ?, ?)",
+                    (aid, db.jdump(repo.empty_progress()), mode, batch_id, priority, time.time(),
+                     db.jdump({"options": mirror}) if mirror is not None else None))
+        repo.log(cur.lastrowid, "Job queued" + (" (final resync)" if mode == "delta" else
+                                                " (mirror)" if mode == "mirror" else ""))
         jobs.append(repo.get_job(cur.lastrowid))
     return jobs, errors, batch_id
