@@ -42,6 +42,8 @@ class Box:
         self.incomplete: set[str] = set()                   # folder names listed with complete=False
         self.hidden: set[str] = set()                       # Message-IDs a listing misses (still at the source)
         self.exists_errors: dict[str, ConnectorError] = {}  # folder name -> raised by exists
+        self.exists_refs: dict = {}                         # refs exists() was given (recorded src_ref)
+        self.unstable: set[str] = set()                     # folder names whose epoch is "renamed-or-moved"
         self.calls: list[str] = []
 
     def add(self, name: str, mid: str, kind: str = MAIL, **kw) -> int:
@@ -115,14 +117,15 @@ class BoxSource(Source):
         if name in self.box.list_errors:
             raise self.box.list_errors[name]
         return Listing(list(self._items(folder)), complete=name not in self.box.incomplete,
-                       epoch=str(self.box.epoch[(kind, name)]),
+                       epoch="renamed-or-moved" if name in self.box.unstable else str(self.box.epoch[(kind, name)]),
                        problem="paging cut short" if name in self.box.incomplete else None)
 
-    def exists(self, folder, keys):
+    def exists(self, folder, keys, refs=None):
         """Direct read by key; `ghosts` are items a listing misses although they are still there."""
         kind, name = folder.ref
         ep = self.box.epoch[(kind, name)]
         self.box.calls.append(f"exists:{name}:{len(keys)}")
+        self.box.exists_refs.update(refs or {})
         if name in self.box.exists_errors:
             raise self.box.exists_errors[name]
         here = {key_of(kind, name, ep, uid) for uid in self.box.folders.get((kind, name), {})}

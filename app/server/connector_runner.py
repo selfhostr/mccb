@@ -547,7 +547,7 @@ class ConnectorJobRunner(JobRunner):
             self.log(f"Warning '{got.subject}': {', '.join(got.warnings)}", "warning")
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=target, subject=got.subject, hash=mark,
                                    size=len(raw), warnings=warnings, source_ref=it.alt_key,
-                                   version=mm.version_of(phase, it))
+                                   version=mm.version_of(phase, it), src_ref=mm.ref_json(it.ref))
         self._submit(pool, TargetTask(item_id, target, raw, list(got.flags), date, len(raw), import_id, kind=phase,
                                       name=name))
 
@@ -706,6 +706,7 @@ class ConnectorJobRunner(JobRunner):
                       (a.item.version, got.subject, len(got.raw), self.job_id, now(), a.row["id"]))
                 st["updated"] += 1
                 self.log(f"Mirror update {phase} key={key} ref={','.join(r.ref for r in a.refs)} in '{target}': ok")
+        ready: dict[str, list[tuple]] = {}  # target folder -> [(action, ref, mode)] to delete
         for a in an.of(phase, "delete"):
             key, target = a.row["item_key"], a.row["target"]
             if not a.refs:  # gone from the target already (deleted there by hand): only recorded
@@ -717,27 +718,43 @@ class ConnectorJobRunner(JobRunner):
                 self.log(f"Mirror delete {phase} key={key}: the target cannot delete, kept", "warning")
                 continue
             mode = session.delete_mode(target)
-            ok = True
+            kept = False
             for r in a.refs:
                 if mode == DELETE_HARD:  # gone for good: a copy is kept first, or nothing is deleted
                     raw = None
                     if CAP_READBACK in caps:
-                        raw, good = self._mirror_act(session, st, "read before delete", key,
-                                                     lambda: session.read(target, r.ref))
+                        raw, _ = self._mirror_act(session, st, "read before delete", key,
+                                                  lambda: session.read(target, r.ref))
                     if not raw:
-                        ok = False
-                        st["skipped_by_safety"] += 1
+                        kept = True
                         self.log(f"Mirror delete {phase} key={key} ref={r.ref}: no copy could be kept, kept", "warning")
                         continue
                     path = mm.backup_copy(self.job_id, phase, mm.ident_of(phase, self.pst_key, a.row) + r.ref, raw)
                     self.log(f"Mirror delete {phase} key={key} ref={r.ref}: copy kept in {path}")
-                done, good = self._mirror_act(session, st, "delete", key, lambda: session.delete(
-                    target, r.ref, expected_import_id=mm.ident_of(phase, self.pst_key, a.row)))
-                ok = ok and good
-                if good:
-                    self.log(f"Mirror delete {phase} key={key} ref={r.ref} in '{target}': {done}")
-            if ok:
-                self.set_item(a.row["id"], "deleted", f"mirror: deleted at the source ({mode})")
+                ready.setdefault(target, []).append((a, r.ref, mode))
+            if kept:
+                st["skipped_by_safety"] += 1
+                a.row["_kept"] = True
+        done_refs: dict[int, list[bool]] = {}
+        for target, group in ready.items():
+            for i in range(0, len(group), 100):
+                chunk = group[i:i + 100]
+                expected = {ref: mm.ident_of(phase, self.pst_key, a.row) for a, ref, _ in chunk}
+                res, good = self._mirror_act(session, st, "delete", f"{len(chunk)} item(s) in '{target}'",
+                                             lambda: session.delete_many(target, [ref for _, ref, _ in chunk], expected))
+                res = res or {}
+                for a, ref, mode in chunk:
+                    ok = good and ref in res
+                    done_refs.setdefault(id(a), []).append(ok)
+                    self.log(f"Mirror delete {phase} key={a.row['item_key']} ref={ref} in '{target}': "
+                             + (res[ref] if ok else "failed"), "info" if ok else "error")
+                    if good and not ok:
+                        st["errors"] += 1
+        for a in an.of(phase, "delete"):
+            results = done_refs.get(id(a))
+            if results and all(results) and not a.row.get("_kept"):
+                self.set_item(a.row["id"], "deleted", f"mirror: deleted at the source "
+                              f"({session.delete_mode(a.row['target'])})")
                 st["deleted"] += 1
 
     # ------------------------------------------------------------ checks

@@ -52,13 +52,14 @@ UNCONVERTED = "item cannot be converted"
 
 
 UPSERT_ITEM = (
-    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at,version) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at,version,src_ref) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
     "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
     "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
     "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
     "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
-    "job_id=excluded.job_id, updated_at=excluded.updated_at, version=COALESCE(excluded.version, items.version) "
+    "job_id=excluded.job_id, updated_at=excluded.updated_at, version=COALESCE(excluded.version, items.version), "
+    "src_ref=COALESCE(excluded.src_ref, items.src_ref) "
     "RETURNING id")
 # an item left out by a filter: never overwrites a row that is already migrated
 UPSERT_FILTERED = (
@@ -792,7 +793,7 @@ class JobRunner:
     def _upsert_params(self, kind: str, key: str, fkey: str, status: str, **kw) -> tuple:
         return (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, kw.get("target"), kw.get("error"),
                 kw.get("warnings"), kw.get("subject"), kw.get("hash"), kw.get("size"), kw.get("source_ref"), self.job_id,
-                time.time(), kw.get("version"))
+                time.time(), kw.get("version"), kw.get("src_ref"))
 
     def upsert_item(self, kind: str, key: str, fkey: str, status: str, **kw) -> int:
         return db.ex(UPSERT_ITEM, self._upsert_params(kind, key, fkey, status, **kw)).fetchone()[0]

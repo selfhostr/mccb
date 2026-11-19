@@ -421,3 +421,51 @@ def test_exists_error_refuses_every_deletion(client, box):
     assert "source_unlistable" in codes(acc)
     mirror(client, aid)
     assert len(ours(dst, "INBOX")) == 10
+
+
+def test_exists_gets_the_recorded_source_ref(client, box):
+    aid, src, dst = make(client)
+    full(client, aid)
+    uid = src.find("in8@x")[1]
+    src.remove("in8@x")
+    mirror(client, aid)
+    assert list(src.exists_refs.values()) == [uid]
+
+
+def test_folder_gone_from_the_source_deletes_nothing(client, box):
+    aid, src, dst = make(client)
+    full(client, aid)
+    del src.folders[(MAIL, "Projects")]
+    acc = preview(client, aid)
+    assert "source_unlistable" in codes(acc) and "Projects" in str(acc["blocked"])
+    job, rep = mirror(client, aid)
+    assert len(ours(dst, "Projects")) == 4 and rep["mirror"]["mail"]["skipped_by_safety"] == 4
+
+
+def test_untrusted_epoch_refuses_the_folder(client, box):
+    aid, src, dst = make(client)
+    full(client, aid)
+    src.remove("in8@x")
+    src.unstable.add("INBOX")
+    acc = preview(client, aid)
+    assert "uidvalidity_changed" in codes(acc)
+    mirror(client, aid)
+    assert len(ours(dst, "INBOX")) == 10
+
+
+def test_deletes_go_in_batches(client, box, monkeypatch):
+    calls = []
+    real = mf.StoreSession.delete_many
+
+    def spy(self, folder, refs, expected=None):
+        calls.append((folder, len(refs), dict(expected or {})))
+        return real(self, folder, refs, expected)
+    monkeypatch.setattr(mf.StoreSession, "delete_many", spy)
+    aid, src, dst = make(client)
+    full(client, aid)
+    src.remove("in8@x")
+    src.remove("in9@x")
+    job, rep = mirror(client, aid)
+    assert rep["mirror"]["mail"]["deleted"] == 2
+    assert [(f, n) for f, n, _ in calls] == [("INBOX", 2)]
+    assert all(v.startswith("<src-") for v in calls[0][2].values())

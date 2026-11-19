@@ -18,11 +18,12 @@ Safety, in the order it is applied:
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..connectors import registry, wiring
-from ..connectors.base import (CAP_INVENTORY, CAP_MIRROR, CAP_MOVE, MAIL,
+from ..connectors.base import (CAP_INVENTORY, CAP_MIRROR, CAP_MOVE, MAIL, UNSTABLE_EPOCHS,
                                MIRROR_DELETED_FLAG, READ_ONLY_SOURCE_METHODS, TASKS, ConnectorError, Listing,
                                RemoteItem, SourceFolder, SourceItem)
 from . import crash, db
@@ -106,6 +107,28 @@ def split_flags(text: str | None) -> set[str]:
 def version_of(phase: str, it: SourceItem) -> str | None:
     """items.version of a listed item."""
     return canon_flags(it.flags) if phase == MAIL else it.version
+
+
+def ref_json(ref) -> str | None:
+    """items.src_ref: the SourceItem.ref as JSON, None when it is not JSON (it is then never given to exists())."""
+    if ref is None:
+        return None
+    try:
+        text = json.dumps(ref)
+    except (TypeError, ValueError):
+        return None
+    return text if len(text) <= 4000 else None
+
+
+def ref_of(text: str | None):
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
+
+
+def unstable(epoch: str | None) -> bool:
+    return bool(epoch) and any(m in epoch for m in UNSTABLE_EPOCHS)
 
 
 def ident_of(phase: str, pst_key: str, row: dict) -> str:
@@ -219,7 +242,8 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
         an.actions[phase] = []
         an.skipped[phase] = 0
         rows_all = [dict(r) for r in db.q(
-            "SELECT id, item_key, folder, target, status, error, hash, source_ref, version, stamp, subject FROM items "
+            "SELECT id, item_key, folder, target, status, error, hash, source_ref, version, stamp, subject, src_ref "
+            "FROM items "
             "WHERE account_id=? AND pst_key=? AND kind=?", (account_id, pst_key, kind))]
         by_folder: dict[str, dict[str, dict]] = {}
         for r in rows_all:
@@ -247,6 +271,13 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
                          + (f": {listing.problem}" if listing.problem else ""))
                 log(f"Mirror: {phase} folder '{fk}' listed incompletely: no deletion in this pass", "error")
             ok_rows = [r for r in rows.values() if r["status"] == "ok"]
+            shaky = sorted({e for e in [listing.epoch] + [source.key_epoch(r["item_key"]) for r in ok_rows] if unstable(e)})
+            if shaky:
+                an.refused.add((phase, fk))
+                an.block(UIDVALIDITY_CHANGED, f"{phase} folder '{fk}': the keys of the source cannot be trusted "
+                         f"({', '.join(shaky)}): run a full pass")
+                log(f"Mirror: folder '{fk}' refused, keys not trusted ({', '.join(shaky)})", "error")
+                continue
             if listing.epoch:
                 epochs = {e for e in (source.key_epoch(r["item_key"]) for r in ok_rows) if e is not None}
                 if epochs and epochs != {listing.epoch}:
@@ -288,6 +319,10 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
                     and r["folder"] not in known_folders]
         if vanished:
             an.skipped[phase] += len(vanished)
+            names = sorted({r["folder"] for r in vanished})
+            an.block(SOURCE_UNLISTABLE, f"{phase}: folder(s) no longer at the source (deleted or renamed): "
+                     f"{', '.join(names[:5])}{' ...' if len(names) > 5 else ''}; their {len(vanished)} item(s) are "
+                     "not deleted on the target")
             log(f"Mirror: {len(vanished)} {phase} item(s) in folder(s) the source no longer has: not deleted "
                 "(no listing of the folder confirms it)", "warning")
         # moves: same Message-ID gone from one folder, new in another (one to one)
@@ -352,8 +387,9 @@ def _confirm_gone(an: Analysis, source, folders: list[SourceFolder], retry, log)
         for fk, group in groups.items():
             f = by_key.get((phase, fk))
             keys = [a.row["item_key"] for a in group]
+            refs = {a.row["item_key"]: ref_of(a.row.get("src_ref")) for a in group}
             try:
-                there = retry(lambda: source.exists(f, keys)) if f is not None else {}
+                there = retry(lambda: source.exists(f, keys, refs)) if f is not None else {}
             except ConnectorError as e:
                 an.block(SOURCE_UNLISTABLE, f"{phase} folder '{fk}': the source could not confirm the deletions: {e}")
                 log(f"Mirror: the source could not confirm the deletions in '{fk}' ({e}): no deletion in this pass",
