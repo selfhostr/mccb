@@ -439,6 +439,32 @@ class DavClient:
                 out.add(unquote(seg))
         return out
 
+    def names_etags(self, collection_url: str) -> dict[str, str]:
+        """{name (as names() gives it): etag, '' when the server gives none} of the non-collection resources."""
+        from urllib.parse import unquote, urlparse
+        out: dict[str, str] = {}
+        for href, et in self.etags(collection_url).items():
+            seg = (urlparse(href).path or href).rstrip("/").rsplit("/", 1)[-1]
+            if seg:
+                out[unquote(seg)] = et
+        return out
+
+    def delete_item(self, collection_url: str, filename: str, etag: str | None = None) -> int:
+        """DELETE of one resource, with If-Match when the etag is known. 2xx deleted, 404 gone already, 412 changed
+        since it was listed; any other answer raises."""
+        url = self._item_url(collection_url, filename)
+        if etag:
+            return self.delete_if_match(url, etag)
+        try:
+            resp = self._send("DELETE", url)
+        except httpx.HTTPError as e:
+            raise DavError(f"DELETE {url}: {e.__class__.__name__}: {e}", temporary=True) from e
+        sc = resp.status_code
+        if 200 <= sc < 300 or sc == 404:
+            return sc
+        raise DavError(f"DELETE {url} -> HTTP {sc}", temporary=(sc >= 500 or sc == 429), status=sc,
+                       retry_after=_retry_after(resp))
+
     # ---- duplicate search (dedup_runs.py) -------------------------------
     def etags(self, collection_url: str) -> dict[str, str]:
         """{absolute href: etag ('' when the server gives none)} of the non-collection resources."""

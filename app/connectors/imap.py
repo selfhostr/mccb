@@ -10,12 +10,13 @@ from datetime import datetime, timedelta, timezone
 from email.parser import BytesHeaderParser
 from typing import Iterator
 
-from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, parse_list,
-                           personal_prefix, quote, wrap_exc)
+from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, find_special,
+                           parse_list, personal_prefix, quote, wrap_exc)
 from . import oauth, registry
-from .base import (CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK,
-                   IMPORT_HEADER, MAIL, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem, Source,
-                   SourceFolder, SourceItem, Target, TargetSession, subject_of)
+from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
+                   CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, DELETE_SOFT, DELETE_TRASH,
+                   IMPORT_HEADER, MAIL, MIRROR_DELETED_FLAG, Changes, ConnectorError, FetchedItem, FolderPlan, Listing,
+                   OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
 
 FETCH_CHUNK = 500  # UIDs per listing FETCH
 LIST_ITEMS = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
@@ -23,6 +24,7 @@ LIST_ITEMS = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSA
 VIRTUAL_FLAGS = {"\\all", "\\flagged", "\\important"}
 SYSTEM_FLAGS = {"\\seen", "\\answered", "\\flagged", "\\draft"}  # \Recent is refused by APPEND, \Deleted not copied
 KEYWORD_RE = re.compile(r"^[A-Za-z0-9$_.+-]+$")
+KEY_RE = re.compile(r"^[0-9a-f]{8}-(\d+)-(\d+)$")  # "<folder hash>-<UIDVALIDITY>-<UID>" (see item_keys)
 MONTHS = {m: i + 1 for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
                                            "Nov", "Dec"))}
 INTERNALDATE_RE = re.compile(r"(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})")
@@ -316,6 +318,36 @@ class ImapSource(Source):
         high = max(uids, default=last)
         return Changes(self._items(folder, uv, recs), json.dumps({"uv": uv, "uid": high}), reset=not valid)
 
+    # ---- mirror: EXAMINE, SEARCH and FETCH (BODY.PEEK) only, as everywhere in this source
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """The whole folder (UID SEARCH ALL + FETCH): complete, or an error. Messages flagged \\Deleted are gone."""
+        with _guard():
+            uv = self._select(folder)
+            items = self._items(folder, uv, self._records(self._uids(("ALL",))))
+        return Listing(items, complete=True, epoch=str(uv) if uv else None)
+
+    def key_epoch(self, key: str) -> str | None:
+        m = KEY_RE.match(key)
+        return m.group(1) if m else None
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """UID SEARCH UID <uid> UNDELETED in the folder opened read-only, for keys of the current UIDVALIDITY. Any
+        other key (another UIDVALIDITY, no UID in it) cannot be checked: answered True (kept)."""
+        out = {k: True for k in keys}
+        with _guard():
+            uv = self._select(folder)
+            wanted = {}
+            for k in keys:
+                m = KEY_RE.match(k)
+                if m and uv and int(m.group(1)) == uv:
+                    wanted[int(m.group(2))] = k
+            for i in range(0, len(wanted), FETCH_CHUNK):
+                chunk = sorted(wanted)[i:i + FETCH_CHUNK]
+                found = set(self._uids(("UID", ",".join(str(u) for u in chunk), "UNDELETED")))
+                for u in chunk:
+                    out[wanted[u]] = u in found
+        return out
+
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         uv, uid = item.ref
         with _guard():
@@ -413,9 +445,87 @@ class ImapSession(TargetSession):
     def has_folder(self, name: str) -> bool | None:
         return name.upper() == "INBOX" or name in self._existing
 
+    # ---- mirror: only messages carrying one of our import ids, one UID at a time
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """{"<namespace-key>": [RemoteItem(uid, flags)]}: SEARCH HEADER for the namespace, then the header of each
+        candidate compared exactly. Messages flagged \\Deleted are not listed (deleted already)."""
+        prefix = f"{namespace}-"
+        out: dict[str, list[RemoteItem]] = {}
+        with _guard():
+            try:
+                cands = self.conn.search_header(folder, IMPORT_HEADER, prefix)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    return {}
+                raise
+            for uid, (flags, vals) in self.conn.flags_and_header(folder, cands, IMPORT_HEADER).items():
+                if "\\deleted" in {f.lower() for f in flags}:
+                    continue
+                for v in vals:
+                    bare = v[1:-1] if v.startswith("<") and v.endswith(">") else v
+                    if bare.startswith(prefix):
+                        out.setdefault(f"<{bare}>", []).append(RemoteItem(uid, keep_flags(flags)))
+        return out
+
+    def _trash(self) -> str | None:
+        if getattr(self, "_trash_name", 0) == 0:
+            with _guard():
+                self._trash_name = find_special(self.conn.list(), "trash")
+        return self._trash_name
+
+    def delete_mode(self, folder: str) -> str:
+        trash = self._trash()
+        return DELETE_TRASH if trash and trash != folder else DELETE_SOFT
+
+    def _check_expected(self, folder: str, uid: str, expected: str | None) -> bool:
+        """True when the message is there and carries `expected` (exactly); False when it is gone."""
+        got = self.conn.flags_and_header(folder, [uid], IMPORT_HEADER)
+        if uid not in got:
+            return False
+        if expected is not None:
+            bare = expected[1:-1] if expected.startswith("<") else expected
+            if not any(v in (bare, f"<{bare}>") for v in got[uid][1]):
+                raise ConnectorError(f"UID {uid} of '{folder}' does not carry {expected}: not deleted",
+                                     ConnectorError.REJECTED)
+        return True
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        """To the trash of the target (MOVE, or COPY + \\Deleted + UID EXPUNGE of this UID only), marked
+        $MccbMirrorDeleted. In the trash itself, or without one: flagged \\Deleted + mark, never expunged."""
+        mode = self.delete_mode(folder)
+        with _guard():
+            if not self._check_expected(folder, ref, expected_import_id):
+                return mode  # gone already
+            try:
+                self.conn.uid_store(folder, [ref], "+", [MIRROR_DELETED_FLAG])
+            except ImapError as e:
+                if e.kind != "perm":  # a server refusing keywords: the deletion matters more than the mark
+                    raise
+            if mode == DELETE_TRASH:
+                self.conn.uid_move(folder, [ref], self._trash())
+            else:
+                self.conn.uid_store(folder, [ref], "+", ["\\Deleted"])
+        return mode
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        with _guard():
+            for op, flags in (("+", add), ("-", remove)):
+                try:
+                    self.conn.uid_store(folder, [ref], op, flags)
+                except ImapError as e:
+                    system = [f for f in flags if f.startswith("\\")]
+                    if e.kind != "perm" or len(system) == len(flags):
+                        raise
+                    self.conn.uid_store(folder, [ref], op, system)  # keywords refused by this server
+
+    def move(self, folder: str, ref: str, to_folder: str) -> str | None:
+        with _guard():
+            return self.conn.uid_move(folder, [ref], to_folder)
+
 
 class ImapTarget(Target):
-    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK})
+    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK,
+                              CAP_INVENTORY, CAP_DELETE, CAP_SET_FLAGS, CAP_MOVE})
     make_params = staticmethod(params_of)
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
@@ -459,7 +569,8 @@ _OAUTH_CONNECTION = _SERVER + (
 
 registry.register(registry.ConnectorSpec(
     kind="imap", label="IMAP", description="Any IMAP mailbox, read without altering it or written to.",
-    source=registry.Role(ImapSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+    source=registry.Role(ImapSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL,
+                                                     CAP_MIRROR}),
                          _CONNECTION, identity),
     target=registry.Role(ImapTarget, (MAIL,), ImapTarget.capabilities,
                          _CONNECTION + (registry.Field("root_folder", "Root folder",
@@ -467,7 +578,8 @@ registry.register(registry.ConnectorSpec(
 ))
 registry.register(registry.ConnectorSpec(
     kind="imap_oauth2", label="IMAP (OAuth2)", description="An IMAP mailbox reached with an OAuth2 token (XOAUTH2).",
-    source=registry.Role(ImapOAuthSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+    source=registry.Role(ImapOAuthSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL,
+                                                     CAP_MIRROR}),
                          _OAUTH_CONNECTION, identity),
     target=registry.Role(ImapOAuthTarget, (MAIL,), ImapOAuthTarget.capabilities,
                          _OAUTH_CONNECTION + (registry.Field("root_folder", "Root folder",

@@ -9,8 +9,9 @@ from typing import Iterator
 
 from ..server.dav import DavClient, DavError
 from . import registry
-from .base import (CALENDAR, CAP_FOLDERS, CAP_READBACK, CONTACTS, TASKS, ConnectorError, FetchedItem, FolderPlan,
-                   OutgoingItem, Source, SourceFolder, SourceItem, Target, TargetSession)
+from .base import (CALENDAR, CAP_DELETE, CAP_FOLDERS, CAP_INVENTORY, CAP_MIRROR, CAP_READBACK, CAP_UPDATE, CONTACTS,
+                   DELETE_HARD, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem, RemoteItem, Source,
+                   SourceFolder, SourceItem, Target, TargetSession)
 from .imap import folder_hash
 
 
@@ -31,6 +32,7 @@ class DavSession(TargetSession):
         self.config = config
         self.password = secrets.get("password") or ""
         self.client: DavClient | None = None
+        self._etags: dict[tuple[str, str], str] = {}  # (collection, name) -> etag seen by the last inventory()
 
     @property
     def connected(self) -> bool:
@@ -147,6 +149,40 @@ class DavSession(TargetSession):
             raise convert(e) from e
         return text.encode("utf-8") if text is not None else None
 
+    # ---- mirror: only the resources named in `names` (ours), with If-Match on what the inventory saw
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        try:
+            found = self._c().names_etags(folder)
+        except DavError as e:
+            if e.status == 404:
+                return {}
+            raise convert(e) from e
+        out = {}
+        for name, et in found.items():
+            if names and name in names:
+                self._etags[(folder, name)] = et
+                out[name] = [RemoteItem(name, version=et or None)]
+        return out
+
+    def delete_mode(self, folder: str) -> str:
+        return DELETE_HARD  # no trash in DAV: the runner keeps a copy (read()) before deleting
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        if expected_import_id is not None and expected_import_id != ref:
+            raise ConnectorError(f"{ref} is not {expected_import_id}: not deleted", ConnectorError.REJECTED)
+        try:
+            sc = self._c().delete_item(folder, ref, self._etags.get((folder, ref)))
+        except DavError as e:
+            raise convert(e) from e
+        if sc == 412:
+            raise ConnectorError(f"{ref} changed on the target since it was listed: not deleted",
+                                 ConnectorError.REJECTED)
+        self._etags.pop((folder, ref), None)
+        return DELETE_HARD
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        return self.put(folder, OutgoingItem(item.kind, item.raw, item.import_id, item.flags, item.internal_date, ref))
+
 
 def collection_slug(dav_kind: str, component: str, label: str) -> str:
     """Path segment of a collection created for a source folder: readable, stable across runs, distinct per kind
@@ -173,7 +209,7 @@ def uid_name(raw: bytes, ext: str) -> str | None:
 
 
 class DavTarget(Target):
-    capabilities = frozenset({CAP_READBACK})
+    capabilities = frozenset({CAP_READBACK, CAP_INVENTORY, CAP_DELETE, CAP_UPDATE})
     dav_kind = "caldav"
     component = "VEVENT"
 
@@ -254,14 +290,37 @@ class DavSource(Source):
                 seen.add(kind)
         return out
 
+    def _key(self, folder: SourceFolder, name: str) -> str:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - identifier, not security
+        return f"{folder_hash(folder.path)}-{digest}"
+
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
+        """Every resource with its etag (`version`: the mirror updates an item whose etag changed)."""
         try:
-            names = sorted(self._c().names(folder.ref))
+            found = self._c().names_etags(folder.ref)
         except DavError as e:
             raise convert(e) from e
-        for name in names:
-            digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - identifier, not security
-            yield SourceItem(key=f"{folder_hash(folder.path)}-{digest}", ref=name)
+        for name in sorted(found):
+            yield SourceItem(key=self._key(folder, name), ref=name, version=found[name] or None)
+
+    # ---- mirror: PROPFIND and GET only
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        return Listing(list(self.iter_items(folder)))
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """GET of each resource whose name was recorded, else a fresh listing of the collection."""
+        out = {}
+        named = {k: r for k, r in (refs or {}).items() if isinstance(r, str) and k in keys}
+        try:
+            for k, name in named.items():
+                out[k] = self._c().get(folder.ref, name) is not None
+            rest = [k for k in keys if k not in out]
+            if rest:
+                listed = {self._key(folder, n) for n in self._c().names(folder.ref)}
+                out.update({k: k in listed for k in rest})
+        except DavError as e:
+            raise convert(e) from e
+        return out
 
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         try:
@@ -302,9 +361,9 @@ _FIELDS = (
 
 registry.register(registry.ConnectorSpec(
     kind="caldav", label="CalDAV", description="Calendars and tasks on a CalDAV server.",
-    source=registry.Role(CalDavSource, (CALENDAR, TASKS), frozenset({CAP_FOLDERS}), _FIELDS, identity),
+    source=registry.Role(CalDavSource, (CALENDAR, TASKS), frozenset({CAP_FOLDERS, CAP_MIRROR}), _FIELDS, identity),
     target=registry.Role(CalDavTarget, (CALENDAR, TASKS), CalDavTarget.capabilities, _FIELDS, identity)))
 registry.register(registry.ConnectorSpec(
     kind="carddav", label="CardDAV", description="Address books on a CardDAV server.",
-    source=registry.Role(CardDavSource, (CONTACTS,), frozenset({CAP_FOLDERS}), _FIELDS, identity),
+    source=registry.Role(CardDavSource, (CONTACTS,), frozenset({CAP_FOLDERS, CAP_MIRROR}), _FIELDS, identity),
     target=registry.Role(CardDavTarget, (CONTACTS,), CardDavTarget.capabilities, _FIELDS, identity)))

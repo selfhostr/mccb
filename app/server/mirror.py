@@ -293,14 +293,14 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
                 r = rows.get(it.key)
                 if wants(r):
                     if policy.has_filters and kind != "contact" and policy.reason(it.date, it.size if phase == MAIL else None):
-                        continue  # left out by a filter: the job marks it as a normal run does
+                        continue  # left out by a filter of the policy: not added, as in a normal run
                     adds.append(Action("add", phase, row=r, folder=f, item=it))
                 elif r["status"] == "ok":
                     if phase == MAIL:
                         src = canon_flags(it.flags)
                         if r["version"] is None:
-                            adds_flags = Action("record", phase, row=r, folder=f, item=it)  # resolved on inventory
-                            an.actions[phase].append(adds_flags)
+                            # no recorded flags (migrated by an earlier version): compared with the target
+                            an.actions[phase].append(Action("record", phase, row=r, folder=f, item=it))
                         elif r["version"] != src:
                             old, new = split_flags(r["version"]), split_flags(src)
                             an.actions[phase].append(Action("flags", phase, row=r, folder=f, item=it,

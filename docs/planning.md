@@ -107,6 +107,71 @@ Cutover, step by step:
 5. Run the final resync (`mode: "delta"`) for every mailbox, then compare again.
 6. Check the reports (`totals`, `oversized`, `filtered`), then retire the old mailboxes yourself. mccb never deletes anything at the source.
 
+A delta pass only adds. A mail deleted at the source stays on the target, and a contact changed at the source keeps its old version. When the users keep working on the old server for a while, use the mirror instead.
+
+## Mirror
+
+A mirror pass makes the target follow the source again, after a first migration of the mailbox. Between two mail servers, it:
+
+- adds what is new at the source, like a delta pass;
+- deletes on the target what disappeared from the source: mail, events, contacts and tasks;
+- updates what changed at the source: the flags of a mail (read, starred, answered, draft, keywords), the folder of a mail moved to another folder, and events, contacts and tasks whose version (etag) changed.
+
+It never writes to the source: no deletion, no flag, no mark of any kind. The source is reached through a wrapper that only lets reads through. A PST is a snapshot and is not mirrored.
+
+Mirror today: IMAP to IMAP (mail), CalDAV to CalDAV (events and tasks), CardDAV to CardDAV (contacts). The other connectors take part as they declare the capabilities of [Connectors](connectors.md#mirror-mode); a source that does not is refused with `source_unlistable`.
+
+### Turn it on and run it
+
+1. Enable the option on the mailbox: `PUT /api/accounts/{id} {"mirror": true}` (also accepted as `options.mirror`). `GET /api/accounts/{id}` returns `mirror`. A mailbox without it is refused with `mirror_off`.
+2. Look at what a pass would do: `POST /api/runs {account_ids, mode: "mirror"}`. This is a dry run, the default: it connects, lists and compares, and writes nothing anywhere and creates no job.
+3. Run it: the same request with `"dry_run": false`. One job per mailbox is created, with the mode `mirror`.
+
+| field | default | meaning |
+|---|---|---|
+| `dry_run` | `true` | compute only |
+| `max_delete_percent` | `20` | refuse the deletions of a kind when more than this share of its migrated items would be deleted |
+| `allow_large_delete` | `false` | lift `too_many_deletes` and `source_empty` |
+
+The dry run answers per mailbox:
+
+```json
+{"accounts": [{"account_id": 4, "email": "ana@example.org", "ready": true,
+  "to_add": {"mail": 12, "calendar": 0, "contacts": 1, "tasks": 0},
+  "to_update": {"mail": 30, "calendar": 2, "contacts": 0, "tasks": 0},
+  "to_delete": {"mail": 3, "calendar": 1, "contacts": 0, "tasks": 0},
+  "blocked": [],
+  "sample": [{"kind": "mail", "action": "delete", "detail": "delete", "folder": "INBOX", "subject": "Lunch", "date": ""}]}]}
+```
+
+`sample` holds 20 actions at most, deletions first, subjects cut to 80 characters. In it, a move and a change of flags are `update`, and `detail` says which. With `dry_run: false` the answer is `{"accounts": [{account_id, email, ready, blocked, job_id?}], "jobs": [...]}`, and only the codes known without connecting are checked there. The job checks every rule again when it runs.
+
+The job, `GET /api/jobs/{id}`, has `mirror: {options, blocked, mail: {...}, calendar: {...}, contacts: {...}, tasks: {...}}`, each kind with `added`, `updated`, `deleted`, `skipped_by_safety` and `errors`. The report has the same `mirror` section, and `totals.<kind>.mirror`. The log has one line per action, with the key, the identifier on the target, the folder and the result. It never has a subject or any content.
+
+### Safety rules
+
+| code | when | what happens |
+|---|---|---|
+| `mirror_off` | the mailbox does not have the option | nothing |
+| `no_prior_run` | the mailbox has never finished a job | nothing: run a first full pass |
+| `target_unreachable` | a target cannot be reached or listed | nothing |
+| `source_unlistable` | the source cannot be mirrored, a folder could not be listed, a listing was incomplete, the source could not confirm a deletion, or a folder is no longer at the source | no deletion at all in this pass; additions and updates go on |
+| `uidvalidity_changed` | the keys of a folder were reset (IMAP UIDVALIDITY, or an epoch marked `renamed-or-moved` / `unverified`) | that folder is left alone: run a full pass |
+| `source_empty` | the source lists nothing for a kind while items of it were migrated | no deletion of that kind, unless `allow_large_delete` |
+| `too_many_deletes` | more than `max_delete_percent` % of the migrated items of a kind would be deleted | no deletion of that kind, unless `allow_large_delete` |
+
+`ready` is true when nothing is blocked. A job that runs with a non-fatal code ends `done_with_errors`, with the code in `error`, and the deletions held back are counted in `skipped_by_safety`.
+
+Other rules:
+
+- **Only what mccb wrote is touched.** The mirror works from the `items` table: an item is deleted or updated only if mccb migrated it (status `ok`), and it is found on the target by its import id (mail) or its resource name (DAV). The content the target had before the migration, and mail that arrived on the target directly, are never in that list.
+- **A deletion needs proof.** The folder must have been listed completely and without error in this pass, and the source is asked once more, item by item, just before deleting. A folder that is no longer listed (deleted or renamed at the source) deletes nothing.
+- **Mail goes to the trash.** A deleted mail is moved to the trash folder of the target and marked `$MccbMirrorDeleted`, so that it can be found and restored. Without a trash folder, or in the trash itself, it is flagged `\Deleted` and marked, and never expunged by mccb. DAV has no trash: before deleting an event, a contact or a task, mccb keeps a copy under `<data>/mirror-trash/job-<id>/`, and deletes nothing it could not copy. The DAV deletion uses `If-Match`: an item changed on the target since the listing is not deleted.
+- **Idempotent.** A pass right after another finds nothing to do and writes nothing. An item deleted at the source is recorded as `deleted`; if it comes back at the source, the next pass copies it again.
+- **What is compared.** For mail, the flags at the source against those recorded when it was last written; items migrated before this version have no record, and their flags are compared once with the target. A mail moved to another folder at the source is moved on the target (same Message-ID, gone from one folder, new in the other), and keeps its import id. For events, contacts and tasks, the etag at the source; an item whose etag is unknown is never updated. Changes made on the target to our items are overwritten by the next change at the source.
+
+Changing the target of a mailbox forgets its items: the next mirror pass then sees everything as new and deletes nothing.
+
 ## Mailboxes as CSV
 
 See [Import mailboxes](import-accounts.md): the file can carry the PST file name, the content toggles and the settings of a source, and `GET /api/accounts/export-csv` writes the same columns back, never a password.
