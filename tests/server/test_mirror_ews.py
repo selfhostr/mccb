@@ -264,7 +264,7 @@ def test_the_source_is_never_written(servers):
     src_fake.remove("m2")
     inbox = folder_of(folders, "Inbox")
     s.changed_since(inbox, "log-0")
-    s.exists(list(keys.values()) + ["gone"])
+    s.exists(inbox, list(keys), dict(keys))
     for key in keys:
         s.key_epoch(key)
     s.close()
@@ -355,17 +355,30 @@ def test_changed_since_reports_read_flags_and_confirmed_deletions(servers):
     assert "GetItem" in src_fake.calls[calls:]
 
 
-def test_exists_trusts_only_item_not_found(servers):
+def test_exists_reads_each_item_with_its_recorded_id(servers):
     src_fake, _ = servers
     seed(src_fake)
     s = source()
-    assert s.exists(["m0", "nope", "m0"]) == {"m0": True, "nope": False}
+    inbox = folder_of(s.folders(), "Inbox")
+    k0, k1, k2 = (xb.item_key(inbox.path, r) for r in ("m0", "m1", "m2"))
+    src_fake.remove("m1")
+    other = xb.item_key(inbox.path, "m3")
+    calls = len(src_fake.calls)
+    got = s.exists(inbox, [k0, k1, k2, other], {k0: "m0", k1: "m1", k2: None, other: "m4"})
+    # m1: ErrorItemNotFound -> gone. No id recorded, or an id that does not give back the key: kept
+    assert got == {k0: True, k1: False, k2: True, other: True}
+    assert src_fake.calls[calls:] == ["GetItem"]  # one batch, read only
+    assert s.exists(inbox, [k1], {k1: ["m1"]}) == {k1: True}  # not an id: cannot tell
+    assert s.exists(inbox, [k1], None) == {k1: True}
+    work = folder_of(s.folders(), "Inbox", "Work")
+    assert s.exists(work, [k1], {k1: "m1"}) == {k1: True}  # a key of another folder: cannot tell
     src_fake.fail_op["GetItem"] = "ErrorInternalServerError"
     with pytest.raises(ConnectorError):
-        s.exists(["m0"])
+        s.exists(inbox, [k1], {k1: "m1"})
     src_fake.fail_op["GetItem"] = "ErrorInvalidIdMalformed"
     with pytest.raises(ConnectorError):  # not "not found": no deletion on a doubt
-        s.exists(["m0"])
+        s.exists(inbox, [k1], {k1: "m1"})
+    assert src_fake.mutations == []
 
 
 # ------------------------------------------------------------------ source: renamed or moved folders
@@ -465,15 +478,18 @@ def test_never_deletes_what_mccb_did_not_write(servers):
     ours = t.put("mail:@inbox", out_item(MAIL, MIME))
     dst.add_item("id-inbox", mail_xml(1), rid="theirs")
     t.inventory("mail:@inbox", "src-1")
-    for refs in (["theirs"], [ours, "theirs"]):
-        with pytest.raises(ConnectorError) as err:
-            t.delete_many("mail:@inbox", refs)
-        assert err.value.kind == ConnectorError.REJECTED
+    with pytest.raises(ConnectorError) as err:
+        t.delete("mail:@inbox", "theirs")
+    assert err.value.kind == ConnectorError.REJECTED
+    assert t.delete_many("mail:@inbox", ["theirs"]) == {}  # left out of the answer: a failure, nothing done
+    assert t.delete_many("mail:@inbox", [ours], {ours: "<src-1-zzz>"}) == {}  # not the expected copy
+    with pytest.raises(ConnectorError):
+        t.delete("mail:@inbox", ours, "<src-1-zzz>")
     with pytest.raises(ConnectorError):
         t.update("mail:@inbox", "theirs", out_item(MAIL, MIME))
     with pytest.raises(ConnectorError):
         t.set_flags("mail:@inbox", "theirs", ["\\Seen"], [])
-    assert ids_of(dst, "id-inbox") == sorted([ours, "theirs"])  # nothing deleted, not even ours
+    assert ids_of(dst, "id-inbox") == sorted([ours, "theirs"])  # nothing deleted
     assert dst.deletes == [] and dst.updates == [] and dst.items["theirs"]["el"].findtext(fx.t("IsRead")) == "true"
     # an item whose import id changed since the inventory is left alone too
     for p in dst.items[ours]["el"].findall(fx.t("ExtendedProperty")):
@@ -482,6 +498,33 @@ def test_never_deletes_what_mccb_did_not_write(servers):
     with pytest.raises(ConnectorError):
         t.delete("mail:@inbox", ours)
     assert ours in dst.items
+
+
+def test_delete_many_does_ours_and_leaves_the_others(servers):
+    _, dst = servers
+    t = session()
+    a = t.put("mail:@inbox", out_item(MAIL, MIME, "<src-1-a>"))
+    b = t.put("mail:@inbox", out_item(MAIL, MIME, "<src-1-b>"))
+    dst.add_item("id-inbox", mail_xml(1), rid="theirs")
+    t.inventory("mail:@inbox", "src-1")
+    got = t.delete_many("mail:@inbox", [a, "theirs", b, "gone"], {a: "<src-1-a>", b: "<src-1-x>"})
+    assert got == {a: DELETE_TRASH, "gone": DELETE_TRASH}  # b: not the expected copy, theirs: not ours
+    assert ids_of(dst, "id-inbox") == sorted([b, "theirs"]) and dst.deletes[-1][1] == [a]
+
+
+def test_inventory_by_resource_name_for_events_contacts_tasks(servers):
+    import hashlib
+    _, dst = servers
+    t = session()
+    rid = t.put("contacts:@default", out_item(CONTACTS, pim.contact_to_vcard(pim.Contact(uid="c", full_name="A")), "<src-1-c>"))
+    name = hashlib.sha256(b"<src-1-c>").hexdigest()[:32] + ".vcf"  # what the runner records (items.hash)
+    inv = t.inventory("contacts:@default", "src-1", {name, "other.vcf"})
+    assert [r.ref for r in inv[name]] == [rid] and "other.vcf" not in inv
+    assert t.delete("contacts:@default", rid, name) == DELETE_TRASH  # the name stands for the expected import id
+    rid = t.put("contacts:@default", out_item(CONTACTS, pim.contact_to_vcard(pim.Contact(uid="d", full_name="B")), "<src-1-d>"))
+    with pytest.raises(ConnectorError):
+        t.delete("contacts:@default", rid, name)
+    assert rid in dst.items
 
 
 # ------------------------------------------------------------------ target: deletions
@@ -505,7 +548,7 @@ def test_delete_moves_to_deleted_items_never_hard(servers):
     assert cats == [MIRROR_DELETED_FLAG]  # found again to undo
     assert dst.items[f"trashed-{event}"]["el"].find(fx.t("Categories")) is not None  # the series kept its own
     calls = len(dst.deletes)
-    assert t.delete("mail:@inbox", mail) == DELETE_TRASH  # already gone: not an error, nothing sent
+    assert t.delete("mail:@inbox", mail, "<src-1-a>") == DELETE_TRASH  # already gone: not an error, nothing sent
     assert len(dst.deletes) == calls
 
 
@@ -677,6 +720,7 @@ def test_one_mirror_pass_end_to_end(servers):
     gone = set(k for k in copied if k.startswith(xb.folder_hash(["Inbox"]))) - {i.key for i in listing.items}
     assert listing.complete and gone == {xb.item_key(["Inbox"], "m4")}
     assert all(s.key_epoch(k) == listing.epoch for k in gone)  # not renamed: the deletion may go on
+    assert s.exists(inbox, list(gone), {k: "m4" for k in gone}) == {k: False for k in gone}  # confirmed by GetItem
     inv = t.inventory("mail:@inbox", "src-1")
     for k in gone:
         for r in inv[f"<src-1-{k}>"]:

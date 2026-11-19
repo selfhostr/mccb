@@ -3,6 +3,7 @@ the neutral model of pim.py. Tested against a simulated server only, see docs/ex
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -1018,14 +1019,28 @@ class EwsSource(Source):
                     items[rid] = it
                 else:
                     deleted.append(rid)
-        gone = self.exists([r for r in dict.fromkeys(deleted) if r and r not in items])
-        out = Changes(list(items.values()), state or None, reset=reset)
-        # not a field of base.Changes yet: read with getattr(changes, "removed", []) by the mirror
-        out.removed = [xb.item_key(folder.path, rid) for rid, there in gone.items() if not there]  # type: ignore[attr-defined]
-        return out
+        gone = self._present([r for r in dict.fromkeys(deleted) if r and r not in items])
+        return Changes(list(items.values()), state or None, reset=reset,
+                       removed=[xb.item_key(folder.path, rid) for rid, there in gone.items() if not there])
 
     # ---- mirror. READ ONLY: GetFolder, SyncFolderItems, GetItem. Never a write, a flag, a move at the source.
-    def exists(self, refs: list[str]) -> dict[str, bool]:
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """{key: still at the source}, read item by item (GetItem) with the item id recorded when it was copied.
+        False only when GetItem answers ErrorItemNotFound for an id that gives back this very key in this folder; no
+        id, an id of another key, or any doubt: True (kept). Other errors are raised: nothing is deleted."""
+        refs = refs or {}
+        out = {k: True for k in keys}
+        ids: dict[str, str] = {}
+        for k in keys:
+            rid = refs.get(k)
+            if isinstance(rid, str) and rid and xb.item_key(folder.path, rid) == k:
+                ids[k] = rid
+        present = self._present(list(ids.values()))
+        for k, rid in ids.items():
+            out[k] = present.get(rid, True)
+        return out
+
+    def _present(self, refs: list[str]) -> dict[str, bool]:
         """{item id: still at the source}. False only when GetItem answers ErrorItemNotFound; any other error is
         raised, so that nothing is deleted on a doubt."""
         c = self._c()
@@ -1224,6 +1239,11 @@ class EwsSource(Source):
 
 
 # ------------------------------------------------------------------ target
+def _name_stem(import_id: str) -> str:
+    """The resource name the runner derives from an import id, without its extension (connector_runner)."""
+    return hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:32]
+
+
 class EwsSession(TargetSession):
     def __init__(self, config: dict, secrets: dict, root: str | None):
         self.config = config
@@ -1442,7 +1462,7 @@ class EwsSession(TargetSession):
     # -- mirror: only items carrying OUR MccbImportId, checked on the server right before any change
     def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
         """{import id: [RemoteItem(item id, flags, ChangeKey)]} of the items of the folder written by us under this
-        namespace. Read only. Raises (transient) when the folder changed during the paging: an item skipped by the
+        namespace, also under their resource name when it is in `names` (events, contacts, tasks). Read only. Raises (transient) when the folder changed during the paging: an item skipped by the
         offsets would be taken as missing and written twice."""
         kind = xb.parse_spec(folder)[0]
         target = self._folder_xml(folder)
@@ -1454,6 +1474,7 @@ class EwsSession(TargetSession):
         restriction = (f'<t:Contains ContainmentMode="Prefixed" ContainmentComparison="IgnoreCase">{IMPORT_URI}'
                        f"<t:Constant Value={quoteattr(prefix)}/></t:Contains>")
         out: dict[str, list[RemoteItem]] = {}
+        stems = {n.split(".", 1)[0]: n for n in names or ()}
         offset, total = 0, None
         while True:
             msg = self._c().one(
@@ -1480,33 +1501,46 @@ class EwsSession(TargetSession):
                     ext = _ext_values(el)
                     flags = xb.flags_of(_bool(el, "IsRead"), _int(ext.get(int(TAG_FLAG, 0))) == xb.FLAG_FLAGGED,
                                         _int(ext.get(int(TAG_VERB, 0))), _bool(el, "IsDraft"))
-                out.setdefault(value, []).append(RemoteItem(ident.get("Id"), flags, ident.get("ChangeKey") or None))
+                remote = RemoteItem(ident.get("Id"), flags, ident.get("ChangeKey") or None)
+                out.setdefault(value, []).append(remote)
+                name = stems.get(_name_stem(value))
+                if name is not None:  # events, contacts, tasks: the runner knows them by their resource name
+                    out.setdefault(name, []).append(remote)
                 self._ours[ident.get("Id")] = value
             if root.get("IncludesLastItemInRange", "true").lower() == "true" or not got:
                 break
             offset += len(got)
         return out
 
-    def _owned(self, refs: list[str]) -> dict[str, ET.Element | None]:
-        """{item id: the item, None when already gone}, read from the server right now. Raises (rejected), before any
-        change, when one of them does not carry our MccbImportId, or another one than inventory() saw."""
+    def _owned(self, refs: list[str], expected: dict[str, str] | None = None
+               ) -> tuple[dict[str, ET.Element | None], dict[str, str]]:
+        """({item id: the item, None when already gone}, {item id: why it is refused}), read from the server right
+        now. Refused: no MccbImportId of ours, another one than `expected` asks, or than inventory() saw."""
         shape = ("<t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>" + IMPORT_URI
                  + '<t:FieldURI FieldURI="item:Categories"/></t:AdditionalProperties>')
-        out: dict[str, ET.Element | None] = {}
+        expected = expected or {}
+        found: dict[str, ET.Element | None] = {}
+        refused: dict[str, str] = {}
         refs = [r for r in dict.fromkeys(refs) if r]
         for i in range(0, len(refs), GET_BATCH):
             for rid, el in self._c().get_items(refs[i:i + GET_BATCH], shape):
                 if el is not None:
                     value = _ext_values(el).get(xb.IMPORT_PROP) or ""
+                    want = expected.get(rid) or self._ours.get(rid)
                     if not (value.startswith("<") and value.endswith(">")):
-                        raise ConnectorError(f"EWS: item {rid[:60]} was not written by mccb: left alone",
-                                             ConnectorError.REJECTED)
-                    known = self._ours.get(rid)
-                    if known is not None and known != value:
-                        raise ConnectorError(f"EWS: item {rid[:60]} now carries another import id: left alone",
-                                             ConnectorError.REJECTED)
-                out[rid] = el
-        return out
+                        refused[rid] = f"EWS: item {rid[:60]} was not written by mccb: left alone"
+                        continue
+                    if want is not None and want != value and want.split(".", 1)[0] != _name_stem(value):
+                        refused[rid] = f"EWS: item {rid[:60]} carries {value[:80]}, not {want[:80]}: left alone"
+                        continue
+                found[rid] = el
+        return found, refused
+
+    def _one_owned(self, ref: str, expected: str | None = None) -> ET.Element | None:
+        found, refused = self._owned([ref], {ref: expected} if expected else None)
+        if ref in refused:
+            raise ConnectorError(refused[ref], ConnectorError.REJECTED)
+        return found.get(ref)
 
     def _update_items(self, changes: list[tuple[ET.Element, str]]) -> None:
         """UpdateItem of our items: AutoResolve with the ChangeKey just read (a change made meanwhile on the target is
@@ -1552,10 +1586,14 @@ class EwsSession(TargetSession):
         """Moved to Deleted Items; in Deleted Items itself, only marked (deleting there would be final)."""
         return DELETE_SOFT if xb.parse_spec(folder)[1] == "deleteditems" else DELETE_TRASH
 
-    def delete_many(self, folder: str, refs: list[str]) -> dict[str, str]:
-        """delete() for many items at once (batches of GET_BATCH): every one is checked before any is touched."""
+    def delete_many(self, folder: str, refs: list[str],
+                    expected_import_ids: dict[str, str] | None = None) -> dict[str, str]:
+        """delete() for many items at once (batches of GET_BATCH). Every item is read and checked first; one that is
+        not ours (or no longer the expected one) is left out of the answer, untouched: a failure for the mirror."""
         mode = self.delete_mode(folder)
-        owned = self._owned(refs)
+        owned, refused = self._owned(refs, expected_import_ids)
+        for reason in refused.values():
+            xb.log.warning("EWS mirror: %s", reason)
         present = [(r, el) for r, el in owned.items() if el is not None]
         if xb.parse_spec(folder)[0] == MAIL:
             marks = []
@@ -1570,13 +1608,17 @@ class EwsSession(TargetSession):
             self._trash([r for r, _el in present])
         return {r: mode for r in owned}
 
-    def delete(self, folder: str, ref: str) -> str:
-        return self.delete_many(folder, [ref])[ref]
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        self._one_owned(ref, expected_import_id)  # raises (rejected) when it is not ours
+        out = self.delete_many(folder, [ref], {ref: expected_import_id} if expected_import_id else None)
+        if ref not in out:
+            raise ConnectorError(f"EWS: item {ref[:60]} left alone", ConnectorError.REJECTED)
+        return out[ref]
 
     def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
         """\\Seen (IsRead), \\Flagged (follow-up flag), \\Answered and $Forwarded (last verb). Other keywords have no
         place in Exchange and are left out."""
-        el = self._owned([ref])[ref]
+        el = self._one_owned(ref)
         if el is None:
             xb.log.info("EWS mirror: %s already gone, flags not changed", ref[:60])
             return
@@ -1609,12 +1651,8 @@ class EwsSession(TargetSession):
         """Exchange cannot replace the content of an item in place (the MIME of a mail is fixed, a series carries its
         exceptions): the old copy goes to Deleted Items (no cancellation sent, a series with all its occurrences),
         then the new one is written, a series again with its exceptions."""
-        el = self._owned([ref])[ref]
-        if el is not None:
-            if (_ext_values(el).get(xb.IMPORT_PROP) or "") != item.import_id:
-                raise ConnectorError(f"EWS: item {ref[:60]} is not the copy of {item.import_id}: left alone",
-                                     ConnectorError.REJECTED)
-            self.delete(folder, ref)
+        if self._one_owned(ref, item.import_id) is not None:  # raises (rejected) when not the copy of this item
+            self.delete(folder, ref, item.import_id)
         return self.put(folder, item)
 
     def info(self) -> dict:
