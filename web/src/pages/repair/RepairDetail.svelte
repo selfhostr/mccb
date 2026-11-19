@@ -104,7 +104,7 @@
 				<ul class="m-0 flex list-none flex-col gap-1 p-0" data-testid="repair-examples">
 					{#each report.examples.slice(0, 20) as ex (`${ex.folder}/${ex.uid}`)}
 						<li class="flex flex-wrap items-center gap-2">
-							<Button variant="ghost" icon={Eye} onclick={() => (previewing = ex)} data-testid="repair-preview">{m.repair_detail_preview()}</Button>
+							<Button variant="ghost" icon={Eye} aria-label={m.repair_detail_preview_label({ subject: prefs.text(ex.subject) || m.repair_no_subject() })} onclick={() => (previewing = ex)} data-testid="repair-preview">{m.repair_detail_preview()}</Button>
 							<span class="min-w-0 flex-1 truncate">{prefs.text(ex.subject) || m.repair_no_subject()}</span>
 							<span class="text-xs text-ink-3">{ex.issues.map(issueLabel).join(', ')}</span>
 						</li>
