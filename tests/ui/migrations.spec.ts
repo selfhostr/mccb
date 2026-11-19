@@ -409,6 +409,23 @@ test.describe('migrations', () => {
 		await expect(page.getByTestId('selection-count')).toHaveCount(0);
 	});
 
+	test('the start warns that calendars and contacts will not come when the server has DAV off, and one click turns it on', async ({ page }) => {
+		await ready(page);
+		const { id: _id, last_test: _t, last_test_result: _r, ...server } = await (await page.request.get('/api/servers/1')).json();
+		await page.request.put('/api/servers/1', { data: { ...server, dav_enabled: false } });
+		await ready(page);
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('nodav-notice')).toContainText('Calendars and contacts will not be migrated: CalDAV/CardDAV is disabled on Production.');
+		await expect(dialog.getByTestId('import-nodav-list')).toContainText('bob@example.com');
+		// The start is not blocked.
+		await expect(dialog.getByTestId('import-confirm')).toBeEnabled();
+		await dialog.getByTestId('nodav-enable').click();
+		await expect(dialog.getByTestId('nodav-notice')).toHaveCount(0);
+		expect((await (await page.request.get('/api/servers/1')).json()).dav_enabled).toBe(true);
+	});
+
 	test('a refused connection can be started anyway, from a checkbox', async ({ page }) => {
 		const dialog = await openMixedImport(page);
 		const include = dialog.getByTestId('import-refused-include');

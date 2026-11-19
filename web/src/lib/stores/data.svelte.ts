@@ -131,6 +131,23 @@ class Data {
 		this.servers = await get<Server[]>('/servers');
 	}
 
+	/** Whether the destination server does calendars and contacts; undefined for an unknown server. */
+	davEnabled = (serverId: number): boolean | undefined => this.servers.find((s) => s.id === serverId)?.dav_enabled;
+
+	/** Switches CalDAV and CardDAV on for a server, its URLs left as they are (empty: discovered). */
+	async enableDav(server: Server): Promise<boolean> {
+		try {
+			const { id: _id, last_test: _t, last_test_result: _r, ...rest } = server;
+			await put<Server>(`/servers/${server.id}`, { ...rest, dav_enabled: true });
+			await this.reloadServers();
+			toast(m.settings_server_saved({ name: server.name }), 'signal');
+			return true;
+		} catch (error) {
+			toast(errorText(error), 'warning');
+			return false;
+		}
+	}
+
 	private async checkHealth(): Promise<void> {
 		try {
 			const health = await get<Health>('/health', { noAuthRedirect: true });

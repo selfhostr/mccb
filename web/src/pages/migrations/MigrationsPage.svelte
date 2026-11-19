@@ -209,7 +209,7 @@
 		const chosen = split.targets.map((id) => data.accounts.get(id)).filter((a): a is Account => !!a);
 		dialog = {
 			kind: 'import',
-			plan: importPlan(chosen, (id) => data.jobs.get(id), (id) => data.psts.get(id))
+			plan: importPlan(chosen, (id) => data.jobs.get(id), (id) => data.psts.get(id), data.davEnabled)
 		};
 	}
 
@@ -300,7 +300,7 @@
 
 	/** The start button of one mailbox's panel: the same dialog as for a selection, with one mailbox. */
 	function startOne(account: Account) {
-		dialog = { kind: 'import', plan: importPlan([account], (id) => data.jobs.get(id), (id) => data.psts.get(id)) };
+		dialog = { kind: 'import', plan: importPlan([account], (id) => data.jobs.get(id), (id) => data.psts.get(id), data.davEnabled) };
 	}
 </script>
 

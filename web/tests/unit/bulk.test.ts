@@ -143,6 +143,6 @@ describe('import plan: refused connections', () => {
 	});
 
 	it('nothing selected gives empty lists', () => {
-		expect(plan([])).toEqual({ ready: [], noPst: [], noPassword: [], refused: [], active: [] });
+		expect(plan([])).toEqual({ ready: [], noPst: [], noPassword: [], refused: [], active: [], noDav: [] });
 	});
 });

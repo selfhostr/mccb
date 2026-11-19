@@ -284,6 +284,32 @@ describe('accounts', () => {
 	});
 });
 
+describe('import plan, DAV off', () => {
+	const valid = { id: 1, status: 'valid' } as Pst;
+	const dav = (serverId: number) => (serverId === 1 ? false : serverId === 2 ? true : undefined);
+	const plan = (list: Account[], jobOf: (id: number) => Job | undefined = () => undefined) => importPlan(list, jobOf, () => valid, dav);
+
+	it('lists the mailboxes that ask for calendar or contacts on a server without DAV, and still starts them', () => {
+		const list = [
+			account({ id: 1, server_id: 1, pst_id: 1 }),
+			account({ id: 2, server_id: 2, pst_id: 1 }),
+			account({ id: 3, server_id: 1, pst_id: 1, options: { mail: true, calendar: false, contacts: true } }),
+			account({ id: 4, server_id: 1, pst_id: 1, options: { mail: true, calendar: false, contacts: false } }),
+			account({ id: 5, server_id: 9, pst_id: 1 })
+		];
+		const result = plan(list);
+		expect(result.noDav.map((a) => a.id)).toEqual([1, 3]);
+		expect(result.ready.map((a) => a.id)).toEqual([1, 2, 3, 4, 5]);
+	});
+
+	it('is silent for an active job, an own target, or when the servers are not known', () => {
+		const target = { kind: 'm365_graph' } as Account['target'];
+		expect(plan([account({ id: 1, server_id: 1, pst_id: 1 })], () => job('running')).noDav).toEqual([]);
+		expect(plan([account({ id: 1, server_id: 1, pst_id: 1, target })]).noDav).toEqual([]);
+		expect(importPlan([account({ id: 1, server_id: 1, pst_id: 1 })], () => undefined, () => valid).noDav).toEqual([]);
+	});
+});
+
 describe('mask', () => {
 	it('hides addresses, hosts and file names', () => {
 		expect(maskEmail('alice@example.com')).not.toContain('example');

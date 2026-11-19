@@ -30,6 +30,7 @@
 	import Button from '../../lib/ui/Button.svelte';
 	import Field from '../../lib/ui/Field.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import NoDavNotice from './NoDavNotice.svelte';
 	import ConnectionCell, { sourceProbes, sourceTestable, testSource } from './ConnectionCell.svelte';
 
 	const UPLOAD_VALUE = '__upload';
@@ -89,7 +90,8 @@
 
 	const job = $derived(data.jobs.get(id));
 	const running = $derived(isActive(job));
-	const plan = $derived(importPlan([account], (accountId) => data.jobs.get(accountId), (fileId) => data.psts.get(fileId)));
+	const plan = $derived(importPlan([account], (accountId) => data.jobs.get(accountId), (fileId) => data.psts.get(fileId), data.davEnabled));
+	const noDavServer = $derived(plan.noDav.length ? data.servers.find((s) => s.id === account.server_id) : undefined);
 	const sourceReady = $derived(!plan.noPst.length && picked == null);
 	const sourceRefused = $derived(sourceProbe?.state === 'done' && !sourceProbe.ok);
 	const result = $derived(currentResult(account));
@@ -267,6 +269,7 @@
 				</button>
 			{/each}
 		</div>
+		{#if noDavServer}<NoDavNotice server={noDavServer} />{/if}
 	</section>
 
 	{#if !running}

@@ -128,12 +128,25 @@ export interface ImportPlan {
 	/** The last connection test was refused: left out unless asked for, the job would most likely fail. */
 	refused: Account[];
 	active: Account[];
+	/**
+	 * Informational, not exclusive: mailboxes with calendar or contacts switched on whose destination server has DAV
+	 * off. They still start, but only their mail is copied.
+	 */
+	noDav: Account[];
 }
 
 /** What pressing Start would do, said before it happens. */
-export function importPlan(accounts: Account[], jobOf: (id: number) => Job | undefined, pstOf: (id: number) => Pst | undefined): ImportPlan {
-	const plan: ImportPlan = { ready: [], noPst: [], noPassword: [], refused: [], active: [] };
+export function importPlan(
+	accounts: Account[],
+	jobOf: (id: number) => Job | undefined,
+	pstOf: (id: number) => Pst | undefined,
+	/** Whether the DAV of a server is on; undefined when the server is not known. */
+	davOf?: (serverId: number) => boolean | undefined
+): ImportPlan {
+	const plan: ImportPlan = { ready: [], noPst: [], noPassword: [], refused: [], active: [], noDav: [] };
 	for (const account of accounts) {
+		// An own target replaces the server, which then says nothing about where calendars and contacts go.
+		if (!isActive(jobOf(account.id)) && !hasOwnTarget(account) && (account.options.calendar || account.options.contacts) && davOf?.(account.server_id) === false) plan.noDav.push(account);
 		const pst = account.pst_id != null ? pstOf(account.pst_id) : undefined;
 		if (isActive(jobOf(account.id))) plan.active.push(account);
 		// A connector source needs no PST; an own target brings its own credentials.

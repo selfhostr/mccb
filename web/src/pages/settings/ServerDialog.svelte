@@ -40,7 +40,7 @@
 			? { ...server }
 			: duplicate
 				? copyOf(duplicate)
-				: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null, ...(picked?.preset ?? {}) }
+				: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: true, workers: 4, notes: '', tuning: 'auto', builders: null, ...(picked?.preset ?? {}) }
 	);
 	let form = $state<ServerInput>(initial);
 	let busy = $state(false);
@@ -128,7 +128,7 @@
 		<Field label={m.settings_server_root()} hint={m.settings_server_root_hint()}>
 			<input class="input font-mono" bind:value={form.root_folder} />
 		</Field>
-		<Toggle checked={form.dav_enabled} label={m.settings_server_dav()} onchange={(v) => (form.dav_enabled = v)} />
+		<Toggle checked={form.dav_enabled} label={m.settings_server_dav()} hint={m.settings_server_dav_help()} onchange={(v) => (form.dav_enabled = v)} />
 		{#if server && !form.dav_enabled && davDetected(server, server.last_test_result)}
 			<Notice><p class="m-0" data-testid="server-dialog-dav-found">{m.settings_server_dav_found()}</p></Notice>
 		{/if}

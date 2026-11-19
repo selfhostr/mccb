@@ -34,13 +34,16 @@ export interface Provider {
 }
 
 export const PROVIDERS: Provider[] = [
-	{ id: 'imap', name: 'IMAP', icon: Mail, hosts: null, preset: { imap_host: '', imap_port: 993, imap_security: 'ssl', dav_enabled: false }, note: null },
+	// A generic server: DAV on by default, the URLs left empty so that they are discovered (.well-known, then the domain).
+	// Without it the engine copies neither calendars nor contacts, whatever the mailbox asks for.
+	{ id: 'imap', name: 'IMAP', icon: Mail, hosts: null, preset: { imap_host: '', imap_port: 993, imap_security: 'ssl', dav_enabled: true }, note: null },
 	{
 		id: 'gmail',
 		name: 'Gmail',
 		icon: Mail,
 		mark: 'G',
 		hosts: /(^|\.)gmail\.com$|googlemail\.com$/i,
+		// Off: Google's CalDAV and CardDAV only accept OAuth, not the app password this preset asks for.
 		preset: { name: 'Gmail', imap_host: 'imap.gmail.com', imap_port: 993, imap_security: 'ssl', dav_enabled: false },
 		note: 'app_password',
 		links: [
@@ -48,10 +51,12 @@ export const PROVIDERS: Provider[] = [
 			{ id: 'gmail_imap', href: 'https://mail.google.com/mail/u/0/#settings/fwdandpop' }
 		]
 	},
+	// Off: Microsoft 365 has no CalDAV or CardDAV at all (calendars and contacts go through Graph or EWS).
 	{ id: 'microsoft', name: 'Microsoft 365', icon: Cloud, mark: 'M', hosts: /office365\.com$|outlook\.com$/i, preset: { name: 'Microsoft 365', imap_host: 'outlook.office365.com', imap_port: 993, imap_security: 'ssl', dav_enabled: false }, note: 'oauth' },
 	{ id: 'icloud', name: 'iCloud', icon: Cloud, mark: 'iC', hosts: /(^|\.)mail\.me\.com$|icloud\.com$/i, preset: { name: 'iCloud', imap_host: 'imap.mail.me.com', imap_port: 993, imap_security: 'ssl', dav_enabled: true, caldav_url: 'https://caldav.icloud.com/', carddav_url: 'https://contacts.icloud.com/' }, note: 'app_password', links: [{ id: 'icloud_password', href: 'https://account.apple.com/account/manage' }] },
 	{ id: 'fastmail', name: 'Fastmail', icon: Mail, mark: 'F', hosts: /fastmail\.com$/i, preset: { name: 'Fastmail', imap_host: 'imap.fastmail.com', imap_port: 993, imap_security: 'ssl', dav_enabled: true, caldav_url: 'https://caldav.fastmail.com/dav/calendars/user/{email}/', carddav_url: 'https://carddav.fastmail.com/dav/addressbooks/user/{email}/Default/' }, note: 'app_password' },
-	{ id: 'infomaniak', name: 'Infomaniak', icon: Mail, mark: 'ik', hosts: /infomaniak\.(com|ch)$/i, preset: { name: 'Infomaniak', imap_host: 'mail.infomaniak.com', imap_port: 993, imap_security: 'ssl', dav_enabled: false }, note: null }
+	// On: Infomaniak serves CalDAV and CardDAV with the mailbox password, both at sync.infomaniak.com.
+	{ id: 'infomaniak', name: 'Infomaniak', icon: Mail, mark: 'ik', hosts: /infomaniak\.(com|ch)$/i, preset: { name: 'Infomaniak', imap_host: 'mail.infomaniak.com', imap_port: 993, imap_security: 'ssl', dav_enabled: true, caldav_url: 'https://sync.infomaniak.com/', carddav_url: 'https://sync.infomaniak.com/' }, note: null }
 ];
 
 export function providerOf(host: string | null | undefined): Provider {

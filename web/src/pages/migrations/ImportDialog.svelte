@@ -19,6 +19,7 @@
 	import Field from '../../lib/ui/Field.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import NoDavNotice from './NoDavNotice.svelte';
 	import PlanResult from './PlanResult.svelte';
 
 	interface Props {
@@ -61,6 +62,12 @@
 					{ key: 'refused', text: m.migrations_import_refused({ count: plan.refused.length }), list: plan.refused },
 					{ key: 'active', text: m.migrations_import_active({ count: plan.active.length }), list: plan.active }
 				].filter((p) => p.list.length)
+	);
+	/** Informational: those that start anyway, grouped by the server whose DAV is off. */
+	const noDav = $derived(
+		data.servers
+			.map((server) => ({ server, accounts: plan.noDav.filter((a) => a.server_id === server.id && ids.includes(a.id)) }))
+			.filter((g) => g.accounts.length)
 	);
 	/** Only a selection can be cut down: a dialog opened from one mailbox's panel has none to change. */
 	const canTrim = $derived(problems.some((p) => p.list.some((a) => data.selected.has(a.id))));
@@ -130,6 +137,9 @@
 					</label>
 				{/if}
 			</Notice>
+		{/each}
+		{#each noDav as group (group.server.id)}
+			<NoDavNotice server={group.server} accounts={group.accounts} />
 		{/each}
 		{#if canTrim && plan.ready.length}
 			<div><Button icon={ListFilter} onclick={keepReady} data-testid="import-keep-ready">{m.migrations_import_keep_ready()}</Button></div>
