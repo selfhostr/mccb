@@ -656,7 +656,7 @@
 	"migrations_conn_untested": "Not tested: {count}",
 	"migrations_conn_group": "Connection checks",
 	"migrations_filter_tested_ok": "Connection verified",
-	"settings_server_provider_oauth": "Microsoft refuses plain passwords over IMAP. To write into Microsoft 365, choose Exchange Online in each mailbox's Source and target.",
+	"settings_server_provider_oauth": "Microsoft refuses plain passwords over IMAP. To write into Microsoft 365, choose Exchange Online in each mailbox's Source and destination.",
 	"settings_server_provider_app_password": "{name} asks for an app password: create one in the account's security settings and use it as the mailbox password.",
 	"migrations_new_add_server": "Add another server",
 	"migrations_new_mailboxes": "Mailboxes",
