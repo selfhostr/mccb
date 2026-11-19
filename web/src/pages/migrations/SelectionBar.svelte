@@ -4,7 +4,9 @@
 	 * pushes nothing. It says what is hidden and that actions leave it alone.
 	 */
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
+	import Pencil from '@lucide/svelte/icons/pencil';
 	import Play from '@lucide/svelte/icons/play';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import X from '@lucide/svelte/icons/x';
 	import { m } from '#lib/paraglide/messages.js';
 	import Button from '../../lib/ui/Button.svelte';
@@ -16,13 +18,15 @@
 		testing: number;
 		ontest: () => void;
 		onimport: () => void;
+		onedit: () => void;
+		ondelete: () => void;
 		onclear: () => void;
 		ondropHidden: () => void;
 		/** The open panel takes the right of the screen: the bar stops beside it when there is room. */
 		besidePanel: boolean;
 	}
 
-	let { targets, hidden, testing, ontest, onimport, onclear, ondropHidden, besidePanel }: Props = $props();
+	let { targets, hidden, testing, ontest, onimport, onedit, ondelete, onclear, ondropHidden, besidePanel }: Props = $props();
 </script>
 
 <div class={`fixed right-0 bottom-0 left-[var(--side-w)] z-30 border-t border-line-strong bg-surface ${besidePanel ? 'min-[1100px]:right-[600px]' : ''}`} data-testid="selection-bar" role="region" aria-label={m.migrations_bar_label()}>
@@ -40,6 +44,8 @@
 			<Button icon={FlaskConical} disabled={!targets} loading={testing > 0} onclick={ontest}>
 				{testing > 0 ? m.migrations_bar_testing({ count: testing }) : m.migrations_bar_test()}
 			</Button>
+			<Button icon={Pencil} disabled={!targets} onclick={onedit} data-testid="bulk-edit">{m.migrations_bar_edit()}</Button>
+			<Button icon={Trash2} disabled={!targets} onclick={ondelete} data-testid="bulk-delete">{m.migrations_bar_delete()}</Button>
 			<Button variant="primary" icon={Play} disabled={!targets} onclick={onimport}>{m.migrations_bar_import()}</Button>
 			<IconButton icon={X} label={m.migrations_bar_clear()} onclick={onclear} />
 		</div>

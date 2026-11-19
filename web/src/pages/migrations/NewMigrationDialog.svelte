@@ -73,13 +73,16 @@
 		login: string;
 		/** Set once the mailbox exists: a retry then only sets the source. */
 		accountId: number | null;
+		/** A mailbox that was already in the app: its destination stays as saved, only its source is set here. */
+		existing: boolean;
+		hasPassword: boolean;
 		status: 'idle' | 'busy' | 'added' | 'failed';
 		error: string | null;
 		sourceFailed: boolean;
 	}
 
 	let nextKey = 1;
-	const newRow = (): Row => ({ key: nextKey++, src: {}, file: '', upload: null, email: '', password: '', login: '', accountId: null, status: 'idle', error: null, sourceFailed: false });
+	const newRow = (): Row => ({ key: nextKey++, src: {}, file: '', upload: null, email: '', password: '', login: '', accountId: null, existing: false, hasPassword: false, status: 'idle', error: null, sourceFailed: false });
 
 	// The form starts from the props once: later changes of the props do not rewrite what is typed.
 	let serverId = $state(untrack(() => defaultServer ?? data.servers[0]?.id ?? 0));
@@ -109,8 +112,8 @@
 	const srcCols = $derived.by((): Col[] => {
 		if (source.type === 'server') {
 			return [
-				{ name: 'login', label: m.migrations_account_login(), secret: false },
-				{ name: 'password', label: m.migrations_account_password(), secret: true }
+				{ name: 'login', label: m.migrations_new_src_login(), secret: false },
+				{ name: 'password', label: m.migrations_new_src_password(), secret: true }
 			];
 		}
 		if (source.type === 'connection' && !source.directory) {
@@ -119,6 +122,8 @@
 		}
 		return [];
 	});
+	const sourceName = $derived(source.type === 'server' ? source.server.name : source.type === 'connection' ? source.connection.name : m.migrations_new_source_files());
+	const targetName = $derived(data.servers.find((s) => s.id === Number(serverId))?.name ?? '');
 	const destCount = $derived(destLogin ? 3 : 2);
 	/** The order of the pasted values: the columns as shown, the file excepted. */
 	const pasteCols = $derived([
@@ -143,7 +148,15 @@
 	const targetEmail = (r: Row) => r.email.trim() || fallback(r);
 
 	/** Once a mailbox exists, From and To stay as they are: the next rows go to the same place. */
-	const locked = $derived(rows.some((r) => r.accountId != null));
+	const locked = $derived(rows.some((r) => r.accountId != null && (!r.existing || r.status === 'added')));
+	/** The destination cannot change once a mailbox of it is listed. */
+	const lockedTo = $derived(locked || rows.some((r) => r.existing));
+	/** Mailboxes already in the app on the destination server, not yet listed below. */
+	const candidates = $derived(
+		[...data.accounts.values()]
+			.filter((a) => a.server_id === Number(serverId) && !rows.some((r) => r.accountId === a.id))
+			.sort((a, b) => a.email.localeCompare(b.email))
+	);
 	const pending = $derived(rows.filter((r) => r.status !== 'added' && !blank(r)).length);
 	const addedCount = $derived(rows.filter((r) => r.status === 'added').length);
 	const failedCount = $derived(rows.filter((r) => r.status === 'failed').length);
@@ -173,6 +186,21 @@
 			row.file = FILE_VALUE;
 		};
 		input.click();
+	}
+
+	function addExisting(list: Account[]) {
+		const made = list.map((a) => {
+			const row = newRow();
+			row.accountId = a.id;
+			row.existing = true;
+			row.hasPassword = a.has_password;
+			row.email = a.email;
+			row.login = a.login ?? '';
+			// The same login on the old server is the usual case: it starts from the address.
+			if (source.type === 'server') row.src.login = a.email;
+			return row;
+		});
+		rows = [...rows.filter((r) => r.accountId != null || !blank(r)), ...made];
 	}
 
 	function removeRow(row: Row) {
@@ -240,6 +268,7 @@
 			row.sourceFailed = false;
 			try {
 				let id = row.accountId;
+				if (row.existing && row.password) data.upsertAccount(await put<Account>(`/accounts/${row.accountId}`, { password: row.password }));
 				if (id == null) {
 					const login = row.login.trim();
 					const saved = await post<Account>('/accounts', { server_id: Number(serverId), email: targetEmail(row), password: row.password, ...(destLogin && login ? { login } : {}) });
@@ -299,7 +328,7 @@
 			<legend class="mb-2 flex items-center gap-2 p-0 text-sm font-semibold">{m.migrations_step_to()}<Help text={m.migrations_new_to_hint()} /></legend>
 			<div class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label={m.migrations_account_server()} data-testid="target-servers">
 				{#each data.servers as item (item.id)}
-					<button type="button" role="radio" aria-checked={Number(serverId) === item.id} class={tileClass(Number(serverId) === item.id)} disabled={locked || busy} onclick={() => (serverId = item.id)}>
+					<button type="button" role="radio" aria-checked={Number(serverId) === item.id} class={tileClass(Number(serverId) === item.id)} disabled={lockedTo || busy} onclick={() => (serverId = item.id)}>
 						<KindIcon icon={providerOf(item.imap_host).icon} mark={providerOf(item.imap_host).mark} size={28} />
 						<span class="flex min-w-0 flex-col">
 							<span class="truncate text-xs font-medium leading-tight">{item.name}</span>
@@ -321,6 +350,12 @@
 				<Toggle checked={destLogin} label={m.migrations_new_login_toggle()} onchange={(on) => (destLogin = on)} />
 
 				<div class="flex flex-col" data-testid="new-rows" style:--src={`repeat(${Math.max(srcCols.length, 1)}, minmax(0, 1fr))`} style:--dst={`repeat(${destCount}, minmax(0, 1fr))`}>
+					<div class="hidden gap-2 pb-1 text-xs font-semibold text-ink sm:flex" aria-hidden="true">
+						<span class="min-w-0 flex-[2] truncate">{m.migrations_new_group_from({ name: sourceName })}</span>
+						<span class="w-4 shrink-0"></span>
+						<span class="min-w-0 flex-[3] truncate">{m.migrations_new_group_to({ name: targetName })}</span>
+						<span class="w-10 shrink-0"></span>
+					</div>
 					<div class="hidden gap-2 pb-1 text-xs font-medium text-ink-2 sm:flex" aria-hidden="true">
 						<div class="grid min-w-0 flex-[2] grid-cols-(--src) gap-2">
 							{#if source.type === 'files'}<span>{m.migrations_new_col_file()}</span>{/if}
@@ -377,13 +412,13 @@
 										disabled={destLocked}
 										bind:value={row.email}
 									/>
-									<input class="input sm:placeholder:text-transparent" type="password" aria-label={m.migrations_new_dest_password()} placeholder={m.migrations_new_dest_password()} autocomplete="new-password" required={live} disabled={destLocked} bind:value={row.password} />
+									<input class="input sm:placeholder:text-transparent" type="password" aria-label={m.migrations_new_dest_password()} placeholder={row.existing && row.hasPassword ? m.migrations_new_dest_saved() : m.migrations_new_dest_password()} autocomplete="new-password" required={live && !row.existing} disabled={done || busy || (row.accountId != null && !row.existing) || (row.existing && row.hasPassword)} bind:value={row.password} />
 									{#if destLogin}
 										<input class="input font-mono sm:placeholder:text-transparent" aria-label={m.migrations_new_dest_login()} placeholder={m.migrations_new_dest_login()} autocomplete="off" disabled={destLocked} bind:value={row.login} />
 									{/if}
 								</div>
 								<div class="flex w-10 shrink-0 self-end sm:self-center">
-									{#if !done && row.accountId == null}
+									{#if !done && (row.accountId == null || row.existing)}
 										<IconButton icon={Trash2} label={m.migrations_new_remove_row()} disabled={busy} onclick={() => removeRow(row)} />
 									{/if}
 								</div>
@@ -407,6 +442,23 @@
 				<div class="flex flex-wrap items-center gap-2">
 					<Button icon={Plus} onclick={() => (rows = [...rows, newRow()])} disabled={busy} data-testid="new-row-add">{m.migrations_add_account()}</Button>
 				</div>
+
+				{#if candidates.length}
+					<Disclosure title={m.migrations_new_existing({ count: candidates.length })} open data-testid="new-existing">
+						<div class="flex flex-col gap-1">
+							<p class="m-0 text-xs text-ink-2">{m.migrations_new_existing_hint({ server: targetName })}</p>
+							<ul class="m-0 flex list-none flex-col p-0">
+								{#each candidates as a (a.id)}
+									<li class="flex min-h-10 items-center gap-2">
+										<span class="min-w-0 flex-1 truncate font-mono text-xs">{prefs.email(a.email)}</span>
+										<Button variant="ghost" icon={Plus} onclick={() => addExisting([a])} disabled={busy}>{m.migrations_new_existing_use()}</Button>
+									</li>
+								{/each}
+							</ul>
+							{#if candidates.length > 1}<div><Button onclick={() => addExisting(candidates)} disabled={busy} data-testid="new-existing-all">{m.migrations_new_existing_all()}</Button></div>{/if}
+						</div>
+					</Disclosure>
+				{/if}
 
 				<Disclosure title={m.migrations_new_paste()} bind:open={pasteOpen} data-testid="new-paste">
 					<div class="flex flex-col gap-2">

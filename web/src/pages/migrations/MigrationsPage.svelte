@@ -36,6 +36,7 @@
 	import AccountRow from './AccountRow.svelte';
 	import AccountSettings from './AccountSettings.svelte';
 	import BatchBar from './BatchBar.svelte';
+	import BulkEditDialog from './BulkEditDialog.svelte';
 	import CsvDialog from './CsvDialog.svelte';
 	import ImportDialog from './ImportDialog.svelte';
 	import GettingStarted from './GettingStarted.svelte';
@@ -174,6 +175,8 @@
 		| { kind: 'route'; account: Account }
 		| { kind: 'import'; plan: ImportPlan }
 		| { kind: 'server' }
+		| { kind: 'bulk-edit' }
+		| { kind: 'bulk-delete' }
 		| null
 	>(null);
 	const closeDialog = () => (dialog = null);
@@ -192,6 +195,24 @@
 			kind: 'import',
 			plan: importPlan(chosen, (id) => data.jobs.get(id), (id) => data.psts.get(id))
 		};
+	}
+
+	async function removeSelected() {
+		let done = 0;
+		const failed: string[] = [];
+		for (const id of [...split.targets]) {
+			const account = data.accounts.get(id);
+			try {
+				await del(`/accounts/${id}`);
+				data.accounts.delete(id);
+				data.selected.delete(id);
+				done++;
+			} catch (error) {
+				failed.push(`${prefs.email(account?.email ?? String(id))}: ${errorText(error)}`);
+			}
+		}
+		if (done) toast(m.migrations_bulk_deleted({ count: done }), 'signal');
+		if (failed.length) toast(failed.join(' · '), 'warning');
 	}
 
 	function imported(ids: number[]) {
@@ -410,6 +431,8 @@
 		besidePanel={panelJob != null || panelAccount != null}
 		ontest={testSelected}
 		onimport={openImport}
+		onedit={() => (dialog = { kind: 'bulk-edit' })}
+		ondelete={() => (dialog = { kind: 'bulk-delete' })}
 		onclear={() => data.selected.clear()}
 		ondropHidden={() => {
 			for (const id of split.hidden) data.selected.delete(id);
@@ -448,6 +471,10 @@
 	<TestDialog accountId={dialog.id} onclose={closeDialog} />
 {:else if dialog?.kind === 'import'}
 	<ImportDialog plan={dialog.plan} onclose={closeDialog} ondone={imported} />
+{:else if dialog?.kind === 'bulk-edit'}
+	<BulkEditDialog ids={split.targets} onclose={closeDialog} />
+{:else if dialog?.kind === 'bulk-delete'}
+	<Confirm title={m.migrations_bulk_delete_title({ count: split.targets.length })} text={m.migrations_bulk_delete_text({ count: split.targets.length })} confirm={m.migrations_bulk_delete_confirm({ count: split.targets.length })} danger onconfirm={removeSelected} onclose={closeDialog} />
 {:else if dialog?.kind === 'delete'}
 	{@const target = dialog.account}
 	<Confirm title={m.migrations_delete_title()} text={m.migrations_delete_text({ email: prefs.email(target.email) })} confirm={m.migrations_delete_confirm()} danger onconfirm={() => removeAccount(target)} onclose={closeDialog} />
