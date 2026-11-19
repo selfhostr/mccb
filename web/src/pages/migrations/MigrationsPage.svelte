@@ -8,10 +8,11 @@
 	import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
 	import { untrack } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
-	import { errorText, del } from '../../lib/api/client.ts';
-	import type { Account } from '../../lib/api/types.ts';
+	import { errorText, del, post } from '../../lib/api/client.ts';
+	import type { Account, Job } from '../../lib/api/types.ts';
 	import { fmtLeft } from '../../lib/format.ts';
 	import { connectionCounts, importPlan, type ImportPlan, matchesFilter, overallProgress, rowRank, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
+	import { type BulkJobAction, bulkJobActions, jobsFor } from '../../lib/logic/bulk.ts';
 	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { headerState, splitSelection, toggleAllVisible } from '../../lib/logic/selection.ts';
 	import { VIRTUAL_AT, windowRange } from '../../lib/logic/virtual.ts';
@@ -19,7 +20,6 @@
 	import { router } from '../../lib/router.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
-	import IconButton from '../../lib/ui/IconButton.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
@@ -84,6 +84,8 @@
 		return summarize(scoped, jobOf);
 	});
 	const conn = $derived(connectionCounts(scoped));
+	// Not read from the jobs: a mailbox has a source or it has not, whatever its job says.
+	const noSource = $derived(scoped.filter((a) => matchesFilter(a, undefined, { q: '', server: null, status: 'no_pst' })).length);
 	const CONN_CHIPS = $derived([
 		{ value: 'tested_ok' as const, label: m.migrations_conn_ok({ count: conn.ok }), icon: CircleCheck, tone: 'text-signal-ink' },
 		{ value: 'test_failed' as const, label: m.migrations_conn_failed({ count: conn.failed }), icon: CircleX, tone: 'text-warning-ink' },
@@ -118,15 +120,20 @@
 		return `${first} ${time ? m.migrations_page_left({ time }) : m.migrations_page_left_soon()}`;
 	});
 
+	const CHIP = 'inline-flex min-h-10 items-center gap-1.5 rounded-btn border px-3 font-medium transition-colors duration-200';
+	const CHIP_ON = 'border-ink-3 bg-surface-2 text-ink';
+	const CHIP_OFF = 'border-line-strong text-ink-2 hover:text-ink';
+
 	const CHIPS = $derived([
 		{ value: '' as const, label: m.migrations_filter_all(), count: counts.total },
 		{ value: 'problem' as const, label: m.migrations_filter_problem(), count: counts.attention },
 		{ value: 'active' as const, label: m.migrations_filter_active(), count: counts.running },
-		{ value: 'done' as const, label: m.migrations_filter_done(), count: counts.done }
+		{ value: 'done' as const, label: m.migrations_filter_done(), count: counts.done },
+		{ value: 'no_pst' as const, label: m.migrations_filter_no_pst(), count: noSource }
 	]);
 
 	// Everything the chips do not cover waits behind one quiet button, and shows by itself when in use.
-	const hiddenFilter = $derived(!!(server || batch || status === 'no_pst'));
+	const hiddenFilter = $derived(!!(server || batch));
 	let moreOpen = $state(false);
 	$effect(() => {
 		if (hiddenFilter) moreOpen = true;
@@ -135,6 +142,11 @@
 	const header = $derived(headerState(visibleIds, data.selected));
 	const split = $derived(splitSelection(data.selected, visibleIds));
 	const testingCount = $derived(split.targets.filter((id) => data.testing.has(id)).length);
+
+	// Which job actions apply to the selection. A string, so a progress event does not rebuild the bar.
+	const jobActionKey = $derived(bulkJobActions(split.targets.map((id) => data.jobs.get(id))).join(','));
+	const jobActions = $derived(jobActionKey ? (jobActionKey.split(',') as BulkJobAction[]) : []);
+	let jobBusy = $state<BulkJobAction | null>(null);
 
 	// A long list renders only what is on screen, plus a margin. Row height is measured, not assumed.
 	let list = $state<HTMLElement>();
@@ -177,6 +189,7 @@
 		| { kind: 'server' }
 		| { kind: 'bulk-edit' }
 		| { kind: 'bulk-delete' }
+		| { kind: 'bulk-stop' }
 		| null
 	>(null);
 	const closeDialog = () => (dialog = null);
@@ -195,6 +208,28 @@
 			kind: 'import',
 			plan: importPlan(chosen, (id) => data.jobs.get(id), (id) => data.psts.get(id))
 		};
+	}
+
+	/** The same calls as the job panel, one per job of the selection that the action applies to. */
+	async function runJobs(action: BulkJobAction) {
+		const ids = jobsFor(action, split.targets.map((id) => data.jobs.get(id)));
+		if (!ids.length) return;
+		jobBusy = action;
+		try {
+			const results = await Promise.allSettled(ids.map((id) => post<Job>(`/jobs/${id}/${action}`)));
+			let done = 0;
+			let failure: unknown;
+			for (const result of results) {
+				if (result.status === 'fulfilled') {
+					data.upsertJob(result.value);
+					done++;
+				} else failure ??= result.reason;
+			}
+			if (done) toast(m.migrations_bar_jobs_done({ count: done }), 'signal');
+			if (failure) toast(errorText(failure), 'warning');
+		} finally {
+			jobBusy = null;
+		}
 	}
 
 	async function removeSelected() {
@@ -277,7 +312,7 @@
 <PageHeader title={m.migrations_page_title()} sentence={data.accounts.size ? sentence : undefined}>
 	{#snippet actions()}
 		{#if data.servers.length}
-			<IconButton variant="primary" icon={Plus} label={m.migrations_add_label()} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration" />
+			<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration">{m.migrations_add_label()}</Button>
 		{/if}
 	{/snippet}
 </PageHeader>
@@ -294,17 +329,18 @@
 			{#each [0, 1, 2, 3, 4, 5] as i (i)}<Skeleton class="h-[var(--row-h)]" />{/each}
 		</div>
 	{:else if !data.servers.length || !data.accounts.size}
-		<GettingStarted hasServer={!!data.servers.length} onserver={() => (dialog = { kind: 'server' })} />
+		<GettingStarted hasServer={!!data.servers.length} onserver={() => (dialog = { kind: 'server' })} onnew={() => (dialog = { kind: 'add' })} />
 	{:else}
 		<div data-testid="overall"><Progress value={overallPercent} label={m.migrations_page_overall()} /></div>
 
 		<div class="flex flex-col gap-2">
 			<div class="flex flex-wrap items-center gap-1.5">
-				<div class="flex flex-wrap items-center gap-1.5" role="group" aria-label={m.migrations_filter_status()}>
+				<!-- One family: they all set the same filter, so choosing one lets go of the other. -->
+				<div class="flex flex-wrap items-center gap-1.5" role="group" aria-label={m.migrations_filter_status()} data-testid="status-chips">
 					{#each CHIPS as chip (chip.value)}
 						<button
 							type="button"
-							class={`inline-flex min-h-10 items-center gap-1.5 rounded-btn border px-3 font-medium transition-colors duration-200 ${status === chip.value ? 'border-ink-3 bg-surface-2 text-ink' : 'border-line-strong text-ink-2 hover:text-ink'}`}
+							class={`${CHIP} ${status === chip.value ? CHIP_ON : CHIP_OFF}`}
 							aria-pressed={status === chip.value}
 							onclick={() => router.setParams({ status: chip.value || null })}
 							data-testid={`chip-${chip.value || 'all'}`}
@@ -313,20 +349,21 @@
 							<span class="font-mono text-ink-2">{chip.count}</span>
 						</button>
 					{/each}
-				</div>
-				<div class="flex flex-wrap items-center gap-1" role="group" aria-label={m.migrations_conn_group()} data-testid="conn-chips">
-					{#each CONN_CHIPS as chip (chip.value)}
-						{@const Icon = chip.icon}
-						<button
-							type="button"
-							class={`inline-flex min-h-10 items-center gap-1 rounded-btn px-2 text-sm transition-colors duration-200 ${status === chip.value ? 'bg-surface-2 text-ink' : 'text-ink-2 hover:text-ink'}`}
-							aria-pressed={status === chip.value}
-							onclick={() => router.setParams({ status: status === chip.value ? null : chip.value })}
-							data-testid={`conn-${chip.value}`}
-						>
-							<Icon size={14} class={chip.tone} />{chip.label}
-						</button>
-					{/each}
+					<span class="mx-0.5 h-5 w-px bg-line-strong" aria-hidden="true"></span>
+					<div class="contents" role="group" aria-label={m.migrations_conn_group()} data-testid="conn-chips">
+						{#each CONN_CHIPS as chip (chip.value)}
+							{@const Icon = chip.icon}
+							<button
+								type="button"
+								class={`${CHIP} ${status === chip.value ? CHIP_ON : CHIP_OFF}`}
+								aria-pressed={status === chip.value}
+								onclick={() => router.setParams({ status: status === chip.value ? null : chip.value })}
+								data-testid={`conn-${chip.value}`}
+							>
+								<Icon size={14} class={chip.tone} />{chip.label}
+							</button>
+						{/each}
+					</div>
 				</div>
 				<Button variant="ghost" icon={SlidersHorizontal} aria-expanded={moreOpen} onclick={() => (moreOpen = !moreOpen)} data-testid="filter-more">{m.migrations_filter_more()}</Button>
 				<label class="relative ml-auto min-w-40 flex-1 basis-40 sm:max-w-[260px]">
@@ -428,6 +465,9 @@
 		targets={split.targets.length}
 		hidden={split.hidden.length}
 		testing={testingCount}
+		{jobActions}
+		busy={jobBusy}
+		onjob={(action) => (action === 'stop' ? (dialog = { kind: 'bulk-stop' }) : runJobs(action))}
 		besidePanel={panelJob != null || panelAccount != null}
 		ontest={testSelected}
 		onimport={openImport}
@@ -475,6 +515,8 @@
 	<BulkEditDialog ids={split.targets} onclose={closeDialog} />
 {:else if dialog?.kind === 'bulk-delete'}
 	<Confirm title={m.migrations_bulk_delete_title({ count: split.targets.length })} text={m.migrations_bulk_delete_text({ count: split.targets.length })} confirm={m.migrations_bulk_delete_confirm({ count: split.targets.length })} danger onconfirm={removeSelected} onclose={closeDialog} />
+{:else if dialog?.kind === 'bulk-stop'}
+	<Confirm title={m.migrations_bar_stop_title()} text={m.migrations_bar_stop_text()} confirm={m.jobs_action_stop()} danger onconfirm={() => runJobs('stop')} onclose={closeDialog} />
 {:else if dialog?.kind === 'delete'}
 	{@const target = dialog.account}
 	<Confirm title={m.migrations_delete_title()} text={m.migrations_delete_text({ email: prefs.email(target.email) })} confirm={m.migrations_delete_confirm()} danger onconfirm={() => removeAccount(target)} onclose={closeDialog} />

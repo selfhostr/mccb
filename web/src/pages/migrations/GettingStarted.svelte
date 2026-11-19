@@ -1,11 +1,11 @@
 <script lang="ts">
-	/** The empty page says the three steps of a migration and which one is next. Only the first has a button: the others are the + of the header. */
+	/** The empty page says the three steps of a migration and which one is next. The current step carries its own button. */
 	import Check from '@lucide/svelte/icons/check';
 	import Plus from '@lucide/svelte/icons/plus';
 	import { m } from '#lib/paraglide/messages.js';
 	import Button from '../../lib/ui/Button.svelte';
 
-	let { hasServer, onserver }: { hasServer: boolean; onserver: () => void } = $props();
+	let { hasServer, onserver, onnew }: { hasServer: boolean; onserver: () => void; onnew: () => void } = $props();
 
 	const current = $derived(hasServer ? 1 : 0);
 	const STEPS = $derived([
@@ -29,10 +29,18 @@
 					<p class={`m-0 font-semibold ${i === current ? '' : 'text-ink-2'}`}>{step.title}</p>
 					{#if i === current}
 						<p class="m-0 text-ink-2">{step.hint}</p>
-						{#if i === 0}<div><Button variant="primary" icon={Plus} onclick={onserver}>{m.migrations_empty_no_server_action()}</Button></div>{/if}
+						{#if i === 0}
+							<div><Button variant="primary" icon={Plus} onclick={onserver}>{m.migrations_empty_no_server_action()}</Button></div>
+						{:else if i === 1}
+							<div><Button variant="primary" icon={Plus} onclick={onnew} data-testid="getting-started-new">{m.migrations_add_label()}</Button></div>
+						{/if}
 					{/if}
 				</div>
 			</li>
 		{/each}
 	</ol>
+	<p class="m-0 mt-5 border-t border-line pt-4 text-ink-2" data-testid="getting-started-pst">
+		{m.migrations_steps_pst()}
+		<a class="inline-flex min-h-10 items-center font-medium text-ink underline" href="/files">{m.migrations_steps_pst_link()}</a>
+	</p>
 </section>
