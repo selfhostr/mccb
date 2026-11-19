@@ -7,13 +7,12 @@ const state = (page: Page) => mock(page.request, 'state');
 
 async function openImport(page: Page, emails: string[]) {
 	for (const email of emails) await row(page, email).getByRole('checkbox').check();
-	await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+	await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 	await expect(page.getByRole('dialog')).toContainText('Ready to start');
 }
 
 async function importNamed(page: Page, emails: string[], name: string) {
 	await openImport(page, emails);
-	await page.getByTestId('import-options').locator('summary').click();
 	await page.getByTestId('import-batch').fill(name);
 	await page.getByTestId('import-confirm').click();
 	await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -57,7 +56,6 @@ test.describe('dry run and import options', () => {
 		await mock(page.request, 'reset', { jobTick: 80 });
 		await ready(page);
 		await openImport(page, ['alice@example.com']);
-		await page.getByTestId('import-options').locator('summary').click();
 		await expect(page.getByTestId('import-mode')).toHaveCount(0);
 		await page.getByTestId('import-batch').fill('Wave 1');
 		await page.getByTestId('import-confirm').click();
@@ -66,7 +64,6 @@ test.describe('dry run and import options', () => {
 		expect((await state(page)).runBodies[0]).toEqual({ account_ids: [1], name: 'Wave 1' });
 
 		await openImport(page, ['alice@example.com']);
-		await page.getByTestId('import-options').locator('summary').click();
 		await page.getByTestId('import-mode').selectOption('delta');
 		await page.getByTestId('import-confirm').click();
 		await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -77,7 +74,7 @@ test.describe('dry run and import options', () => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await ready(page);
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-dry').click();
 		await expect(page.getByTestId('plan-result')).toBeVisible();
 		await page.getByTestId('plan-account').first().locator('summary').click();
@@ -258,8 +255,7 @@ test.describe('policies', () => {
 
 	test('a server: rules, hours and bandwidth, with the reason when the server refuses', async ({ page }) => {
 		await ready(page, '/servers');
-		await page.getByRole('button', { name: 'More actions for Production' }).click();
-		await page.getByRole('menuitem', { name: 'Edit' }).click();
+		await page.getByRole('button', { name: 'Edit Production' }).click();
 		const dialog = page.getByRole('dialog');
 		// Nothing about policies is loaded or shown until the disclosure opens.
 		await expect(dialog.getByTestId('policy-max-size')).toBeHidden();
@@ -293,8 +289,7 @@ test.describe('policies', () => {
 		});
 
 		// Opened again, the dialog shows what is stored.
-		await page.getByRole('button', { name: 'More actions for Production' }).click();
-		await page.getByRole('menuitem', { name: 'Edit' }).click();
+		await page.getByRole('button', { name: 'Edit Production' }).click();
 		await page.getByRole('dialog').getByTestId('policy').locator('summary').click();
 		await expect(page.getByRole('dialog').getByTestId('policy-max-size')).toHaveValue('25');
 		await expect(page.getByRole('dialog').getByTestId('policy-start')).toHaveValue('20:00');
@@ -338,8 +333,7 @@ test.describe('policies', () => {
 	test('the server dialog fits a phone', async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await ready(page, '/servers');
-		await page.getByRole('button', { name: 'More actions for Production' }).click();
-		await page.getByRole('menuitem', { name: 'Edit' }).click();
+		await page.getByRole('button', { name: 'Edit Production' }).click();
 		await page.getByRole('dialog').getByTestId('policy').locator('summary').click();
 		await page.getByRole('dialog').getByTestId('policy-map-add').click();
 		await noOverflow(page);
@@ -460,7 +454,7 @@ test.describe('accounts as CSV and files of every kind', () => {
 
 		// Selected for an import, it needs no other source.
 		await alice.getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await expect(page.getByRole('dialog')).toContainText('Ready to start: 1');
 	});
 });

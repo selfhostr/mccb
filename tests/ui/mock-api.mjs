@@ -26,6 +26,23 @@ subscribe((kind, data) => {
 	for (const res of clients) res.write(text);
 });
 
+/**
+ * The core's IMAP catalogue still names the source login `username` and has no `verify_tls`, while the real
+ * connector (app/connectors/imap.py) and the form of a new migration say `login` and `verify_tls`.
+ * Until the core follows, the source of a mailbox is saved here with the names the core knows.
+ */
+function adaptSource(method, path, raw) {
+	if (method !== 'PUT' || !/^\/accounts\/\d+\/source$/.test(path)) return raw;
+	try {
+		const body = JSON.parse(raw);
+		if (body.kind !== 'imap' || !body.config) return raw;
+		const { login, verify_tls: _tls, ...config } = body.config;
+		return JSON.stringify({ ...body, config: { ...config, ...(login ? { username: login } : {}) } });
+	} catch {
+		return raw;
+	}
+}
+
 /** Writes a response of the core: a string is plain text, anything else JSON. */
 function write(res, { code, body, headers }) {
 	const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -85,7 +102,7 @@ async function api(req, res, url) {
 		path,
 		query: url.searchParams,
 		headers: req.headers,
-		text: async () => (await bytes()).toString(),
+		text: async () => adaptSource(req.method, path, (await bytes()).toString()),
 		bytes
 	});
 	// A route that did not read the body still has to drain it.

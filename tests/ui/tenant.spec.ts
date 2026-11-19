@@ -146,8 +146,8 @@ test.describe('Microsoft 365 tenants', () => {
 
 	test('the tenant dialog says its field labels in the language of the UI', async ({ page }) => {
 		await ready(page, '/servers');
-		await page.getByRole('button', { name: 'Actions for Contoso' }).click();
-		await page.getByRole('menuitem', { name: 'Edit' }).click();
+		// Edit is a button of the row, not an entry of its menu.
+		await page.locator('[data-source="Contoso"]').getByRole('button', { name: 'Edit Contoso' }).click();
 		await expect(page.getByRole('dialog')).toContainText('Directory (tenant) ID of the Entra application.');
 	});
 
@@ -177,8 +177,13 @@ test.describe('Microsoft 365 tenants', () => {
 		await ready(page, '/servers');
 		await page.getByRole('button', { name: 'Actions for Contoso' }).click();
 		await page.getByRole('menuitem', { name: 'Delete' }).click();
-		await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
-		await expect(page.getByTestId('toast').filter({ hasText: 'mailboxes are linked to this tenant' })).toBeVisible();
+		// No question to answer: the dialog says what to detach first, and its Delete button is off.
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Detach the');
+		await expect(dialog).toContainText('mailboxes linked to this tenant first');
+		await expect(dialog.getByTestId('source-delete-blocked')).toBeDisabled();
+		await dialog.getByRole('button', { name: 'Cancel' }).click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
 		await expect(page.locator('[data-source="Contoso"]')).toBeVisible();
 	});
 
@@ -273,6 +278,8 @@ test.describe('Microsoft 365 tenants', () => {
 		await ready(page, MATCH);
 		await expect(page.getByTestId('tenant-bar-summary')).toContainText('12 selected');
 		await expect(page.getByTestId('tenant-resync')).toBeDisabled();
+		// The reason is written next to the disabled button, not only in a tooltip.
+		await expect(page.getByTestId('tenant-resync-reason')).toContainText('tick only linked rows');
 		await page.getByTestId('tenant-start').click();
 		const dialog = page.getByTestId('tenant-start-dialog');
 		await expect(dialog.getByTestId('tenant-batch-name')).toHaveValue(/Contoso to Yeti \(Contoso\)/);
@@ -298,9 +305,12 @@ test.describe('Microsoft 365 tenants', () => {
 		await ready(page, MATCH);
 		await expect(page.getByTestId('tenant-resync')).toBeDisabled();
 		await chip(page, 'linked').click();
+		// Only linked rows are shown: "Tick all ready" has nothing to tick, and stays in place, disabled.
+		await expect(page.getByTestId('tenant-tick-ready')).toBeDisabled();
 		await page.getByTestId('tenant-tick-all').check();
 		await expect(page.getByTestId('tenant-bar-summary')).toContainText('2 selected');
 		await expect(page.getByTestId('tenant-resync')).toBeEnabled();
+		await expect(page.getByTestId('tenant-resync-reason')).toHaveCount(0);
 		await page.getByTestId('tenant-resync').click();
 		await page.getByTestId('tenant-start-confirm').click();
 		await expect(page).toHaveURL(/\/\?batch=\d+/);

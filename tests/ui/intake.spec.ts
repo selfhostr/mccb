@@ -206,8 +206,11 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await mock(page.request, 'pst', { pst: { ...fetching, slowCancel: true } });
 		await ready(page, '/files');
 		const row = page.locator('li[data-pst="jane.pst"]');
-		// Nothing to delete while it downloads: the menu is not offered.
-		await expect(row.getByRole('button', { name: 'More actions for jane.pst' })).toHaveCount(0);
+		// Nothing to delete while it downloads: the menu says so instead of hiding the action.
+		await row.getByRole('button', { name: 'More actions for jane.pst' }).click();
+		await expect(page.getByRole('menuitem', { name: /^Delete: cancel the download first/ })).toHaveAttribute('aria-disabled', 'true');
+		await page.keyboard.press('Escape');
+		await expect(row.getByTestId('pst-select')).toBeDisabled();
 		await row.getByRole('button', { name: 'Cancel the download of jane.pst' }).click();
 		await expect(row).toContainText('Cancelling');
 		await expect(row.getByRole('button', { name: /^Cancel the download/ })).toHaveCount(0);
@@ -224,7 +227,7 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		expect((await state(page)).retryCalls).toEqual([50]);
 	});
 
-	test('where a file came from, and what the automatic assignment did, in words', async ({ page }) => {
+	test('where a file came from, and what the automatic linking did, in words', async ({ page }) => {
 		const base = { size: 2_000_000, status: 'valid', source: 'inbox', origin: 'inbox', received_bytes: null };
 		await mock(page.request, 'pst', { pst: { ...base, id: 60, filename: 'a.pst', chain: { result: 'assigned', account_id: 1, job_id: 4 } } });
 		await mock(page.request, 'pst', { pst: { ...base, id: 61, filename: 'b.pst', chain: { result: 'no_match' } } });
@@ -235,13 +238,26 @@ test.describe('files: fetch, drop folder and statuses', () => {
 		await ready(page, '/files');
 		const li = (name: string) => page.locator(`li[data-pst="${name}"]`);
 		await expect(li('a.pst').getByTestId('pst-from')).toHaveText('Taken from the drop folder');
-		await expect(li('a.pst').getByTestId('pst-chain')).toHaveText('Automatically assigned to alice@example.com, import started');
-		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No mailbox matches this file name');
-		await expect(li('c.pst').getByTestId('pst-chain')).toContainText('Several mailboxes match');
-		await expect(li('d.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment failed: queue full');
-		await expect(li('e.pst').getByTestId('pst-chain')).toHaveText('Automatic assignment: brand_new_result');
+		await expect(li('a.pst').getByTestId('pst-chain')).toHaveText('Linked to alice@example.com, migration started');
+		await expect(li('b.pst').getByTestId('pst-chain')).toHaveText('No mailbox has this name: choose one by hand');
+		await expect(li('c.pst').getByTestId('pst-chain')).toContainText('Several mailboxes have this name');
+		await expect(li('d.pst').getByTestId('pst-chain')).toHaveText('Automatic linking failed: queue full');
+		await expect(li('e.pst').getByTestId('pst-chain')).toHaveText('Automatic linking: brand_new_result');
 		await expect(li('f.pst').getByTestId('pst-from')).toHaveCount(0);
 		await expect(li('f.pst').getByTestId('pst-chain')).toHaveCount(0);
+	});
+
+	test('once a mailbox is linked to a file, the automatic linking has nothing more to say', async ({ page }) => {
+		const base = { size: 2_000_000, status: 'valid', source: 'inbox', origin: 'inbox', received_bytes: null };
+		await mock(page.request, 'pst', { pst: { ...base, id: 60, filename: 'a.pst', chain: { result: 'assigned', account_id: 1, job_id: 4 } } });
+		await ready(page, '/files');
+		await expect(page.locator('li[data-pst="a.pst"]').getByTestId('pst-chain')).toHaveText('Linked to alice@example.com, migration started');
+
+		// The link is made (here by an event): the row says how many mailboxes use the file, and no more about the chain.
+		const account = await (await page.request.get('/api/accounts/1')).json();
+		await mock(page.request, 'event', { kind: 'account', data: { ...account, pst_id: 60 } });
+		await expect(page.locator('li[data-pst="a.pst"]').getByTestId('pst-linked')).toHaveText('Linked mailboxes: 1');
+		await expect(page.locator('li[data-pst="a.pst"]').getByTestId('pst-chain')).toHaveCount(0);
 	});
 
 	test('"Fetch from a server": HTTP with options tucked away, SFTP and S3 fields, refusals shown', async ({ page }) => {
