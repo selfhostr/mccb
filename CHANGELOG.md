@@ -1,24 +1,44 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
+mccb 2.2.0 simplifies the interface and makes it faster to work on many mailboxes at once: servers of any kind can be shared by mailboxes, lists of mailboxes can be imported and edited in bulk, and jobs can be paused, resumed or retried on a selection. Repair keeps untouched headers byte for byte, and the contacts of a PST are no longer dropped without a sign.
 
 ### Added
 - A server of any kind (IMAP, Exchange, JMAP...) can be saved once on the Servers page and shared by mailboxes: it holds the address and the common settings, each mailbox keeps its own login and password. `/api/source-connections` accepts these kinds, and a connection lists the names of its stored secrets (`secret_names`).
 - New migration takes several mailboxes at once, typed line by line or pasted as a list.
+- List import in New migration: paste a list or drop a CSV file with a source and a destination column. A template can be downloaded.
+- Bulk edit and bulk delete of mailboxes.
+- Pause, Resume, Stop and Retry errors on a selection of jobs.
+- Files: a "Migrate to..." button on each file, and bulk delete of files.
+- The source of a mailbox, a file or a saved IMAP server, is picked in the mailbox panel.
+- A warning before a migration that would skip calendars and contacts because CalDAV/CardDAV is turned off on the target server.
+- Distribution lists of a PST are migrated as vCard groups.
 - Duplicates also works on mailboxes added by hand, without a migration. The list is shared with Repair.
-- The sidebar folds down to its icons.
+- Duplicates shows the date of the last analysis and a preview for each mailbox before anything is removed.
+- Repair and the Repair report count messages without recipients, per folder and in total. They are only reported, never edited.
+- The sidebar folds down to its icons, with Documentation and GitHub links.
+- The interface is fully translated in nine languages.
 
 ### Changed
 - Simpler interface: one "Add a server" picker for every kind of server, forms open in a side panel, page headers hold a title and icon buttons, and Settings is one page (notifications, automatic assignment and API tokens open in a panel).
 - Repair and Duplicates are two tabs of one page, Maintenance.
+- Duplicates: the action that removes messages is red, and Repair cannot start without an analysis.
+- New migration is server to server only. Files are migrated from the Files page.
+- CalDAV and CardDAV are turned on by default for new IMAP servers.
+- Repair writes every header it does not change exactly as it was read, and checks every header of the repaired message. If one differs, the message is left alone and the error is recorded.
+- The dark theme is more contrasted.
+- Calm animations for pages, lists, toasts and dialogs. Reduced motion is respected.
 - The "Live" label is gone: the interface only says when it is reconnecting.
 - Short interface texts (toasts, empty states, status lines) no longer end with a period.
 
 ### Fixed
+- Repair no longer re-encodes untouched headers: a To or Cc in raw UTF-8 or latin-1 was rewritten as `=?unknown-8bit?q?...?=`, and long address lists were folded differently.
+- The Contacts folder of a PST is recognised even when one item is a distribution list or cannot be read. Before, its contacts were all ignored.
+- A contact that fails (build, encoding or upload) is counted as an error and shown in the job, and the migration goes on with the next one.
+- When CalDAV/CardDAV is turned off on the target server, a PST job says that contacts, tasks and notes were not migrated, instead of ending "done" with 0/0.
+- Items of a PST that cannot be converted are skipped with their message class, summarised per class, and tried again on the next run.
+- Control characters are removed from vCards, which SabreDAV refuses.
 - Testing unsaved settings of a kind that has no directory answers 422 instead of 500.
-- PST contacts: distribution lists (`IPM.DistList`) are migrated as vCard contact groups with their members' addresses, instead of being skipped without a word. Contacts skipped on an earlier run are tried again on the next normal run.
-- PST contacts: a contacts folder without a proper container class is recognised even when its first items include a group or an unreadable item (its contacts were taken for mails and skipped).
-- PST jobs say what they leave out: calendar and contact items when DAV is disabled for the server, tasks and notes, items the engine cannot convert (with their message class). One contact or event that fails no longer stops the rest of its phase, and control characters that made servers refuse a card are removed.
 
 ## 2.1.0
 mccb 2.1.0 migrates a whole Microsoft 365 tenant from one screen, after a two-click Connect with Microsoft, and adds a Duplicates tab. Calendars, address books and task lists now keep their own collections on CalDAV and CardDAV targets. The project moved to the selfhostr organisation: change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.
