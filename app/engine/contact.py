@@ -2,19 +2,32 @@
 from __future__ import annotations
 
 import base64
+import re
 from datetime import datetime, timedelta, timezone
 
 from . import mapi
 from .message import extract_bodies, html_to_text, message_class
 
 AD = mapi.PSETID_ADDRESS
+# C0 controls (but TAB, LF, CR) and DEL: not allowed in a vCard value, servers (SabreDAV, vobject) refuse the card
+_CTRL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def is_contact_class(cls: str) -> bool:
     return (cls or "").lower().startswith("ipm.contact")
 
 
+def is_distlist_class(cls: str) -> bool:
+    return (cls or "").lower().startswith("ipm.distlist")
+
+
+def is_address_book_class(cls: str) -> bool:
+    """Items an address book folder holds and that are migrated: contacts and contact groups."""
+    return is_contact_class(cls) or is_distlist_class(cls)
+
+
 def _esc(s: str) -> str:
+    s = _CTRL.sub("", s)
     return (s.replace("\\", "\\\\").replace("\r\n", "\n").replace("\r", "\n")
             .replace("\n", "\\n").replace(";", "\\;").replace(",", "\\,"))
 
@@ -46,7 +59,10 @@ def _date_of(dt_local: datetime | None, dt_utc: datetime | None):
 def build_contact(src, uid: str):
     """Returns (summary, vcard_text, warnings) or None if not a contact."""
     bag = src.bag
-    if not is_contact_class(message_class(bag)):
+    cls = message_class(bag)
+    if is_distlist_class(cls):
+        return build_distlist(src, uid)
+    if not is_contact_class(cls):
         return None
     warnings: list[str] = []
     s = bag.string
@@ -65,6 +81,9 @@ def build_contact(src, uid: str):
                 addr = disp.split("(")[-1].rstrip(")").strip() if "(" in disp else disp.strip()
         if addr and "@" in addr and addr.lower() not in [e.lower() for e in emails]:
             emails.append(addr)
+        elif addr and "@" not in addr:
+            # e.g. an Exchange (EX) legacy DN with no SMTP form anywhere on the contact: the address is lost
+            warnings.append("email-not-smtp:%s" % atype)
     fn = (s(mapi.PR_DISPLAY_NAME) or " ".join(x for x in (prefix, given, middle, surname, suffix) if x)
           or s((AD, mapi.LID_FILE_UNDER)) or company or (emails[0] if emails else "") or "Contact")
     fn = fn.strip()
@@ -157,8 +176,71 @@ def build_contact(src, uid: str):
             break
         except Exception as ex:  # noqa: BLE001
             warnings.append("photo-unreadable:%s" % ex)
+    _rev(bag, lines)
+    lines.append("END:VCARD")
+    return fn, "".join(_fold(l) for l in lines), warnings
+
+
+def _rev(bag, lines: list[str]) -> None:
     rev = bag.time(mapi.PR_LAST_MODIFICATION_TIME)
     if rev:
         lines.append("REV:" + rev.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def distlist_members(bag) -> tuple[list[tuple[str, str]], int]:
+    """([(display name, SMTP address)], members without a usable address) of an IPM.DistList.
+    PidLidDistributionListOneOffMembers holds a one-off EntryID (name, address) per member, parallel to
+    PidLidDistributionListMembers, whose entries are wrapped EntryIDs of contacts of the store or one-offs."""
+    one_offs = bag.binaries((AD, mapi.LID_DISTLIST_ONE_OFF_MEMBERS))
+    members = bag.binaries((AD, mapi.LID_DISTLIST_MEMBERS))
+    cp = bag.codepage or bag.default_codepage or "cp1252"
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    missing = 0
+    for i in range(max(len(one_offs), len(members))):
+        parsed = None
+        for eid in ((one_offs[i] if i < len(one_offs) else None), (members[i] if i < len(members) else None)):
+            parsed = mapi.parse_one_off_entryid(eid, cp)
+            if parsed:
+                break
+        if not parsed or "@" not in parsed[2] or parsed[1].upper() not in ("SMTP", ""):
+            missing += 1
+            continue
+        name, _atype, addr = parsed
+        if addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        out.append((name if name and name.lower() != addr.lower() else "", addr))
+    return out, missing
+
+
+def build_distlist(src, uid: str):
+    """IPM.DistList -> vCard 3.0 contact group (Apple / SabreDAV convention X-ADDRESSBOOKSERVER-KIND:group). The
+    members are kept three times, so that no client loses them: mailto members, EMAIL lines and the NOTE."""
+    bag = src.bag
+    warnings: list[str] = []
+    s = bag.string
+    name = (s(mapi.PR_DISPLAY_NAME) or s((AD, mapi.LID_DISTLIST_NAME)) or s((AD, mapi.LID_FILE_UNDER))
+            or "Contact group").strip() or "Contact group"
+    members, missing = distlist_members(bag)
+    if missing:
+        warnings.append("distlist-member-without-address:%d" % missing)
+    lines = ["BEGIN:VCARD", "VERSION:3.0", "PRODID:-//yety//mccb//EN",
+             "UID:" + _esc(uid), "FN:" + _esc(name), "N:" + _esc(name) + ";;;;",
+             "X-ADDRESSBOOKSERVER-KIND:group"]
+    for _n, addr in members:
+        lines.append("X-ADDRESSBOOKSERVER-MEMBER:mailto:" + _esc(addr))
+    for _n, addr in members:
+        lines.append("EMAIL;TYPE=INTERNET:" + _esc(addr))
+    cats = bag.strings((mapi.PS_PUBLIC_STRINGS, mapi.LID_CATEGORIES_NAME))
+    if cats:
+        lines.append("CATEGORIES:" + ",".join(_esc(c) for c in cats))
+    text, html = extract_bodies(bag, warnings)
+    note = (text or (html_to_text(html) if html else None) or "").strip()
+    listing = "\n".join("%s <%s>" % (n, a) if n else a for n, a in members)
+    note = "\n\n".join(x for x in (note, ("Members:\n" + listing) if listing else "") if x)
+    if note:
+        lines.append("NOTE:" + _esc(note))
+    _rev(bag, lines)
     lines.append("END:VCARD")
-    return fn, "".join(_fold(l) for l in lines), warnings
+    return name, "".join(_fold(l) for l in lines), warnings

@@ -24,6 +24,10 @@ in that collection.
 Calendars that Outlook or Google generate and that cannot be edited (holidays, birthdays built from the contacts,
 internet subscriptions) are not migrated: the log names them.
 
+With DAV disabled on the server, a PST job sends no calendar or contact item: its log and report say how many were
+left out. An Outlook distribution list becomes a vCard contact group (`X-ADDRESSBOOKSERVER-KIND:group`): its members
+are written as `mailto:` members, as `EMAIL` lines and in the note, so that clients without groups still show them.
+
 Objects are written as `<UID>.ics` or `<UID>.vcf` when their UID is safe as a file name, as some servers (MDaemon)
 store them under that name whatever the URL of the write.
 

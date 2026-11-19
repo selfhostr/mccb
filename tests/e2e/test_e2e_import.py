@@ -10,7 +10,7 @@ import pytest
 from tests.e2e.helpers import FIXTURES, create_user, fffd_problems, parse, source_model, verify_on_servers
 
 FIXTURE_FILES = ["enron.pst", "aspose-outlook.pst", "aspose-sample-contacts.pst", "aspose-sample.ost",
-                 "aspose-test-part0.pst"]  # the latter contains an unreadable item (justified error)
+                 "aspose-test-part0.pst", "dist-list.pst"]  # aspose-test-part0 contains an unreadable item (justified error)
 RESULTS: dict[str, dict] = {}
 
 

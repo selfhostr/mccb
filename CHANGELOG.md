@@ -16,6 +16,9 @@
 
 ### Fixed
 - Testing unsaved settings of a kind that has no directory answers 422 instead of 500.
+- PST contacts: distribution lists (`IPM.DistList`) are migrated as vCard contact groups with their members' addresses, instead of being skipped without a word. Contacts skipped on an earlier run are tried again on the next normal run.
+- PST contacts: a contacts folder without a proper container class is recognised even when its first items include a group or an unreadable item (its contacts were taken for mails and skipped).
+- PST jobs say what they leave out: calendar and contact items when DAV is disabled for the server, tasks and notes, items the engine cannot convert (with their message class). One contact or event that fails no longer stops the rest of its phase, and control characters that made servers refuse a card are removed.
 
 ## 2.1.0
 mccb 2.1.0 migrates a whole Microsoft 365 tenant from one screen, after a two-click Connect with Microsoft, and adds a Duplicates tab. Calendars, address books and task lists now keep their own collections on CalDAV and CardDAV targets. The project moved to the selfhostr organisation: change `ghcr.io/yetysw/mccb` to `ghcr.io/selfhostr/mccb` in your `docker-compose.yml`.

@@ -46,6 +46,9 @@ DONE_ROW = {"id": None, "item_key": None, "status": "ok", "target": None, "hash"
 # rows left out by the date filter (judged again on every run): shared too, a size-filtered row keeps its size
 FILTERED_ROW = {"id": None, "item_key": None, "status": pol.FILTERED, "target": None, "hash": None,
                 "error": pol.FILTER_PREFIX + "date", "size": None}
+# calendar / contact item the engine returned nothing for (e.g. a contact group before the engine converted them): skipped,
+# and judged again on every normal run, so that a newer engine migrates it
+UNCONVERTED = "item cannot be converted"
 
 
 UPSERT_ITEM = (
@@ -546,6 +549,7 @@ class JobRunner:
         self.report: dict = {"folders": [], "warnings": [], "verify": {}, "dav": {}, "precheck": {}}
         self.consecutive_temp = 0
         self.dav_targets: dict[str, str] = {}
+        self._unconverted: dict[str, int] = {}  # DAV phase: items the engine did not convert, per message class
         # native crashes already suffered by this job (subprocess) and unreadable indexes known for the PST
         self.crashes = crash.get_crashes(job_id)
         self.skips = crash.get_skips(self.pst_key) if self.pst_key else set()
@@ -748,7 +752,9 @@ class JobRunner:
         for r in db.conn().execute(
                 "SELECT id, item_key, status, target, hash, error, size FROM items WHERE account_id=? AND pst_key=? AND kind=? "
                 "AND folder IN (?, ?)", (self.account_id, self.pst_key, kind, fkey, legacy)):
-            if r["status"] in ("ok", "skipped"):
+            if r["status"] == "skipped" and kind != "mail" and (r["error"] or "").startswith(UNCONVERTED):
+                out[r["item_key"]] = dict(r)
+            elif r["status"] in ("ok", "skipped"):
                 out[r["item_key"]] = DONE_ROW
             elif r["status"] == pol.FILTERED and r["error"] == FILTERED_ROW["error"]:
                 out[r["item_key"]] = FILTERED_ROW
@@ -825,6 +831,8 @@ class JobRunner:
             return self.mode == "errors" and self.crashes == 0
         if st == "error" and (r.get("error") or "").startswith(pol.OVERSIZE_PREFIX):
             return self.mode == "errors"  # refused for its size: sent again only when the administrator asks
+        if st == "skipped" and r.get("id") is not None and (r.get("error") or "").startswith(UNCONVERTED):
+            return self.mode != "errors"  # converted by a newer engine maybe: built again (cheap) on a normal run
         if self.mode == "errors":
             return st in ("error", "inflight", "pending")
         return st not in ("ok", "skipped")
@@ -909,6 +917,8 @@ class JobRunner:
                     if self._excluded(f):
                         continue
                     self.totals[k] += int(f.count or 0)
+            self._warn_dav_disabled()
+            self._note_unsupported()
             self.flush(force=True)
             self.precheck()
             if self.acc["opt_mail"]:
@@ -918,6 +928,31 @@ class JobRunner:
             if self.srv["dav_enabled"] and self.acc["opt_contacts"]:
                 self.phase_dav("contacts")
             self.phase_verify()
+
+    def _warn_dav_disabled(self) -> None:
+        """Calendars and contacts asked for, present in the PST, but DAV is off for the server: nothing of them is
+        sent. Said in the log and the report instead of a job that looks complete."""
+        if self.srv["dav_enabled"]:
+            return
+        for phase, opt in (("calendar", "opt_calendar"), ("contacts", "opt_contacts")):
+            if not self.acc[opt]:
+                continue
+            n = sum(int(f.count or 0) for f in self.folders if f.kind == phase and not self._excluded(f))
+            if n:
+                w = (f"{phase}: {n} item(s) in the PST not migrated: CalDAV/CardDAV is disabled for the server "
+                     f"'{self.srv['name']}' (enable DAV in the server settings, then run the job again)")
+                self.report["warnings"].append(w)
+                self.log(w, "warning")
+
+    def _note_unsupported(self) -> None:
+        """Tasks, notes and journal entries are not read from a PST (see limits.md): said once, with their count."""
+        counts: dict[str, int] = {}
+        for f in self.folders:
+            if f.kind in ("tasks", "notes", "journal") and int(f.count or 0):
+                counts[f.kind] = counts.get(f.kind, 0) + int(f.count or 0)
+        if counts:
+            self.log("Not migrated from a PST: " + ", ".join(f"{n} {k} item(s)" for k, n in sorted(counts.items())),
+                     "warning")
 
     def _excluded(self, f) -> bool:
         """Folder left out by the policy (exclude_folders): not listed, not counted, mentioned in the report."""
@@ -1750,6 +1785,7 @@ class JobRunner:
             finally:
                 self._close_builders()
             entries.reverse()
+            self._unconverted = {}
             while entries:
                 _sv, key, fi, idx = entries.pop()
                 self.check()
@@ -1761,6 +1797,12 @@ class JobRunner:
                     continue
                 self._dav_item(dav, url, phase, kind, fkey, idx, key, handle, builder)
                 self._drop_fallback(self._fallbacks.pop((fi, idx), None))
+            if self._unconverted:
+                n = sum(self._unconverted.values())
+                detail = ", ".join(f"{c} × {n_c}" for c, n_c in sorted(self._unconverted.items()))
+                w = f"{phase}: {n} item(s) not converted, recorded as skipped (message class: {detail})"
+                self.report["warnings"].append(w)
+                self.log(w, "warning")
             self._mark()
         self.current_folder = None
         self.flush(force=True)
@@ -1770,19 +1812,43 @@ class JobRunner:
         self._mark(kind, fkey, idx, key)  # libpff read of this item
         try:
             obj = builder(handle)
+        except (PauseRequested, StopRequested, JobFailed):
+            raise
         except Exception as e:
             self.upsert_item(kind, key, fkey, "error", target=url, error=f"construction: {type(e).__name__}: {e}")
-            self.log(f"Cannot build ({fkey} #{idx}): {e}", "error")
+            self._item_log(f"Cannot build ({fkey} #{idx}): {e}", "error")
             return
         if obj is None:
-            self.upsert_item(kind, key, fkey, "skipped", target=url, error="item cannot be converted")
+            cls = None
+            item_class = getattr(self.pst, "item_class", None)  # engine extension
+            if item_class is not None:
+                try:
+                    cls = item_class(handle)
+                except Exception:  # noqa: BLE001
+                    cls = None
+            self.upsert_item(kind, key, fkey, "skipped", target=url,
+                             error=UNCONVERTED + (f" (message class {cls})" if cls else ""))
+            self._unconverted[cls or "?"] = self._unconverted.get(cls or "?", 0) + 1
             return
+        try:
+            size = len(obj.content.encode("utf-8"))
+        except UnicodeError as e:
+            self.upsert_item(kind, key, fkey, "error", target=url, subject=obj.summary,
+                             error=f"construction: {type(e).__name__}: {e}")
+            self._item_log(f"Cannot encode ({fkey} #{idx}) '{obj.summary}': {e}", "error")
+            return
+        warns = list(getattr(obj, "warnings", None) or [])  # engine extension (e.g. a group member without address)
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=url, subject=obj.summary,
-                                   hash=obj.filename, size=len(obj.content.encode("utf-8")))
-        err = self._dav_put(dav, url, obj, phase)
+                                   hash=obj.filename, size=size, warnings=db.jdump(warns) if warns else None)
+        try:
+            err = self._dav_put(dav, url, obj, phase)
+        except (PauseRequested, StopRequested, JobFailed):
+            raise
+        except Exception as e:  # one item never stops the phase: its error is recorded, the next one is sent
+            err = f"[perm] {type(e).__name__}: {e}"
         if err:
             self.set_item(item_id, "error", err)
-            self.log(f"PUT failure '{obj.summary}': {err}", "error")
+            self._item_log(f"PUT failure '{obj.summary}': {err}", "error")
         else:
             self.set_item(item_id, "ok")
 

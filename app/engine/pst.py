@@ -120,6 +120,23 @@ def folder_kind(container_class: str | None) -> str:
     return "other"
 
 
+_SNIFF_ITEMS = 3  # first items read to guess the kind of a folder without a usable container class
+
+
+def sniffed_kind(classes: list[str]) -> str | None:
+    """Kind of a folder from the message classes of its first readable items: every one of them a contact or a
+    contact group (IPM.DistList) -> contacts, every one an appointment -> calendar, else None (mail)."""
+    from .contact import is_address_book_class
+    from .event import is_event_class
+    if not classes:
+        return None
+    if all(is_address_book_class(c) for c in classes):
+        return "contacts"
+    if all(is_event_class(c) for c in classes):
+        return "calendar"
+    return None
+
+
 def check_pst_signature(path: str) -> bool:
     try:
         with open(path, "rb") as fh:
@@ -327,18 +344,24 @@ class PstFile:
     def _sniff_kind(self, folder):
         """Folders created by third-party tools sometimes lack a proper
         PR_CONTAINER_CLASS: look at the first items' message class."""
-        from .contact import is_contact_class
-        from .event import is_event_class
         try:
-            n = min(folder.number_of_sub_messages, 3)
-            classes = [message_class(self._bag(folder.get_sub_message(i))) for i in range(n)]
+            n = min(folder.number_of_sub_messages, _SNIFF_ITEMS)
         except Exception:  # noqa: BLE001
             return None
-        if classes and all(is_contact_class(c) for c in classes):
-            return "contacts"
-        if classes and all(is_event_class(c) for c in classes):
-            return "calendar"
-        return None
+        classes = []
+        for i in range(n):
+            try:
+                classes.append(message_class(self._bag(folder.get_sub_message(i))))
+            except Exception:  # noqa: BLE001 - one unreadable item does not hide the kind of the folder
+                continue
+        return sniffed_kind(classes)
+
+    def item_class(self, handle) -> str | None:
+        """Message class of an item (engine extension: says why an item was not converted)."""
+        try:
+            return message_class(self._wrap(handle).source().bag) or None
+        except Exception:  # noqa: BLE001
+            return None
 
     # items -----------------------------------------------------------------
     def iter_items(self, folder: FolderInfo, start: int = 0) -> Iterator[tuple[int, str, object]]:
