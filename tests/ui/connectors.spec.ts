@@ -24,7 +24,7 @@ test.describe('connectors', () => {
 		// The route lives in the row menu, not on the page.
 		const dialog = await openRoute(page, 'alice@example.com');
 		await expect(dialog.getByTestId('route-source-kind')).toHaveValue('');
-		await expect(dialog.getByTestId('route-source-kind').locator('option')).toHaveText(['PST file', 'Exchange (EWS)', 'Future mail service', 'IMAP']);
+		await expect(dialog.getByTestId('route-source-kind').locator('option')).toHaveText(['PST file', 'Exchange on premises (EWS)', 'Future mail service', 'Google', 'IMAP', 'IMAP (OAuth2)', 'JMAP']);
 		await expect(dialog.getByTestId('connector-fields')).toHaveCount(0);
 		// Nothing touched: saving sends nothing.
 		await page.getByTestId('route-save').click();
@@ -37,18 +37,18 @@ test.describe('connectors', () => {
 		const dialog = await openRoute(page, 'alice@example.com');
 		await dialog.getByTestId('route-source-kind').selectOption('imap');
 		const fields = dialog.getByTestId('route-source').locator('[data-field]');
-		await expect(fields).toHaveCount(5);
+		await expect(fields).toHaveCount(8);
 		await expect(dialog.getByTestId('route-source').locator('[data-field="port"]')).toHaveValue('993');
 		await expect(dialog.getByTestId('route-source').locator('[data-field="security"]')).toHaveValue('ssl');
 
 		// A required field left empty is said, not sent.
 		await page.getByTestId('route-save').click();
-		await expect(dialog.getByTestId('route-source-problem')).toContainText('Fill in: Server, User, Password');
+		await expect(dialog.getByTestId('route-source-problem')).toContainText('Fill in: Server, Login, Password');
 		expect((await state(page)).routeCalls).toEqual([]);
 
 		const src = dialog.getByTestId('route-source');
 		await src.locator('[data-field="host"]').fill('bad.example.com');
-		await src.locator('[data-field="username"]').fill('alice');
+		await src.locator('[data-field="login"]').fill('alice');
 		await src.locator('[data-field="password"]').fill('pw');
 		await dialog.getByTestId('route-source-test').click();
 		await expect(dialog.getByTestId('route-source-result')).toContainText('Unreachable');
@@ -63,7 +63,7 @@ test.describe('connectors', () => {
 		await expect(dialog.getByTestId('route-source-result')).toContainText('Connected');
 		await expect(dialog).toContainText('3 folder(s) found');
 		const probe = (await state(page)).probeCalls.at(-1);
-		expect(probe).toMatchObject({ kind: 'imap', body: { role: 'source', account_id: 1, config: { host: 'mail.old.example.com', port: 993, security: 'ssl', username: 'alice' }, secrets: { password: 'pw' } } });
+		expect(probe).toMatchObject({ kind: 'imap', body: { role: 'source', account_id: 1, config: { host: 'mail.old.example.com', port: 993, security: 'ssl', verify_tls: true, login: 'alice' }, secrets: { password: 'pw' } } });
 
 		await page.getByTestId('route-save').click();
 		await expect(page.getByTestId('toast').first()).toContainText('Source and destination saved');
@@ -74,7 +74,7 @@ test.describe('connectors', () => {
 		await expect(alice.getByRole('combobox', { name: /^PST file for/ })).toHaveCount(0);
 		const saved = (await state(page)).routeCalls;
 		expect(saved).toHaveLength(1);
-		expect(saved[0].body).toEqual({ kind: 'imap', config: { host: 'mail.old.example.com', port: 993, security: 'ssl', username: 'alice' }, secrets: { password: 'pw' } });
+		expect(saved[0].body).toEqual({ kind: 'imap', config: { host: 'mail.old.example.com', port: 993, security: 'ssl', verify_tls: true, login: 'alice' }, secrets: { password: 'pw' } });
 
 		// Open again: values are back, the password is "saved", and a change to the host alone keeps it.
 		await alice.getByTestId('source-summary').click();
@@ -114,16 +114,17 @@ test.describe('connectors', () => {
 	test('a boolean field and help text from the catalogue', async ({ page }) => {
 		await ready(page);
 		const dialog = await openRoute(page, 'carol@example.com');
-		await dialog.getByTestId('route-source-kind').selectOption('ews');
+		await dialog.getByTestId('route-source-kind').selectOption('exchange_ews');
 		await expect(dialog).toContainText('Usually https://mail.example.com/EWS/Exchange.asmx');
-		const verify = dialog.getByRole('checkbox', { name: 'Verify the certificate' });
+		const verify = dialog.getByRole('checkbox', { name: 'Verify the TLS certificate' });
 		await expect(verify).toBeChecked();
 		await verify.uncheck();
-		await dialog.getByTestId('route-source').locator('[data-field="server"]').fill('https://mail.example.com/EWS/Exchange.asmx');
+		await dialog.getByTestId('route-source').locator('[data-field="url"]').fill('https://mail.example.com/EWS/Exchange.asmx');
+		await dialog.getByTestId('route-source').locator('[data-field="login"]').fill('alice');
 		await dialog.getByTestId('route-source').locator('[data-field="password"]').fill('pw');
 		await page.getByTestId('route-save').click();
 		await expect(page.getByRole('dialog')).toHaveCount(0);
-		expect((await state(page)).routeCalls[0].body.config).toEqual({ server: 'https://mail.example.com/EWS/Exchange.asmx', verify_tls: false });
+		expect((await state(page)).routeCalls[0].body.config).toEqual({ url: 'https://mail.example.com/EWS/Exchange.asmx', login: 'alice', auth: 'auto', access: 'own', server_version: 'Exchange2013', verify_tls: false, include_archive: false });
 	});
 
 	test('the target sits behind a disclosure, warns about resending, and can go back to the server', async ({ page }) => {
@@ -133,11 +134,11 @@ test.describe('connectors', () => {
 		await expect(target.getByTestId('route-target-kind')).toBeHidden();
 		await dialog.getByTestId('route-target-disclosure').locator('summary').click();
 		await expect(dialog.getByTestId('route-resend')).toHaveCount(0);
-		await expect(target.getByTestId('route-target-kind').locator('option')).toHaveText(["The mailbox's server", 'CalDAV', 'IMAP']);
+		await expect(target.getByTestId('route-target-kind').locator('option')).toHaveText(["The mailbox's server", 'CalDAV', 'CardDAV', 'Exchange on premises (EWS)', 'IMAP', 'IMAP (OAuth2)', 'JMAP']);
 		await target.getByTestId('route-target-kind').selectOption('imap');
 		await expect(dialog.getByTestId('route-resend')).toContainText('everything will be sent again');
 		await target.locator('[data-field="host"]').fill('mail.new.example.com');
-		await target.locator('[data-field="username"]').fill('alice');
+		await target.locator('[data-field="login"]').fill('alice');
 		await target.locator('[data-field="password"]').fill('pw');
 		await dialog.getByTestId('route-target-test').click();
 		await expect(dialog.getByTestId('route-target-result')).toContainText('Connected');
