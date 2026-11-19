@@ -131,6 +131,9 @@ class Changes:
     items: list[SourceItem]
     cursor: str | None            # opaque, to give back to the next changed_since()
     reset: bool = False           # True: `items` is a full listing (no cursor, or the cursor is no longer valid)
+    # keys (SourceItem.key) the source reports as removed since the cursor (JMAP destroyed, Google cancelled /
+    # metadata.deleted...). Informative: the mirror deletes only on a complete mirror_listing() + exists() check
+    removed: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -151,7 +154,8 @@ class RemoteItem:
 
 
 # the only Source methods the mirror calls (app/server/mirror.py wraps the source so that nothing else can be reached)
-READ_ONLY_SOURCE_METHODS = frozenset({"open", "close", "folders", "iter_items", "fetch", "mirror_listing", "key_epoch"})
+READ_ONLY_SOURCE_METHODS = frozenset({"open", "close", "folders", "iter_items", "fetch", "mirror_listing", "key_epoch",
+                                      "exists"})
 
 
 class Source(abc.ABC):
@@ -201,6 +205,12 @@ class Source(abc.ABC):
         cannot be sure it saw everything (paging stopped early, an error swallowed) says complete=False: the mirror
         then deletes nothing in that folder. Errors are raised as ConnectorError (no deletion either)."""
         return Listing(list(self.iter_items(folder)))
+
+    def exists(self, folder: SourceFolder, keys: list[str]) -> dict[str, bool]:
+        """Direct read, item by item, of keys a listing no longer has, just before the mirror deletes them on the
+        target: {key: still at the source}. True also means "cannot tell": the item is then NOT deleted. The default
+        (everything True) therefore blocks every deletion until a connector answers for real."""
+        return {k: True for k in keys}
 
     def key_epoch(self, key: str) -> str | None:
         """The epoch a key was made under (IMAP: the UIDVALIDITY inside it), None when keys have none. A tracked item
@@ -279,9 +289,11 @@ class TargetSession(abc.ABC):
         DELETE_SOFT (marked, still there) or DELETE_HARD (gone: the runner keeps a copy first, see mirror.py)."""
         return DELETE_HARD
 
-    def delete(self, folder: str, ref: str) -> str:
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
         """Removes one of our items, the way delete_mode() says; returns that mode. Already gone is not an error.
-        A mail is marked with MIRROR_DELETED_FLAG. (CAP_DELETE)"""
+        A mail is marked with MIRROR_DELETED_FLAG. `expected_import_id`: the import id (mail) or resource name the
+        item must still carry; a target that can check it refuses (ConnectorError REJECTED) when it differs. The
+        mirror always calls inventory() and then delete() / update() on the SAME session. (CAP_DELETE)"""
         raise ConnectorError("this target cannot delete", ConnectorError.CONFIG)
 
     def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
