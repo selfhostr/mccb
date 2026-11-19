@@ -153,6 +153,9 @@ class RemoteItem:
     version: str | None = None    # etag or equivalent, when the target has one
 
 
+# epochs meaning "these keys cannot be trusted for deletions" (a folder renamed or moved, an unverified identity)
+UNSTABLE_EPOCHS = ("renamed-or-moved", "unverified")
+
 # the only Source methods the mirror calls (app/server/mirror.py wraps the source so that nothing else can be reached)
 READ_ONLY_SOURCE_METHODS = frozenset({"open", "close", "folders", "iter_items", "fetch", "mirror_listing", "key_epoch",
                                       "exists"})
@@ -206,16 +209,19 @@ class Source(abc.ABC):
         then deletes nothing in that folder. Errors are raised as ConnectorError (no deletion either)."""
         return Listing(list(self.iter_items(folder)))
 
-    def exists(self, folder: SourceFolder, keys: list[str]) -> dict[str, bool]:
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict[str, Any] | None = None) -> dict[str, bool]:
         """Direct read, item by item, of keys a listing no longer has, just before the mirror deletes them on the
         target: {key: still at the source}. True also means "cannot tell": the item is then NOT deleted. The default
-        (everything True) therefore blocks every deletion until a connector answers for real."""
+        (everything True) therefore blocks every deletion until a connector answers for real. `refs`: {key: the
+        SourceItem.ref recorded when the item was written (items.src_ref, JSON round trip: a tuple comes back as a
+        list), None when not recorded}, for protocols whose keys cannot be turned back into an id (hashes)."""
         return {k: True for k in keys}
 
     def key_epoch(self, key: str) -> str | None:
         """The epoch a key was made under (IMAP: the UIDVALIDITY inside it), None when keys have none. A tracked item
         whose key has another epoch than the current listing means the keys were reset: the mirror refuses the
-        folder (`uidvalidity_changed`) instead of deleting everything and copying it again."""
+        folder (`uidvalidity_changed`) instead of deleting everything and copying it again. An epoch (of a key or of
+        Listing.epoch) containing one of UNSTABLE_EPOCHS refuses the folder as well."""
         return None
 
 
@@ -284,6 +290,15 @@ class TargetSession(abc.ABC):
         (CAP_INVENTORY)"""
         raise ConnectorError("this target cannot list its items for the mirror", ConnectorError.CONFIG)
 
+    def delete_many(self, folder: str, refs: list[str],
+                    expected_import_ids: dict[str, str] | None = None) -> dict[str, str]:
+        """Several deletions in one go: {ref: mode returned by delete()} of those done; a ref missing from the answer
+        failed (counted as an error, tried again at the next pass). Default: delete() one by one."""
+        out = {}
+        for ref in refs:
+            out[ref] = self.delete(folder, ref, (expected_import_ids or {}).get(ref))
+        return out
+
     def delete_mode(self, folder: str) -> str:
         """How delete() works in this folder: DELETE_TRASH (moved to the trash of the target, recoverable there),
         DELETE_SOFT (marked, still there) or DELETE_HARD (gone: the runner keeps a copy first, see mirror.py)."""
@@ -350,7 +365,7 @@ __all__ = [
     "CALENDAR", "CAP_DELETE", "CAP_FLAGS", "CAP_FOLDERS", "CAP_INCREMENTAL", "CAP_INTERNAL_DATE", "CAP_INVENTORY",
     "CAP_MIRROR", "CAP_MOVE", "CAP_PARALLEL", "CAP_QUOTA", "CAP_READBACK", "CAP_RULES", "CAP_SET_FLAGS", "CAP_UPDATE",
     "CONTACTS", "Changes", "ConnectorError", "DELETE_HARD", "DELETE_SOFT", "DELETE_TRASH", "FetchedItem", "FolderPlan",
-    "IMPORT_HEADER", "ITEM_KINDS", "Listing", "MAIL", "MIRROR_DELETED_FLAG", "OutgoingItem", "READ_ONLY_SOURCE_METHODS",
+    "IMPORT_HEADER", "ITEM_KINDS", "Listing", "UNSTABLE_EPOCHS", "MAIL", "MIRROR_DELETED_FLAG", "OutgoingItem", "READ_ONLY_SOURCE_METHODS",
     "RemoteItem", "Source", "SourceFolder", "SourceItem", "TASKS", "Target", "TargetSession", "stamp_import_id",
     "subject_of",
 ]

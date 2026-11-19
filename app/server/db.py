@@ -364,6 +364,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "accounts", "mirror INTEGER NOT NULL DEFAULT 0")
     _add_column(conn, "items", "version TEXT")
     _add_column(conn, "items", "stamp TEXT")
+    _add_column(conn, "items", "src_ref TEXT")  # JSON of SourceItem.ref when written: for Source.exists() (mirror)
     _add_column(conn, "jobs", "mirror TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
