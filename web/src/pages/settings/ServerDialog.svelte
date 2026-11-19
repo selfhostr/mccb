@@ -20,25 +20,34 @@
 
 	interface Props {
 		server?: Server | null;
+		/** Adding from a copy: the settings of this server, under another name. Nothing else comes along. */
+		duplicate?: Server | null;
 		/** Adding: the provider picked on the way in. Its preset fills host, port, security and the DAV addresses. */
 		provider?: Provider;
 		onclose: () => void;
 		onback?: () => void;
 		onsaved?: (saved: Server) => void;
 	}
-	let { server = null, provider: picked, onclose, onback, onsaved }: Props = $props();
+	let { server = null, duplicate = null, provider: picked, onclose, onback, onsaved }: Props = $props();
 
+	/** A copy keeps the settings of the server, not its identity nor its test verdict. */
+	function copyOf(source: Server): ServerInput {
+		const { id: _id, last_test: _t, last_test_result: _r, ...rest } = source;
+		return { ...rest, name: m.settings_server_copy_name({ name: source.name }) };
+	}
 	const initial: ServerInput = untrack(() =>
 		server
 			? { ...server }
-			: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null, ...(picked?.preset ?? {}) }
+			: duplicate
+				? copyOf(duplicate)
+				: { name: '', imap_host: '', imap_port: 993, imap_security: 'ssl', verify_tls: true, root_folder: '', caldav_url: '', carddav_url: '', dav_enabled: false, workers: 4, notes: '', tuning: 'auto', builders: null, ...(picked?.preset ?? {}) }
 	);
 	let form = $state<ServerInput>(initial);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
 	let policyError = $state<string | null>(null);
 	let policy = $state<PolicyFields>();
-	const provider = untrack(() => picked ?? providerOf(server?.imap_host));
+	const provider = untrack(() => picked ?? providerOf((server ?? duplicate)?.imap_host));
 	const LINKS = {
 		gmail_password: () => m.servers_link_gmail_password(),
 		gmail_imap: () => m.servers_link_gmail_imap(),
@@ -83,9 +92,9 @@
 	}
 </script>
 
-<Dialog title={server ? m.settings_server_edit_title({ name: server.name }) : m.servers_kind_title({ name: provider.id === 'imap' ? m.servers_type_imap() : provider.name })} {onclose} wide>
+<Dialog title={server ? m.settings_server_edit_title({ name: server.name }) : duplicate ? m.settings_server_duplicate_title({ name: duplicate.name }) : m.servers_kind_title({ name: provider.id === 'imap' ? m.servers_type_imap() : provider.name })} {onclose} wide>
 	<form id="server-form" class="flex flex-col gap-3" onsubmit={submit}>
-		{#if !server && note}
+		{#if !server && !duplicate && note}
 			<div class="rounded-btn bg-surface-2 p-3 text-sm text-ink-2" data-testid="server-note">
 				<p class="m-0">{note}</p>
 				{#if provider.links?.length}

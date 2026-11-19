@@ -5,6 +5,7 @@
 	import { davDetected } from '../../lib/logic/dav.ts';
 	import CalendarDays from '@lucide/svelte/icons/calendar-days';
 	import Check from '@lucide/svelte/icons/check';
+	import Copy from '@lucide/svelte/icons/copy';
 	import ContactRound from '@lucide/svelte/icons/contact-round';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -35,7 +36,10 @@
 	] as const;
 
 	let editing = $state.raw<Server | null>(null);
+	let duplicating = $state.raw<Server | null>(null);
 	let removing = $state.raw<Server | null>(null);
+	/** The mailboxes that go with a server when it is deleted. */
+	const boxesOf = (server: Server) => [...data.accounts.values()].filter((a) => a.server_id === server.id).length;
 	/** Tests run from this page: their details stay open until the page closes. The verdict itself is stored. */
 	const results = new SvelteMap<number, TestResult>();
 	const testing = new SvelteSet<number>();
@@ -128,11 +132,12 @@
 					{/if}
 					<div class="flex shrink-0 items-center">
 						<IconButton icon={FlaskConical} label={m.settings_server_test({ name: server.name })} loading={testing.has(server.id)} onclick={() => test(server)} />
+						<Button variant="ghost" icon={Pencil} aria-label={m.settings_server_edit_title({ name: server.name })} onclick={() => (editing = server)} data-testid="server-edit">{m.settings_server_edit()}</Button>
 						<Menu
 							label={m.settings_server_more({ name: server.name })}
 							icon={EllipsisVertical}
 							items={[
-								{ label: m.settings_server_edit(), icon: Pencil, onselect: () => (editing = server) },
+								{ label: m.settings_server_duplicate(), icon: Copy, onselect: () => (duplicating = server) },
 								{ label: m.settings_server_delete(), icon: Trash2, danger: true, onselect: () => (removing = server) }
 							]}
 						/>
@@ -165,7 +170,11 @@
 {#if editing}
 	<ServerDialog server={editing} onclose={() => (editing = null)} onsaved={(saved) => test(saved)} />
 {/if}
+{#if duplicating}
+	<ServerDialog duplicate={duplicating} onclose={() => (duplicating = null)} onsaved={(saved) => test(saved)} />
+{/if}
 {#if removing}
 	{@const target = removing}
-	<Confirm title={m.settings_server_delete_title()} text={m.settings_server_delete_text({ name: target.name })} confirm={m.settings_server_delete()} danger onconfirm={() => remove(target)} onclose={() => (removing = null)} />
+	{@const boxes = boxesOf(target)}
+	<Confirm title={m.settings_server_delete_title()} text={boxes ? m.settings_server_delete_text_boxes({ name: target.name, count: boxes }) : m.settings_server_delete_text({ name: target.name })} confirm={m.settings_server_delete()} danger onconfirm={() => remove(target)} onclose={() => (removing = null)} />
 {/if}
