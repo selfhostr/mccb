@@ -3,12 +3,16 @@
 	 * Fixed to the bottom: it covers nothing that the page has not reserved room for, and
 	 * pushes nothing. It says what is hidden and that actions leave it alone.
 	 */
+	import Ban from '@lucide/svelte/icons/ban';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
+	import Pause from '@lucide/svelte/icons/pause';
 	import Pencil from '@lucide/svelte/icons/pencil';
 	import Play from '@lucide/svelte/icons/play';
+	import RotateCw from '@lucide/svelte/icons/rotate-cw';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import X from '@lucide/svelte/icons/x';
 	import { m } from '#lib/paraglide/messages.js';
+	import type { BulkJobAction } from '../../lib/logic/bulk.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 
@@ -16,6 +20,10 @@
 		targets: number;
 		hidden: number;
 		testing: number;
+		/** The job actions that would change something for the selected mailboxes, and the one running now. */
+		jobActions: BulkJobAction[];
+		busy: BulkJobAction | null;
+		onjob: (action: BulkJobAction) => void;
 		ontest: () => void;
 		onimport: () => void;
 		onedit: () => void;
@@ -26,7 +34,15 @@
 		besidePanel: boolean;
 	}
 
-	let { targets, hidden, testing, ontest, onimport, onedit, ondelete, onclear, ondropHidden, besidePanel }: Props = $props();
+	let { targets, hidden, testing, jobActions, busy, onjob, ontest, onimport, onedit, ondelete, onclear, ondropHidden, besidePanel }: Props = $props();
+
+	const LABEL = $derived<Record<BulkJobAction, string>>({
+		pause: m.jobs_action_pause(),
+		resume: m.jobs_action_resume(),
+		stop: m.jobs_action_stop(),
+		'retry-errors': m.jobs_action_retry_errors()
+	});
+	const ICON = { pause: Pause, resume: Play, stop: Ban, 'retry-errors': RotateCw };
 </script>
 
 <div class={`fixed right-0 bottom-0 left-[var(--side-w)] z-30 border-t border-line-strong bg-surface ${besidePanel ? 'min-[1100px]:right-[600px]' : ''}`} data-testid="selection-bar" role="region" aria-label={m.migrations_bar_label()}>
@@ -46,6 +62,9 @@
 			</Button>
 			<Button icon={Pencil} disabled={!targets} onclick={onedit} data-testid="bulk-edit">{m.migrations_bar_edit()}</Button>
 			<Button icon={Trash2} disabled={!targets} onclick={ondelete} data-testid="bulk-delete">{m.migrations_bar_delete()}</Button>
+			{#each jobActions as action (action)}
+				<Button variant={action === 'stop' ? 'danger' : 'secondary'} icon={ICON[action]} loading={busy === action} disabled={busy != null} onclick={() => onjob(action)} data-testid={`bulk-${action}`}>{LABEL[action]}</Button>
+			{/each}
 			<Button variant="primary" icon={Play} disabled={!targets} onclick={onimport}>{m.migrations_bar_import()}</Button>
 			<IconButton icon={X} label={m.migrations_bar_clear()} onclick={onclear} />
 		</div>
