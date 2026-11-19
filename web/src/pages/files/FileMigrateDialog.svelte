@@ -137,16 +137,18 @@
 		if (fresh.length) data.test(fresh);
 		if (rows.some((r) => r.status === 'failed')) return;
 		const done = rows.filter((r) => r.status === 'added').map((r) => r.accountId as number);
+		// Read before closing: the parent drops the file with the dialog, and `name` follows it.
+		const fileName = name;
 		onclose();
 		if (done.length === 1) {
-			toast(m.files_migrate_done_one({ name }), 'signal');
+			toast(m.files_migrate_done_one({ name: fileName }), 'signal');
 			// One mailbox goes on in its panel, on the Migrations page: that is where it starts.
 			router.go(`/?account=${done[0]}`);
 		} else {
 			// Several come back selected: the selection bar offers to test and start them.
 			data.selected.clear();
 			for (const id of done) data.selected.add(id);
-			toast(m.files_migrate_done({ count: done.length, name }), 'signal');
+			toast(m.files_migrate_done({ count: done.length, name: fileName }), 'signal');
 			router.go('/');
 		}
 	}
