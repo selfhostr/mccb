@@ -147,17 +147,21 @@ describe('job report', () => {
 		expect(mirrorReport({ mail: {} })).toBeNull();
 		expect(mirrorReport(null)).toBeNull();
 		expect(mirrorReport({ mirror: [] })).toBeNull();
-		expect(mirrorReport({ mirror: { added: { mail: 1 } } })).toEqual({ added: { mail: 1 } });
+		const real = { options: { max_delete_percent: 20, allow_large_delete: false }, blocked: [], mail: { added: 1, updated: 0, deleted: 0, skipped_by_safety: 0, errors: 0 } };
+		expect(mirrorReport({ mirror: real })).toEqual(real);
 	});
 
 	it('gives one line per kind that moved, was left out or failed', () => {
-		const report = { added: { mail: 4 }, updated: { mail: 1, contacts: 2 }, deleted: { mail: 3 }, skipped_by_safety: { calendar: 6 }, errors: { tasks: 1 } };
+		const c = (added: number, updated: number, deleted: number, skipped_by_safety: number, errors: number) => ({ added, updated, deleted, skipped_by_safety, errors });
+		// The shape of the server (connector_runner._run_mirror): the counters are keyed by kind.
+		const report = { options: { max_delete_percent: 20, allow_large_delete: false }, blocked: [], mail: c(4, 1, 3, 0, 0), calendar: c(0, 0, 0, 6, 0), contacts: c(0, 2, 0, 0, 0), tasks: c(0, 0, 0, 0, 1) };
 		const rows = mirrorReportRows(report);
 		expect(rows.map((r) => r.kind)).toEqual(['mail', 'calendar', 'contacts', 'tasks']);
 		expect(rows[0]).toEqual({ kind: 'mail', added: 4, updated: 1, deleted: 3, skipped: 0, errors: 0 });
 		expect(rows[1].skipped).toBe(6);
 		expect(mirrorSkipped(report)).toBe(6);
-		expect(mirrorReportRows({ added: { mail: 0 } })).toEqual([]);
+		expect(mirrorReportRows({ mail: c(0, 0, 0, 0, 0) })).toEqual([]);
+		expect(mirrorReportRows({ blocked: [{ code: 'source_empty', message: 'x' }] })).toEqual([]);
 	});
 });
 

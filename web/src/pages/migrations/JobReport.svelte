@@ -131,9 +131,12 @@
 							</tbody>
 						</table>
 					</div>
-				{:else}
+				{:else if !mirror.blocked?.length}
 					<p class="m-0 text-ink-2">{m.migrations_mirror_uptodate()}</p>
 				{/if}
+				{#each mirror.blocked ?? [] as block (block.code + block.message)}
+					<Notice><p class="m-0" data-testid={`report-mirror-block-${block.code}`}>{block.message}</p></Notice>
+				{/each}
 				{#if mirrorSkipped(mirror)}
 					<Notice><p class="m-0" data-testid="report-mirror-skipped">{m.jobs_report_mirror_skipped_note({ count: fmtNum(mirrorSkipped(mirror)) })}</p></Notice>
 				{/if}

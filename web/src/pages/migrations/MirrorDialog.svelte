@@ -18,7 +18,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, post } from '../../lib/api/client.ts';
-	import type { Job, MirrorAccountPlan, MirrorAction, MirrorKind, MirrorPlan, RunInput } from '../../lib/api/types.ts';
+	import type { MirrorAccountPlan, MirrorAction, MirrorKind, MirrorPlan, MirrorRun, RunInput } from '../../lib/api/types.ts';
 	import { fmtAbsolute, fmtNum, toDate } from '../../lib/format.ts';
 	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampPercent, DEFAULT_MAX_DELETE_PERCENT, mirrorRows, mirrorState, mirrorTotals, offersLargeDelete, readyIds, sampleLines } from '../../lib/logic/mirror.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
@@ -148,12 +148,16 @@
 	async function run() {
 		applying = true;
 		applyError = null;
-		const chosen = [...runIds];
 		try {
-			const jobs = await post<Job[]>('/runs', body(false));
+			// The server answers 200 with a job per mailbox that may run; the others come back with their blocks and no job.
+			const { jobs } = await post<MirrorRun>('/runs', body(false));
 			for (const job of jobs) data.upsertJob(job);
+			if (!jobs.length) {
+				void compare();
+				return;
+			}
 			toast(m.migrations_mirror_queued({ count: jobs.length }), 'signal');
-			ondone(chosen);
+			ondone(jobs.map((job) => job.account_id));
 		} catch (e) {
 			applyError = errorText(e);
 			// The destination may have changed since the comparison: show it again.

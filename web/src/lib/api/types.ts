@@ -89,6 +89,8 @@ export interface Job {
 	finished_at: number | null;
 	error: string | null;
 	mode?: string | null;
+	/** Mirror job: the options, the counters by kind and what stopped it (see MirrorReport); null for the others. */
+	mirror?: MirrorReport | null;
 	created_at?: number | null;
 	tuning: { mode: string; builders: number; connections: number; fallback?: boolean } | null;
 }
@@ -350,13 +352,34 @@ export interface MirrorPlan {
 	accounts: MirrorAccountPlan[];
 }
 
-/** job.report.mirror: what a mirror run did, per kind. */
-export interface MirrorReport {
-	added?: MirrorCounts;
-	updated?: MirrorCounts;
-	deleted?: MirrorCounts;
-	skipped_by_safety?: MirrorCounts;
-	errors?: MirrorCounts;
+/** What a mirror run did to one kind of item. */
+export interface MirrorCounters {
+	added: number;
+	updated: number;
+	deleted: number;
+	skipped_by_safety: number;
+	errors: number;
+}
+
+/** job.report.mirror (and job.mirror): the options, what stopped the run, and the counters keyed by kind. */
+export type MirrorReport = {
+	options?: { max_delete_percent: number; allow_large_delete: boolean };
+	blocked?: MirrorBlock[];
+} & Partial<Record<MirrorKind, MirrorCounters>>;
+
+/** One entry of the answer of POST /runs with mode mirror and dry_run false. */
+export interface MirrorStart {
+	account_id: number;
+	email: string | null;
+	ready: boolean;
+	blocked: MirrorBlock[];
+	job_id?: number;
+}
+
+/** The answer of POST /runs with mode mirror and dry_run false: a job per mailbox that may run, the others stay blocked. */
+export interface MirrorRun {
+	accounts: MirrorStart[];
+	jobs: Job[];
 }
 
 export type PlanStatus = 'queued' | 'running' | 'done' | 'failed';

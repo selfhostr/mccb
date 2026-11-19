@@ -979,30 +979,35 @@ export async function handle(req) {
 	if (path === '/runs' && m === 'POST' && json().mode === 'mirror') {
 		const body = json();
 		const ids = body.account_ids ?? [];
-		const unknown = ids.filter((id) => !state.accounts.has(id));
-		if (unknown.length) return fail(422, { msg: 'unknown mailbox(es)', account_ids: unknown });
 		const options = { maxPercent: body.max_delete_percent ?? 20, allowLarge: body.allow_large_delete === true };
 		const failing = ids.find((id) => state.mirrorScenarios.get(id)?.fail);
 		if (failing) return fail(502, state.mirrorScenarios.get(failing).fail);
-		const plans = ids.map((id) => mirrorPlanOf(state.accounts.get(id), options));
+		// As the server: an unknown mailbox is a blocked one (no_prior_run), not an error.
+		const plans = ids.map((id) => (state.accounts.has(id) ? mirrorPlanOf(state.accounts.get(id), options) : { account_id: id, email: null, ready: false, to_add: fullCounts(), to_update: fullCounts(), to_delete: fullCounts(), blocked: [{ code: 'no_prior_run', message: 'unknown mailbox' }], sample: [] }));
 		state.mirrorCalls.push(body);
 		// A comparison writes nothing, and is the default: only dry_run false runs.
 		if (body.dry_run !== false) return send(200, { accounts: plans });
-		const blocked = plans.filter((p) => !p.ready);
-		if (blocked.length) return fail(409, { msg: 'mirror refused', accounts: blocked.map((p) => ({ account_id: p.account_id, blocked: p.blocked })) });
-		state.runCalls.push(ids);
+		// A run starts a job for each mailbox that may run (200); the others come back blocked, without a job.
 		state.runBodies.push(body);
-		const jobs = plans.map((plan) => {
+		const started = plans.filter((p) => p.ready);
+		if (started.length) state.runCalls.push(started.map((p) => p.account_id));
+		const jobs = started.map((plan) => {
 			const job = startJob(state.accounts.get(plan.account_id));
 			job.mode = 'mirror';
 			const scenario = state.mirrorScenarios.get(plan.account_id) ?? {};
-			state.mirrorOutcomes.set(job.id, { added: plan.to_add, updated: plan.to_update, deleted: plan.to_delete, skipped_by_safety: fullCounts(scenario.skipped), errors: fullCounts(scenario.errors) });
+			// The report of the server: the options, what stopped the run, then the counters keyed by kind.
+			const skipped = fullCounts(scenario.skipped);
+			const errors = fullCounts(scenario.errors);
+			const outcome = { options: { max_delete_percent: options.maxPercent, allow_large_delete: options.allowLarge }, blocked: [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
+			state.mirrorOutcomes.set(job.id, outcome);
+			job.mirror = outcome;
 			// The destination now matches the source.
 			state.mirrorScenarios.set(plan.account_id, { ...scenario, add: {}, update: {}, delete: {}, skipped: undefined });
 			publish('job', job);
 			return job;
 		});
-		return send(200, jobs);
+		const jobOf = new Map(jobs.map((j) => [j.account_id, j.id]));
+		return send(200, { accounts: plans.map((p) => ({ account_id: p.account_id, email: p.email, ready: p.ready, blocked: p.blocked, ...(jobOf.has(p.account_id) ? { job_id: jobOf.get(p.account_id) } : {}) })), jobs });
 	}
 	if (path === '/runs' && m === 'POST') {
 		const body = json();

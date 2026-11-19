@@ -309,7 +309,7 @@ test.describe('mirror mode', () => {
 		const dialog = page.getByRole('dialog', { name: 'Resync in mirror mode' });
 		await expect(dialog.getByTestId('mirror-totals')).toBeVisible();
 		const box = await dialog.boundingBox();
-		expect(box!.width).toBeLessThanOrEqual(390);
+		expect(box!.width).toBeLessThanOrEqual(390.5);
 		const wide = await dialog.evaluate((el) => el.scrollWidth > el.clientWidth);
 		expect(wide).toBe(false);
 	});

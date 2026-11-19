@@ -153,20 +153,14 @@ export function mirrorReport(report: Record<string, unknown> | null | undefined)
 export function mirrorReportRows(report: MirrorReport): MirrorReportRow[] {
 	const rows: MirrorReportRow[] = [];
 	for (const kind of MIRROR_KINDS) {
-		const row = {
-			kind,
-			added: report.added?.[kind] ?? 0,
-			updated: report.updated?.[kind] ?? 0,
-			deleted: report.deleted?.[kind] ?? 0,
-			skipped: report.skipped_by_safety?.[kind] ?? 0,
-			errors: report.errors?.[kind] ?? 0
-		};
+		const own = report[kind];
+		const row = { kind, added: own?.added ?? 0, updated: own?.updated ?? 0, deleted: own?.deleted ?? 0, skipped: own?.skipped_by_safety ?? 0, errors: own?.errors ?? 0 };
 		if (row.added || row.updated || row.deleted || row.skipped || row.errors) rows.push(row);
 	}
 	return rows;
 }
 
-export const mirrorSkipped = (report: MirrorReport): number => sumCounts(report.skipped_by_safety);
+export const mirrorSkipped = (report: MirrorReport): number => MIRROR_KINDS.reduce((n, kind) => n + (report[kind]?.skipped_by_safety ?? 0), 0);
 
 /** A mirror resync is offered when there is no job or the last one is over: a queued, running or paused one is left alone. */
 export const canMirrorResync = (job: Pick<Job, 'status'> | undefined): boolean => !job || ['done', 'done_with_errors', 'stopped', 'failed'].includes(job.status);
