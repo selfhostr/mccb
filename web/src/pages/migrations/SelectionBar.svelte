@@ -5,6 +5,7 @@
 	 */
 	import Ban from '@lucide/svelte/icons/ban';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
+	import GitCompareArrows from '@lucide/svelte/icons/git-compare-arrows';
 	import Pause from '@lucide/svelte/icons/pause';
 	import Pencil from '@lucide/svelte/icons/pencil';
 	import Play from '@lucide/svelte/icons/play';
@@ -26,6 +27,7 @@
 		onjob: (action: BulkJobAction) => void;
 		ontest: () => void;
 		onimport: () => void;
+		onmirror: () => void;
 		onedit: () => void;
 		ondelete: () => void;
 		onclear: () => void;
@@ -34,7 +36,7 @@
 		besidePanel: boolean;
 	}
 
-	let { targets, hidden, testing, jobActions, busy, onjob, ontest, onimport, onedit, ondelete, onclear, ondropHidden, besidePanel }: Props = $props();
+	let { targets, hidden, testing, jobActions, busy, onjob, ontest, onimport, onmirror, onedit, ondelete, onclear, ondropHidden, besidePanel }: Props = $props();
 
 	const LABEL = $derived<Record<BulkJobAction, string>>({
 		pause: m.jobs_action_pause(),
@@ -65,6 +67,7 @@
 			{#each jobActions as action (action)}
 				<Button variant={action === 'stop' ? 'danger' : 'secondary'} icon={ICON[action]} loading={busy === action} disabled={busy != null} onclick={() => onjob(action)} data-testid={`bulk-${action}`}>{LABEL[action]}</Button>
 			{/each}
+			<Button icon={GitCompareArrows} disabled={!targets} onclick={onmirror} data-testid="bulk-mirror">{m.migrations_mirror_resync()}</Button>
 			<Button variant="primary" icon={Play} disabled={!targets} onclick={onimport}>{m.migrations_bar_import()}</Button>
 			<IconButton icon={X} label={m.migrations_bar_clear()} onclick={onclear} />
 		</div>

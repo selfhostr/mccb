@@ -24,13 +24,14 @@
 	let domain = $state('');
 	let password = $state('');
 	let content = $state<Record<(typeof KEYS)[number], string>>({ mail: '', calendar: '', contacts: '' });
+	let mirror = $state('');
 	let busy = $state(false);
 	let failures = $state<string[]>([]);
 
 	const label = (k: (typeof KEYS)[number]) => ({ mail: m.migrations_row_content_mail(), calendar: m.migrations_row_content_calendar(), contacts: m.migrations_row_content_contacts() })[k];
 	const cleanDomain = $derived(domain.trim().replace(/^@/, ''));
 	const swap = (value: string) => (value.includes('@') ? `${value.slice(0, value.lastIndexOf('@'))}@${cleanDomain}` : value);
-	const changes = $derived(!!serverId || !!cleanDomain || !!password || KEYS.some((k) => content[k]));
+	const changes = $derived(!!serverId || !!cleanDomain || !!password || !!mirror || KEYS.some((k) => content[k]));
 	const example = $derived(cleanDomain && accounts[0] ? `${prefs.email(accounts[0].email)} → ${prefs.email(swap(accounts[0].email))}` : '');
 
 	async function submit(e: SubmitEvent) {
@@ -49,6 +50,7 @@
 			if (password) body.password = password;
 			const options: Partial<AccountOptions> = {};
 			for (const k of KEYS) if (content[k]) options[k] = content[k] === 'on';
+			if (mirror) options.mirror = mirror === 'on';
 			if (Object.keys(options).length) body.options = options;
 			try {
 				data.upsertAccount(await put<Account>(`/accounts/${a.id}`, body));
@@ -89,6 +91,13 @@
 				</Field>
 			{/each}
 		</div>
+		<Field label={m.migrations_mirror_label()} hint={m.migrations_mirror_help()}>
+			<select class="input" bind:value={mirror} data-testid="bulk-mirror-select">
+				<option value="">{m.migrations_bulk_keep()}</option>
+				<option value="on">{m.migrations_bulk_mirror_on()}</option>
+				<option value="off">{m.migrations_bulk_mirror_off()}</option>
+			</select>
+		</Field>
 		{#if failures.length}<ErrorNotice title={m.migrations_bulk_failed({ count: failures.length })} message={failures.join('\n')} />{/if}
 	</form>
 	{#snippet actions()}
