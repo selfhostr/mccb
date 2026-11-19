@@ -45,6 +45,7 @@
 	import GettingStarted from './GettingStarted.svelte';
 	import NewMigrationDialog from './NewMigrationDialog.svelte';
 	import JobPanel from './JobPanel.svelte';
+	import MirrorDialog from './MirrorDialog.svelte';
 	import AddServer from '../settings/AddServer.svelte';
 	import RouteDialog from './RouteDialog.svelte';
 	import SelectionBar from './SelectionBar.svelte';
@@ -191,6 +192,7 @@
 		| { kind: 'import'; plan: ImportPlan }
 		| { kind: 'server' }
 		| { kind: 'bulk-edit' }
+		| { kind: 'mirror'; ids: number[] }
 		| { kind: 'bulk-delete' }
 		| { kind: 'bulk-stop' }
 		| null
@@ -298,6 +300,9 @@
 		setTimeout(() => document.querySelector<HTMLElement>(selector)?.focus());
 	}
 
+	/** The mirror resync of the selection, or of one mailbox (its panel, its job). */
+	const openMirror = (ids: number[]) => (dialog = { kind: 'mirror', ids });
+
 	/** The start button of one mailbox's panel: the same dialog as for a selection, with one mailbox. */
 	function startOne(account: Account) {
 		dialog = { kind: 'import', plan: importPlan([account], (id) => data.jobs.get(id), (id) => data.psts.get(id), data.davEnabled) };
@@ -306,8 +311,8 @@
 
 <svelte:window onscroll={onScroll} onresize={measure} />
 
-{#snippet settings(id: number)}
-	<AccountSettings {id} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
+{#snippet settings(id: number, inJob?: boolean)}
+	<AccountSettings {id} {inJob} onmirror={(accountId) => openMirror([accountId])} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
 {/snippet}
 
 <!-- On a wide screen the list stays beside the panel instead of under it. -->
@@ -475,6 +480,7 @@
 		besidePanel={panelJob != null || panelAccount != null}
 		ontest={testSelected}
 		onimport={openImport}
+		onmirror={() => openMirror([...split.targets])}
 		onedit={() => (dialog = { kind: 'bulk-edit' })}
 		ondelete={() => (dialog = { kind: 'bulk-delete' })}
 		onclear={() => data.selected.clear()}
@@ -493,7 +499,7 @@
 	>
 		{#key `${panelJob}/${panelAccount}`}
 			{#if panelJob != null}
-				<JobPanel id={panelJob} onclose={closePanel} {settings} />
+				<JobPanel id={panelJob} onclose={closePanel} {settings} onmirror={(accountId) => openMirror([accountId])} />
 			{:else if panelAccount != null}
 				<AccountPanel id={panelAccount} onclose={closePanel} {settings} />
 			{/if}
@@ -515,6 +521,8 @@
 	<TestDialog accountId={dialog.id} onclose={closeDialog} />
 {:else if dialog?.kind === 'import'}
 	<ImportDialog plan={dialog.plan} onclose={closeDialog} ondone={imported} />
+{:else if dialog?.kind === 'mirror'}
+	<MirrorDialog ids={dialog.ids} onclose={closeDialog} ondone={imported} />
 {:else if dialog?.kind === 'bulk-edit'}
 	<BulkEditDialog ids={split.targets} onclose={closeDialog} />
 {:else if dialog?.kind === 'bulk-delete'}

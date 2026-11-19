@@ -40,6 +40,8 @@ export interface AccountOptions {
 	mail: boolean;
 	calendar: boolean;
 	contacts: boolean;
+	/** Mirror mode: a rerun makes the destination identical to the source (deletions and changes included). Never touches the source. */
+	mirror?: boolean;
 }
 
 export interface Account {
@@ -304,7 +306,57 @@ export interface InboxListing {
 export interface RunInput {
 	account_ids: number[];
 	name?: string;
-	mode?: 'full' | 'delta';
+	mode?: 'full' | 'delta' | 'mirror';
+	/** Mirror only. true (the default on the server): nothing is written, the answer is a MirrorPlan. */
+	dry_run?: boolean;
+	/** Mirror only: the most the run may delete on a mailbox, in percent of what the destination holds. */
+	max_delete_percent?: number;
+	/** Mirror only: lets a run delete more than the limit above. */
+	allow_large_delete?: boolean;
+}
+
+export type MirrorKind = 'mail' | 'calendar' | 'contacts' | 'tasks';
+export type MirrorAction = 'add' | 'update' | 'delete';
+export type MirrorCounts = Partial<Record<MirrorKind, number>>;
+
+export interface MirrorBlock {
+	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable. */
+	code: string;
+	message: string;
+}
+
+export interface MirrorSample {
+	kind: MirrorKind;
+	action: MirrorAction;
+	folder: string;
+	subject: string;
+	date: string;
+}
+
+/** What a mirror run would do to one mailbox's destination. */
+export interface MirrorAccountPlan {
+	account_id: number;
+	email: string;
+	ready: boolean;
+	to_add: MirrorCounts;
+	to_update: MirrorCounts;
+	to_delete: MirrorCounts;
+	blocked: MirrorBlock[];
+	sample: MirrorSample[];
+}
+
+/** The answer of POST /runs with mode mirror and dry_run true. */
+export interface MirrorPlan {
+	accounts: MirrorAccountPlan[];
+}
+
+/** job.report.mirror: what a mirror run did, per kind. */
+export interface MirrorReport {
+	added?: MirrorCounts;
+	updated?: MirrorCounts;
+	deleted?: MirrorCounts;
+	skipped_by_safety?: MirrorCounts;
+	errors?: MirrorCounts;
 }
 
 export type PlanStatus = 'queued' | 'running' | 'done' | 'failed';

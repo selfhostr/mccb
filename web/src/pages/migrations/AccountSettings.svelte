@@ -11,6 +11,7 @@
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import Contact from '@lucide/svelte/icons/contact';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
+	import GitCompareArrows from '@lucide/svelte/icons/git-compare-arrows';
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Mail from '@lucide/svelte/icons/mail';
 	import Play from '@lucide/svelte/icons/play';
@@ -29,6 +30,7 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import Field from '../../lib/ui/Field.svelte';
+	import SettingRow from '../../lib/ui/SettingRow.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import NoDavNotice from './NoDavNotice.svelte';
 	import ConnectionCell, { sourceProbes, sourceTestable, testSource } from './ConnectionCell.svelte';
@@ -45,9 +47,12 @@
 		onroute: (account: Account) => void;
 		onedit: (account: Account) => void;
 		onstart: (account: Account) => void;
+		onmirror: (id: number) => void;
+		/** Inside a job's panel, whose own actions already offer the mirror resync. */
+		inJob?: boolean;
 	}
 
-	let { id, ondetails, onupload, onroute, onedit, onstart }: Props = $props();
+	let { id, ondetails, onupload, onroute, onedit, onstart, onmirror, inJob = false }: Props = $props();
 
 	let last: Account | undefined;
 	const account = $derived.by(() => (last = data.accounts.get(id) ?? last) as Account);
@@ -270,6 +275,17 @@
 			{/each}
 		</div>
 		{#if noDavServer}<NoDavNotice server={noDavServer} />{/if}
+	</section>
+
+	<section class="flex flex-col gap-2" data-testid="step-mirror">
+		<div class="rounded-card border border-line-strong bg-surface">
+			<SettingRow label={m.migrations_mirror_label()} help={m.migrations_mirror_help()}>
+				<span class="check"><input class="switch" type="checkbox" checked={account.options.mirror === true} aria-label={m.migrations_mirror_toggle({ email })} onchange={(e) => data.setOption(id, 'mirror', e.currentTarget.checked)} data-testid="account-mirror" /></span>
+			</SettingRow>
+		</div>
+		{#if account.options.mirror && !running && !inJob}
+			<div><Button icon={GitCompareArrows} onclick={() => onmirror(id)} data-testid="account-mirror-resync">{m.migrations_mirror_resync()}</Button></div>
+		{/if}
 	</section>
 
 	{#if !running}
