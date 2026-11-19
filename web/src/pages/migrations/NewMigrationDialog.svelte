@@ -4,14 +4,13 @@
 	 * one row per mailbox, as many as needed. Servers are typed once on the Servers page: a row only gives
 	 * what that mailbox adds (its logins and passwords). Rows are added one after the other; a row that
 	 * was added is never sent again, and a row whose mailbox exists but whose source failed retries only
-	 * the source. A directory (a Microsoft 365 tenant) lists its mailboxes itself, on its own screen.
+	 * the source. A list (pasted, or a .csv/.txt file) fills the rows with both sides at once, see ListImport. A directory (a Microsoft 365 tenant) lists its mailboxes itself, on its own screen.
 	 * A file (PST, mbox, EML) is migrated from the Files page, not from here.
 	 */
 	import ArrowRight from '@lucide/svelte/icons/arrow-right';
 	import Check from '@lucide/svelte/icons/check';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleX from '@lucide/svelte/icons/circle-x';
-	import FileUp from '@lucide/svelte/icons/file-up';
 	import Hourglass from '@lucide/svelte/icons/hourglass';
 	import Plus from '@lucide/svelte/icons/plus';
 	import ServerIcon from '@lucide/svelte/icons/server';
@@ -21,6 +20,7 @@
 	import { errorText, post, put } from '../../lib/api/client.ts';
 	import type { Account, EndpointInput, Server, SourceConnection } from '../../lib/api/types.ts';
 	import { isSecret, kindLabel } from '../../lib/logic/connector.ts';
+	import type { ListColumn, ListRow } from '../../lib/logic/mailboxList.ts';
 	import { kindIcon, providerOf } from '../../lib/logic/providers.ts';
 	import { isDirectory, mailboxFields } from '../../lib/logic/serverKinds.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
@@ -40,14 +40,14 @@
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import Toggle from '../../lib/ui/Toggle.svelte';
 	import { roving, tabStop, tileClass } from '../../lib/ui/tiles.ts';
+	import ListImport from './ListImport.svelte';
 
 	interface Props {
 		defaultServer?: number | null;
 		onclose: () => void;
-		oncsv?: () => void;
 	}
 
-	let { defaultServer = null, onclose, oncsv }: Props = $props();
+	let { defaultServer = null, onclose }: Props = $props();
 
 	void sources.load();
 
@@ -88,9 +88,8 @@
 	let rows = $state<Row[]>([newRow()]);
 	let destLogin = $state(false);
 	let busy = $state(false);
-	let pasteOpen = $state(false);
-	let pasteText = $state('');
-	let pasteError = $state<string | null>(null);
+	/** The rows the last list import added, and what it changed, so it can be taken back. */
+	let lastImport = $state.raw<{ keys: Set<number>; destLogin: boolean } | null>(null);
 
 	const source = $derived.by((): Source => {
 		const [type, id] = fromValue.split('-');
@@ -123,13 +122,31 @@
 	const sourceName = $derived(source.type === 'server' ? source.server.name : source.type === 'connection' ? source.connection.name : '');
 	const targetName = $derived(data.servers.find((s) => s.id === Number(serverId))?.name ?? '');
 	const destCount = $derived(destLogin ? 3 : 2);
-	/** The order of the pasted values: the columns as shown. */
-	const pasteCols = $derived([
-		...srcCols.map((c) => ({ label: c.label, set: (r: Row, v: string) => (r.src[c.name] = v) })),
-		{ label: m.migrations_new_dest_email(), set: (r: Row, v: string) => (r.email = v) },
-		{ label: m.migrations_new_dest_password(), set: (r: Row, v: string) => (r.password = v) },
-		...(destLogin ? [{ label: m.migrations_new_dest_login(), set: (r: Row, v: string) => (r.login = v) }] : [])
+	/**
+	 * The columns of an imported list, in the order of the form: the source fields, then the destination.
+	 * The destination login is always read, the template only has it while the form shows it.
+	 */
+	const listCols = $derived.by((): (ListColumn & { label: string })[] => [
+		...srcCols.map((c) => ({
+			key: `source_${c.name}`,
+			label: c.label,
+			aliases: [c.label, `src_${c.name}`, `old_${c.name}`, ...(c.name === 'login' ? ['source', 'source_email', 'from'] : [])],
+			required: true,
+			secret: c.secret,
+			fallback: !c.secret,
+			sample: c.secret ? 'old-secret' : c.name === 'login' ? 'alice@old.example' : 'alice'
+		})),
+		{ key: 'email', label: m.migrations_new_dest_email(), aliases: [m.migrations_new_dest_email(), 'e-mail', 'mail', 'address', 'adresse', 'destination', 'destination_email', 'dest_email', 'to'], required: true, email: true, sample: 'alice@new.example' },
+		{ key: 'password', label: m.migrations_new_dest_password(), aliases: [m.migrations_new_dest_password(), 'destination_password', 'dest_password', 'mot de passe', 'pass', 'pwd'], required: true, secret: true, sample: 'new-secret' },
+		{ key: 'login', label: m.migrations_new_dest_login(), aliases: [m.migrations_new_dest_login(), 'destination_login', 'dest_login', 'username', 'user', 'identifiant'], sample: 'alice' }
 	]);
+	const listShown = $derived(destLogin ? listCols : listCols.filter((c) => c.key !== 'login'));
+	/** Addresses a list may not bring twice: those of the rows and of the mailboxes already on the destination. */
+	const listTaken = $derived([
+		...rows.filter((r) => !blank(r)).map((r) => targetEmail(r).toLowerCase()),
+		...[...data.accounts.values()].filter((a) => a.server_id === Number(serverId)).map((a) => a.email.toLowerCase())
+	].filter(Boolean));
+	const listUndoable = $derived(!!lastImport && !busy && rows.some((r) => lastImport?.keys.has(r.key)) && rows.every((r) => !lastImport?.keys.has(r.key) || r.status === 'idle'));
 
 	const fromTiles = $derived([
 		...data.servers.map((s) => ({ value: `server-${s.id}`, name: s.name, sub: prefs.host(s.imap_host), mono: true, icon: providerOf(s.imap_host).icon })),
@@ -183,26 +200,28 @@
 		if (!rows.length) rows = [newRow()];
 	}
 
-	function applyPaste() {
-		pasteError = null;
-		const lines = pasteText
-			.split(/\r?\n/)
-			.map((l) => l.trim())
-			.filter(Boolean);
-		if (lines.length && /email|login/i.test(lines[0]) && !lines[0].includes('@')) lines.shift();
-		const parsed = lines.map((line) => {
-			const values = line.split(/[;,\t]/).map((v) => v.trim());
+	function fillFromList(list: ListRow[]) {
+		const made = list.map(({ values }) => {
 			const row = newRow();
-			pasteCols.forEach((c, i) => c.set(row, values[i] ?? ''));
+			for (const c of srcCols) row.src[c.name] = values[`source_${c.name}`] ?? '';
+			row.email = values.email ?? '';
+			row.password = values.password ?? '';
+			row.login = values.login ?? '';
 			return row;
 		});
-		if (!parsed.length) {
-			pasteError = m.migrations_new_paste_none();
-			return;
-		}
-		rows = [...rows.filter((r) => r.accountId != null || !blank(r)), ...parsed];
-		pasteText = '';
-		pasteOpen = false;
+		lastImport = { keys: new Set(made.map((r) => r.key)), destLogin };
+		// A list that gives destination logins shows their column.
+		if (made.some((r) => r.login.trim())) destLogin = true;
+		rows = [...rows.filter((r) => r.accountId != null || !blank(r)), ...made];
+	}
+
+	function undoList() {
+		if (!lastImport) return;
+		const { keys, destLogin: before } = lastImport;
+		rows = rows.filter((r) => !keys.has(r.key));
+		if (!rows.length) rows = [newRow()];
+		destLogin = before;
+		lastImport = null;
 	}
 
 	async function applySource(row: Row, id: number): Promise<void> {
@@ -411,6 +430,8 @@
 						<Button icon={Plus} onclick={() => (rows = [...rows, newRow()])} disabled={busy} data-testid="new-row-add">{m.migrations_add_account()}</Button>
 					</div>
 
+					<ListImport columns={listCols} shown={listShown} taken={listTaken} disabled={busy} undoable={listUndoable} onfill={fillFromList} onundo={undoList} />
+
 					{#if candidates.length}
 						<Disclosure title={m.migrations_new_existing({ count: candidates.length })} open data-testid="new-existing">
 							<div class="flex flex-col gap-1">
@@ -428,16 +449,6 @@
 						</Disclosure>
 					{/if}
 
-					<Disclosure title={m.migrations_new_paste()} bind:open={pasteOpen} data-testid="new-paste">
-						<div class="flex flex-col gap-2">
-							<p class="m-0 text-xs text-ink-2">{m.migrations_new_paste_hint()}</p>
-							<code class="block rounded-plate bg-surface-2 p-2 font-mono text-xs break-words">{pasteCols.map((c) => c.label).join('; ')}</code>
-							<textarea class="input min-h-24 font-mono text-xs" aria-label={m.migrations_new_paste()} bind:value={pasteText} spellcheck="false" autocomplete="off"></textarea>
-							{#if pasteError}<p class="m-0 text-xs text-warning-ink" role="alert">{pasteError}</p>{/if}
-							<div><Button onclick={applyPaste} disabled={!pasteText.trim() || busy}>{m.migrations_new_paste_apply()}</Button></div>
-						</div>
-					</Disclosure>
-
 					{#if !busy && addedCount && failedCount}
 						<Notice>{m.migrations_new_partial({ added: addedCount, failed: failedCount })}</Notice>
 					{/if}
@@ -446,9 +457,6 @@
 		</form>
 	{/if}
 	{#snippet actions()}
-		{#if oncsv}
-			<span class="mr-auto"><Button variant="ghost" icon={FileUp} onclick={oncsv} disabled={busy} data-testid="new-csv">{m.migrations_add_csv()}</Button></span>
-		{/if}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
 		{#if !data.servers.length}
 			<!-- Nothing to add before a server exists. -->

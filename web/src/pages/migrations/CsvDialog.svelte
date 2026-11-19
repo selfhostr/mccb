@@ -44,7 +44,7 @@
 	}
 </script>
 
-<Dialog title={m.migrations_csv_title()} {onclose}>
+<Dialog title={m.migrations_csv_menu()} {onclose}>
 	<form id="csv-form" class="flex flex-col gap-4" onsubmit={submit}>
 		<ol class="m-0 flex list-decimal flex-col gap-3 pl-5 marker:text-ink-3">
 			<li><div class="flex flex-col items-start gap-1">
