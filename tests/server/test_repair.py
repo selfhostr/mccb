@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+
+import pytest
 
 from app.server import repair
 
@@ -183,3 +186,77 @@ def test_summary_shows_text_and_parts():
     m.add_attachment(PDF, maintype="application", subtype="pdf", filename="a.pdf")
     s = repair.summary(_raw(m))
     assert s["text"] == "D�j�" and s["parts"][0]["name"] == "a.pdf"
+
+
+# ------------------------------------------------------------------ address headers of sent items (non-regression)
+_DAMAGED_BODY = (b"MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"b\"\r\n\r\n"
+                 b"--b\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                 + "Déjà reçu à Genève.\r\n".encode() +
+                 b"--b\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                 + "<p>D�j� re�u</p>\r\n".encode() + b"--b--\r\n")
+
+SENT_HEADERS = {
+    "encoded_folded": b"To: =?utf-8?q?Zo=C3=A9_M=C3=BCller?= <zoe@example.com>,\r\n"
+                      b" =?iso-8859-1?q?Fran=E7ois?= <f@example.com>\r\n"
+                      b"Cc: \"Dupont, Jean\" <j@example.com>, =?utf-8?b?w4lsw6h2ZQ==?= <e@example.com>\r\n",
+    "bcc_only": b"Bcc: a@example.com, b@example.com\r\n",
+    "undisclosed": b"To: undisclosed-recipients:;\r\nBcc: x@example.com\r\n",
+    "long": b"To: " + b", ".join(b"=?utf-8?q?Pers=C3=B6n_%d?= <p%d@example.com>" % (i, i) for i in range(12))
+            + b"\r\n",
+    "raw_utf8": "To: Zoé Müller <zoe@example.com>\r\nCc: Élève <e@example.com>\r\n".encode(),
+    "raw_latin1": "To: Zoé Müller <zoe@example.com>\r\n".encode("latin-1"),
+    "two_to": b"To: a@example.com\r\nTo: b@example.com\r\n",
+    "group": b"To: Equipe: a@example.com, b@example.com;, c@example.com\r\n",
+    "resent": b"To: a@example.com\r\nResent-To: r@example.com\r\nReply-To: rt@example.com\r\nSender: s@example.com\r\n",
+}
+
+
+def _sent(extra: bytes) -> bytes:
+    return (b"From: me@example.com\r\nSubject: test\r\nDate: Tue, 05 Mar 2024 10:00:00 +0100\r\n"
+            b"Message-ID: <s1@example.com>\r\n" + extra + _DAMAGED_BODY)
+
+
+@pytest.mark.parametrize("case", sorted(SENT_HEADERS))
+def test_sent_item_keeps_its_address_headers_byte_for_byte(case):
+    raw = _sent(SENT_HEADERS[case])
+    fixed = repair.repair(raw)
+    assert fixed and fixed.fixes == ["replacement_chars"]
+    assert repair.address_fields(fixed.raw) == repair.address_fields(raw)
+    out_head = fixed.raw.split(b"\r\n\r\n", 1)[0]
+    assert b"unknown-8bit" not in out_head
+    # every original header line other than the MIME ones is in the result unchanged
+    for line in re.split(rb"\r\n(?![ \t])", raw.split(b"\r\n\r\n", 1)[0]):
+        if not line.lower().startswith((b"content-", b"mime-version")):
+            assert line in out_head, line
+
+
+def test_mojibake_subject_keeps_its_place_and_the_recipients():
+    raw = _sent(SENT_HEADERS["raw_utf8"]).replace(b"Subject: test", "Subject: RÃ©union".encode())
+    fixed = repair.repair(raw)
+    assert fixed and "mojibake" in fixed.fixes
+    m = _parse(fixed.raw)
+    assert m["Subject"] == "Réunion" and list(m.keys())[:2] == ["From", "Subject"]
+    assert repair.address_fields(fixed.raw) == repair.address_fields(raw)
+
+
+def test_verify_refuses_lost_or_reencoded_recipients():
+    raw = _sent(SENT_HEADERS["raw_utf8"] + SENT_HEADERS["bcc_only"])
+    good = repair.repair(raw).raw
+    assert repair.verify(raw, good) == []
+    no_bcc = re.sub(rb"Bcc: [^\r]*\r\n", b"", good)
+    assert any("bcc" in p.lower() for p in repair.verify(raw, no_bcc))
+    reencoded = good.replace("Zoé Müller".encode(), b"=?unknown-8bit?q?Zo=C3=A9_M=C3=BCller?=")
+    assert any(p.lower().startswith("header to") for p in repair.verify(raw, reencoded))
+    two = _sent(SENT_HEADERS["two_to"])
+    one_to = repair.repair(two).raw.replace(b"To: b@example.com\r\n", b"")
+    assert any(p.lower().startswith("header to") for p in repair.verify(two, one_to))
+
+
+def test_message_without_recipients_is_reported_not_invented():
+    raw = b"Subject: x\r\nFrom: me@example.com\r\nDate: Tue, 05 Mar 2024 10:00:00 +0100\r\n" + _DAMAGED_BODY
+    a = repair.analyze(raw)
+    assert a.no_recipients and a.issues == ["replacement_chars"]
+    fixed = repair.repair(raw)
+    assert fixed and not any(h in repair.address_fields(fixed.raw) for h in ("to", "cc", "bcc"))
+    assert not repair.analyze(_sent(SENT_HEADERS["bcc_only"])).no_recipients
+    assert not repair.analyze(_sent(SENT_HEADERS["undisclosed"])).no_recipients

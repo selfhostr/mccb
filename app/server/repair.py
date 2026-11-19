@@ -12,8 +12,10 @@ Damage this module knows, all left behind by other migration tools:
   unreadable         The message cannot be parsed: reported, never changed.
 
 Guarantees: a message is changed only through repair(), which returns None when nothing applies. The result is
-re-parsed and checked (verify) before anyone writes it: same addresses, date and Message-ID, same attachments
-byte for byte, no new U+FFFD. Forwarded messages (message/rfc822) are kept as they are. A repaired message
+re-parsed and checked (verify) before anyone writes it: every header of the message other than the subject and
+the MIME headers byte for byte (sender, recipients To/Cc/Bcc, date, Message-ID...), same attachments byte for
+byte, no new U+FFFD. A header the repair does not change is written exactly as it was read (KeepSourcePolicy):
+never re-encoded, never re-folded. Forwarded messages (message/rfc822) are kept as they are. A repaired message
 carries MARK, so a second pass leaves it alone, and the hash of the original, so a restore can find it.
 """
 from __future__ import annotations
@@ -27,13 +29,36 @@ from collections import Counter
 from dataclasses import dataclass, field
 from email import policy
 from email.message import EmailMessage
-from email.parser import BytesParser
+from email.parser import BytesHeaderParser, BytesParser
+from email.policy import EmailPolicy, linesep_splitter
 
 MARK = "X-MCCB-Repair"
 LEGACY_MARKS = ("X-Repare-Import",)   # the repair script used before MCCB
 ISSUES = ("replacement_chars", "mojibake", "attachment_names", "detached_images", "unreadable")
 FFFD = "�"
-OUT_POLICY = policy.SMTP              # CRLF, 7-bit safe headers
+
+
+class KeepSourcePolicy(EmailPolicy):
+    """policy.SMTP, except that a header read from the original and left untouched is written back as it was.
+
+    The stock policy re-folds every source header that is long or holds raw 8-bit bytes. An address header in
+    raw UTF-8 (common in messages written by PST converters) then comes out as "=?unknown-8bit?q?...?=", a
+    display name no mail client decodes, and a long To/Cc is re-folded at other places. A header the repair sets
+    itself (Subject, MIME headers, MARK) is a header object and folded normally, 7-bit safe."""
+
+    def _fold(self, name, value, refold_binary=False):
+        if isinstance(value, str) and not hasattr(value, "name"):
+            return name + ": " + self.linesep.join(linesep_splitter.split(value)) + self.linesep
+        return super()._fold(name, value, refold_binary=refold_binary)
+
+
+OUT_POLICY = KeepSourcePolicy(linesep="\r\n")   # CRLF, like policy.SMTP
+
+# Headers that say who wrote the message, to whom, and when: never changed by a repair, also checked once the
+# repaired copy is stored on the server (address_fields).
+PROTECTED = ("from", "sender", "reply-to", "to", "cc", "bcc", "date", "message-id", "in-reply-to", "references",
+             "resent-from", "resent-sender", "resent-to", "resent-cc", "resent-bcc", "resent-date",
+             "resent-message-id", "return-path")
 
 PLACEHOLDER_NAME = re.compile(r"^(?:piece_jointe|pi[eè]ce[ _-]?jointe|attachment|att|part|unnamed|noname|"
                               r"untitled|file|fichier|image)[ _-]?\d*$", re.I)
@@ -242,6 +267,10 @@ class Analysis:
     date: str = ""
     already: bool = False      # carries MARK (or the mark of the earlier script)
     error: str | None = None
+    # no To, Cc or Bcc at all: damage left by the tool that wrote the message (the sent items of a PST converted
+    # from its transport headers, which sent items do not have). Counted, never "repaired": the recipients are
+    # not in the message any more, only the source (PST) has them.
+    no_recipients: bool = False
 
 
 def _parse(raw: bytes) -> EmailMessage:
@@ -287,6 +316,8 @@ def analyze(raw: bytes) -> Analysis:
         msg = _parse(raw)
         a.subject = _header(msg, "Subject")
         a.date = _header(msg, "Date")
+        a.no_recipients = not any((v or "").strip() for h in ("to", "cc", "bcc")
+                                  for v in address_fields(raw).get(h, []))
     except Exception as e:  # pragma: no cover: the parser of policy.default is lenient
         a.issues.append("unreadable")
         a.error = str(e)
@@ -376,8 +407,7 @@ def repair(raw: bytes) -> Repaired | None:
     subject = _header(msg, "Subject")
     new_subject, n = fix_mojibake(subject)
     if n:
-        del msg["Subject"]
-        msg["Subject"] = new_subject
+        msg.replace_header("Subject", new_subject)    # in place: the order of the headers stays the same
         fixes.add("mojibake")
 
     # 2. U+FFFD, from the words of the other text parts
@@ -482,7 +512,23 @@ def _drop_empty(part) -> None:
 
 
 # ------------------------------------------------------------------ verification
-KEPT_HEADERS = ("From", "To", "Cc", "Date", "Message-ID", "In-Reply-To", "References")
+KEPT_HEADERS = ("From", "To", "Cc", "Bcc", "Date", "Message-ID", "In-Reply-To", "References")
+# top-level headers a repair may rewrite: the subject (mojibake), and the MIME headers when the structure changes
+MAY_CHANGE = ("subject", "mime-version", MARK.lower())
+
+
+def _top_headers(raw: bytes) -> dict[str, list[str]]:
+    """{lower name: [values as read, unfolded]} of the top-level header block, every occurrence, no decoding."""
+    head = BytesHeaderParser(policy=policy.compat32).parsebytes(raw, headersonly=True)
+    out: dict[str, list[str]] = {}
+    for k, v in head._headers:      # raw (name, value) pairs: str() of a compat32 Header would decode
+        out.setdefault(k.lower(), []).append(" ".join(str(v).split()))
+    return out
+
+
+def address_fields(raw: bytes) -> dict[str, list[str]]:
+    """The PROTECTED headers of a message as read (unfolded): equal before and after a repair, or no write."""
+    return {k: v for k, v in _top_headers(raw).items() if k in PROTECTED}
 
 
 def _attachment_digests(msg) -> Counter:
@@ -507,6 +553,20 @@ def verify(original: bytes, repaired: bytes) -> list[str]:
     for h in KEPT_HEADERS:
         if " ".join(_header(a, h).split()) != " ".join(_header(b, h).split()):
             problems.append(f"header {h} changed")
+    # byte level, every occurrence: a header that decodes to the same text but was re-encoded, a second To
+    # dropped, a header whose parsing fails in both (decoded as "" twice) are all caught here
+    try:
+        ha, hb = _top_headers(original), _top_headers(repaired)
+    except Exception as e:  # pragma: no cover
+        return problems + [f"headers unreadable: {e}"]
+    for name in sorted(set(ha) | set(hb)):
+        if name in MAY_CHANGE or name.startswith("content-"):
+            continue
+        if ha.get(name, []) != hb.get(name, []):
+            what = "lost" if name not in hb else "added" if name not in ha else "changed"
+            msg = f"header {name} {what} (raw)"
+            if msg not in problems and f"header {name} changed" not in [p.lower() for p in problems]:
+                problems.append(msg)
     if not b.get(MARK):
         problems.append("mark missing")
     if _attachment_digests(a) != _attachment_digests(b):
