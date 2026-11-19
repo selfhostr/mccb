@@ -27,6 +27,18 @@ CAP_QUOTA = "quota"                  # target: reports used / limit
 CAP_PARALLEL = "parallel_writes"     # target: several sessions may write at once (auto-tuned)
 CAP_READBACK = "readback"            # target: read() returns what was written (verify phase re-reads a sample)
 CAP_RULES = "rules"                  # source: read_rules() returns the mail rules of the mailbox (see sieve.py)
+# mirror mode (docs/planning.md "Mirror"): the source is only ever READ, the target changes only what mccb wrote
+CAP_MIRROR = "mirror"                # source: mirror_listing() lists a folder completely or says it could not
+CAP_DELETE = "delete"                # target: delete() removes one of OUR items (to the trash first when there is one)
+CAP_UPDATE = "update"                # target: update() rewrites one of OUR items in place (events, contacts, tasks)
+CAP_SET_FLAGS = "set_flags"          # target: set_flags() changes the flags of one of OUR mails
+CAP_MOVE = "move"                    # target: move() moves one of OUR mails to another folder of the target
+CAP_INVENTORY = "inventory"          # target: inventory() lists OUR items of a folder (needed by every mirror write)
+
+# keyword put on a mail the mirror deleted (moved to the trash or flagged \Deleted): finds them again to undo
+MIRROR_DELETED_FLAG = "$MccbMirrorDeleted"
+# delete_mode() answers
+DELETE_TRASH, DELETE_SOFT, DELETE_HARD = "trash", "soft", "hard"
 
 
 class ConnectorError(Exception):
@@ -81,6 +93,9 @@ class SourceItem:
     flags: list[str] = field(default_factory=list)
     ref: Any = None               # connector data needed by fetch()
     index: int | None = None      # position in the folder, for sources running native code (crash marker)
+    # changes whenever the item changes at the source (DAV etag, EWS ChangeKey, Graph changeKey, JMAP state...),
+    # None when unknown. Mail flags are compared on their own (`flags`): `version` is for the content.
+    version: str | None = None
 
 
 @dataclass
@@ -116,6 +131,27 @@ class Changes:
     items: list[SourceItem]
     cursor: str | None            # opaque, to give back to the next changed_since()
     reset: bool = False           # True: `items` is a full listing (no cursor, or the cursor is no longer valid)
+
+
+@dataclass
+class Listing:
+    """Answer of Source.mirror_listing(): the mirror deletes on the target only what a COMPLETE listing no longer has."""
+    items: list[SourceItem]
+    complete: bool = True         # False: something may be missing (paging cut short, partial answer...): no deletion
+    epoch: str | None = None      # what the keys depend on (IMAP UIDVALIDITY): see Source.key_epoch()
+    problem: str | None = None    # why the listing is not complete, for the report
+
+
+@dataclass
+class RemoteItem:
+    """One of OUR items on the target, as TargetSession.inventory() finds it."""
+    ref: str                      # identifier to give back to delete / update / set_flags / move (IMAP UID, DAV name)
+    flags: list[str] = field(default_factory=list)
+    version: str | None = None    # etag or equivalent, when the target has one
+
+
+# the only Source methods the mirror calls (app/server/mirror.py wraps the source so that nothing else can be reached)
+READ_ONLY_SOURCE_METHODS = frozenset({"open", "close", "folders", "iter_items", "fetch", "mirror_listing", "key_epoch"})
 
 
 class Source(abc.ABC):
@@ -158,6 +194,19 @@ class Source(abc.ABC):
     def read_rules(self) -> list[dict]:
         """Mail rules as sieve.py expects them. Only for sources declaring CAP_RULES, called after open()."""
         return []
+
+    # ---- mirror (only for sources declaring CAP_MIRROR). READ ONLY: never a write, a flag, a mark at the source.
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """Every item of the folder, with `version` and `flags` filled in when the protocol has them. A source that
+        cannot be sure it saw everything (paging stopped early, an error swallowed) says complete=False: the mirror
+        then deletes nothing in that folder. Errors are raised as ConnectorError (no deletion either)."""
+        return Listing(list(self.iter_items(folder)))
+
+    def key_epoch(self, key: str) -> str | None:
+        """The epoch a key was made under (IMAP: the UIDVALIDITY inside it), None when keys have none. A tracked item
+        whose key has another epoch than the current listing means the keys were reset: the mirror refuses the
+        folder (`uidvalidity_changed`) instead of deleting everything and copying it again."""
+        return None
 
 
 class TargetSession(abc.ABC):
@@ -218,6 +267,36 @@ class TargetSession(abc.ABC):
         """After plan_folders: does this folder already exist? None when the target cannot tell (dry run only)."""
         return None
 
+    # ---- mirror. Every method below acts on ONE item mccb wrote itself (found by inventory()), never on another.
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """OUR items of the folder: {import id ("<namespace-key>", mail) or resource name (in `names`, DAV-like):
+        copies}. Read only. Pre-existing content and items arrived later on the target are never in it.
+        (CAP_INVENTORY)"""
+        raise ConnectorError("this target cannot list its items for the mirror", ConnectorError.CONFIG)
+
+    def delete_mode(self, folder: str) -> str:
+        """How delete() works in this folder: DELETE_TRASH (moved to the trash of the target, recoverable there),
+        DELETE_SOFT (marked, still there) or DELETE_HARD (gone: the runner keeps a copy first, see mirror.py)."""
+        return DELETE_HARD
+
+    def delete(self, folder: str, ref: str) -> str:
+        """Removes one of our items, the way delete_mode() says; returns that mode. Already gone is not an error.
+        A mail is marked with MIRROR_DELETED_FLAG. (CAP_DELETE)"""
+        raise ConnectorError("this target cannot delete", ConnectorError.CONFIG)
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        """Replaces the content of one of our items (event, contact, task) by item.raw; returns its new ref.
+        (CAP_UPDATE)"""
+        raise ConnectorError("this target cannot update an item", ConnectorError.CONFIG)
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        """Adds and removes flags of one of our mails (\\Seen, \\Flagged, \\Answered, keywords). (CAP_SET_FLAGS)"""
+        raise ConnectorError("this target cannot change flags", ConnectorError.CONFIG)
+
+    def move(self, folder: str, ref: str, to_folder: str) -> str | None:
+        """Moves one of our mails to another folder of the target; returns its new ref if known. (CAP_MOVE)"""
+        raise ConnectorError("this target cannot move an item", ConnectorError.CONFIG)
+
 
 class Target(abc.ABC):
     """Settings of a target (thread-safe, holds no connection). Makes the sessions."""
@@ -256,8 +335,10 @@ def subject_of(raw: bytes) -> str:
 
 
 __all__ = [
-    "CALENDAR", "CAP_FLAGS", "CAP_FOLDERS", "CAP_INCREMENTAL", "CAP_INTERNAL_DATE", "CAP_PARALLEL", "CAP_QUOTA",
-    "CAP_READBACK", "CAP_RULES", "CONTACTS", "Changes", "ConnectorError", "FetchedItem", "FolderPlan", "IMPORT_HEADER",
-    "ITEM_KINDS", "MAIL", "OutgoingItem", "Source", "SourceFolder", "SourceItem", "TASKS", "Target",
-    "TargetSession", "stamp_import_id", "subject_of",
+    "CALENDAR", "CAP_DELETE", "CAP_FLAGS", "CAP_FOLDERS", "CAP_INCREMENTAL", "CAP_INTERNAL_DATE", "CAP_INVENTORY",
+    "CAP_MIRROR", "CAP_MOVE", "CAP_PARALLEL", "CAP_QUOTA", "CAP_READBACK", "CAP_RULES", "CAP_SET_FLAGS", "CAP_UPDATE",
+    "CONTACTS", "Changes", "ConnectorError", "DELETE_HARD", "DELETE_SOFT", "DELETE_TRASH", "FetchedItem", "FolderPlan",
+    "IMPORT_HEADER", "ITEM_KINDS", "Listing", "MAIL", "MIRROR_DELETED_FLAG", "OutgoingItem", "READ_ONLY_SOURCE_METHODS",
+    "RemoteItem", "Source", "SourceFolder", "SourceItem", "TASKS", "Target", "TargetSession", "stamp_import_id",
+    "subject_of",
 ]

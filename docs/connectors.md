@@ -71,6 +71,29 @@ A target is a `Target` (settings, thread-safe) that makes one `TargetSession` pe
 | `quota` | the target is full | fails the job |
 | `folder_missing` | target folder absent | creates it, tries once more |
 
+## Mirror mode
+
+The mirror (`mode: "mirror"`, see [Plan, filter and control](planning.md#mirror)) adds, deletes and updates on the target what changed at the source since the previous pass. It needs more of a connector, and every part is optional: a connector that declares nothing is simply refused by the mirror, its other routes are unchanged.
+
+A source declares `CAP_MIRROR` when it can be trusted to list a folder completely:
+
+- `mirror_listing(folder)` returns a `Listing(items, complete, epoch, problem)`. The default lists `iter_items`. Say `complete=False` (with `problem`) whenever something may be missing, such as paging cut short or a partial answer: the mirror then deletes nothing in that folder. Raise `ConnectorError` on a failure: nothing is deleted either.
+- `SourceItem.version` changes whenever the content of the item changes: DAV etag, EWS `ChangeKey`, Graph `changeKey`, a JMAP state per item. `None` means unknown, and such items are never updated. Mail flags go in `flags`, as before.
+- `key_epoch(key)` gives the epoch a key was made under, such as the UIDVALIDITY inside an IMAP key. When the current `Listing.epoch` differs from the epoch of the tracked keys, the folder is refused (`uidvalidity_changed`).
+- **The source is read only.** The mirror reaches the source through a wrapper that only lets `open`, `close`, `folders`, `iter_items`, `fetch`, `mirror_listing` and `key_epoch` through (`READ_ONLY_SOURCE_METHODS`). Nothing in them may write, flag or mark anything at the source.
+
+A target declares what it can do, and the mirror only uses what is declared:
+
+| Capability | Method | Contract |
+|---|---|---|
+| `CAP_INVENTORY` | `inventory(folder, namespace, names)` | Read only. `{import id or resource name: [RemoteItem(ref, flags, version)]}` of OUR items in the folder: mails whose import id starts with `<namespace>-`, resources whose name is in `names`. Never pre-existing content. Required for any mirror write. |
+| `CAP_DELETE` | `delete_mode(folder)`, `delete(folder, ref)` | `DELETE_TRASH`: moved to the trash of the target. `DELETE_SOFT`: marked, still there (a mail flagged `\Deleted` and `$MccbMirrorDeleted`, never expunged). `DELETE_HARD`: gone, and the runner first keeps a copy through `read()` under `<data>/mirror-trash/`. Already gone is not an error. |
+| `CAP_UPDATE` | `update(folder, ref, item)` | Replaces the content of one of our events, contacts or tasks. |
+| `CAP_SET_FLAGS` | `set_flags(folder, ref, add, remove)` | Changes the flags of one of our mails. |
+| `CAP_MOVE` | `move(folder, ref, to_folder)` | Moves one of our mails to another folder of the target. Without it, a mail moved at the source is deleted from the old folder and copied to the new one. |
+
+`ref` is always a `RemoteItem.ref` that `inventory` returned for an item of the `items` table: a target method is never called on anything else. `IMAP` and `CalDAV`/`CardDAV` implement all of it; `tests/server/connector_fakes.py` has the in-memory version.
+
 ## Secrets
 
 A field declared with `secret=True` is refused in `config`, stored encrypted with the application key, and never returned: the API only says `has_secret`. On `PUT`, omitting `secrets` keeps them, `{}` clears them, and a value replaces that one field. Changing the kind drops the secrets of the previous kind.
