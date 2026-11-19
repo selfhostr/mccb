@@ -269,10 +269,15 @@ describe('accounts', () => {
 			account({ id: 2 }),
 			account({ id: 3, pst_id: 2 }),
 			account({ id: 4, pst_id: 1, has_password: false }),
-			account({ id: 5, pst_id: 1 })
+			account({ id: 5, pst_id: 1 }),
+			account({ id: 6, pst_id: 1, status: 'auth_failed' }),
+			account({ id: 7, pst_id: 1, status: 'error' }),
+			account({ id: 8, pst_id: 1, status: 'ok' })
 		];
 		const plan = importPlan(list, (id) => (id === 5 ? job('queued') : undefined), (id) => (id === 1 ? valid : invalid));
-		expect(plan.ready.map((a) => a.id)).toEqual([1]);
+		expect(plan.ready.map((a) => a.id)).toEqual([1, 8]);
+		// A refused connection test keeps the mailbox out of "ready".
+		expect(plan.refused.map((a) => a.id)).toEqual([6, 7]);
 		expect(plan.noPst.map((a) => a.id)).toEqual([2, 3]);
 		expect(plan.noPassword.map((a) => a.id)).toEqual([4]);
 		expect(plan.active.map((a) => a.id)).toEqual([5]);

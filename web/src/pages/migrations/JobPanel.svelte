@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Ban from '@lucide/svelte/icons/ban';
+	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Pause from '@lucide/svelte/icons/pause';
 	import Play from '@lucide/svelte/icons/play';
 	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
@@ -26,6 +27,7 @@
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import Tabs from '../../lib/ui/Tabs.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
+	import AccountDialog from './AccountDialog.svelte';
 	import JobErrors from './JobErrors.svelte';
 	import JobLog from './JobLog.svelte';
 	import JobReport from './JobReport.svelte';
@@ -37,6 +39,8 @@
 	let confirmStop = $state(false);
 	let busy = $state<string | null>(null);
 	let heading = $state<HTMLElement>();
+	let settingsOpen = $state(false);
+	let editing = $state(false);
 
 	/** The map holds the latest job of an account: live when it is this one, else what was fetched. */
 	const job = $derived.by(() => {
@@ -46,6 +50,11 @@
 	});
 	const account = $derived(job ? data.accounts.get(job.account_id) : undefined);
 	const look = $derived(job ? jobLookOf(job) : null);
+	/** A failed job is mostly a refused login or a missing source: the mailbox's settings open, the fix is there. */
+	const failed = $derived(job?.status === 'failed');
+	$effect(() => {
+		if (failed) settingsOpen = true;
+	});
 	const tab = $derived.by(() => {
 		const value = router.params.get('tab');
 		return value === 'errors' || value === 'report' ? value : 'log';
@@ -136,18 +145,24 @@
 				{#if job.status === 'running' || job.status === 'queued' || job.status === 'paused'}
 					<Button variant="danger" icon={Ban} onclick={() => (confirmStop = true)}>{m.jobs_action_stop()}</Button>
 				{/if}
-				{#if !isActive(job)}
-					<Button variant="primary" icon={RotateCw} loading={busy === 'retry'} onclick={() => act('retry', m.jobs_action_retry_done())}>{m.jobs_action_retry()}</Button>
-				{/if}
+				<!-- A finished copy is brought up to date, not run again: the resync comes first there. -->
 				{#if job.status === 'done' || job.status === 'done_with_errors'}
-					<Button icon={RefreshCw} loading={busy === 'delta'} onclick={() => act('delta', m.jobs_action_delta_done())} data-testid="job-delta">{m.jobs_action_delta()}</Button>
+					<Button variant={job.status === 'done' ? 'primary' : 'secondary'} icon={RefreshCw} loading={busy === 'delta'} onclick={() => act('delta', m.jobs_action_delta_done())} data-testid="job-delta">{m.jobs_action_delta()}</Button>
+				{/if}
+				{#if !isActive(job)}
+					<Button variant={job.status === 'done' ? 'secondary' : 'primary'} icon={RotateCw} loading={busy === 'retry'} onclick={() => act('retry', m.jobs_action_retry_done())}>{m.jobs_action_retry()}</Button>
 				{/if}
 				{#if job.status === 'done_with_errors' || job.status === 'stopped' || job.status === 'failed'}
 					<Button icon={RotateCw} loading={busy === 'retry-errors'} onclick={() => act('retry-errors', m.jobs_action_retry_errors_done())}>{m.jobs_action_retry_errors()}</Button>
 				{/if}
 			</div>
 
-			{#if job.error}<ErrorNotice title={m.jobs_panel_failed()} message={prefs.text(job.error)} />{/if}
+			{#if job.error}
+				<ErrorNotice title={m.jobs_panel_failed()} message={prefs.text(job.error)} />
+				{#if failed && account}
+					<div><Button icon={KeyRound} onclick={() => (editing = true)} data-testid="job-fix-password">{m.jobs_panel_fix_password()}</Button></div>
+				{/if}
+			{/if}
 
 			{#if job.status !== 'done' && job.status !== 'done_with_errors'}
 			<ol class="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-xs" aria-label={m.jobs_phase_label()}>
@@ -189,7 +204,7 @@
 			</dl>
 
 			{#if account}
-				<Disclosure title={m.migrations_row_settings()} data-testid="account-settings">
+				<Disclosure title={m.migrations_row_settings()} bind:open={settingsOpen} data-testid="account-settings">
 					{@render settings(account.id)}
 				</Disclosure>
 			{/if}
@@ -224,4 +239,7 @@
 		onconfirm={() => act('stop', m.jobs_action_stop_done())}
 		onclose={() => (confirmStop = false)}
 	/>
+{/if}
+{#if editing && account}
+	<AccountDialog {account} onclose={() => (editing = false)} />
 {/if}
