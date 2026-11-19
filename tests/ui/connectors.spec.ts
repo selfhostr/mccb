@@ -24,7 +24,7 @@ test.describe('connectors', () => {
 		// The route lives in the row menu, not on the page.
 		const dialog = await openRoute(page, 'alice@example.com');
 		await expect(dialog.getByTestId('route-source-kind')).toHaveValue('');
-		await expect(dialog.getByTestId('route-source-kind').locator('option')).toHaveText(['PST file', 'Exchange on premises (EWS)', 'Future mail service', 'Google', 'IMAP', 'IMAP (OAuth2)', 'JMAP']);
+		await expect(dialog.getByTestId('route-source-kind').locator('option')).toHaveText(['PST file', 'CalDAV', 'CardDAV', 'Exchange on premises (EWS)', 'Future mail service', 'Google', 'IMAP', 'IMAP (OAuth2)', 'JMAP']);
 		await expect(dialog.getByTestId('connector-fields')).toHaveCount(0);
 		// Nothing touched: saving sends nothing.
 		await page.getByTestId('route-save').click();
@@ -37,7 +37,9 @@ test.describe('connectors', () => {
 		const dialog = await openRoute(page, 'alice@example.com');
 		await dialog.getByTestId('route-source-kind').selectOption('imap');
 		const fields = dialog.getByTestId('route-source').locator('[data-field]');
-		await expect(fields).toHaveCount(8);
+		// Seven inputs carry data-field; the eighth catalogue field, the TLS check, is a toggle.
+		await expect(fields).toHaveCount(7);
+		await expect(dialog.getByRole('checkbox', { name: 'Verify the TLS certificate' })).toBeChecked();
 		await expect(dialog.getByTestId('route-source').locator('[data-field="port"]')).toHaveValue('993');
 		await expect(dialog.getByTestId('route-source').locator('[data-field="security"]')).toHaveValue('ssl');
 

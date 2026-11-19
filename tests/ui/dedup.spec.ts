@@ -29,7 +29,7 @@ test.describe('duplicates', () => {
 		await row.getByTestId('dedup-open').click();
 		const detail = page.getByTestId('dedup-detail');
 		await expect(detail.getByTestId('dedup-folders')).toContainText('Archive/2023');
-		await expect(detail.getByTestId('dedup-refused')).toContainText('UIDPLUS');
+		await expect(detail.getByTestId('dedup-refused')).toContainText('does not allow safe deletion');
 		await expect(detail.getByTestId('dedup-examples')).toContainText('Facture mars 2024');
 		await expect(detail.getByTestId('dedup-history')).toContainText('Analysis');
 

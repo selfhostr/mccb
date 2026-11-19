@@ -398,8 +398,9 @@ test.describe('accounts as CSV and files of every kind', () => {
 
 	test('export sits next to import, and import shows its warnings', async ({ page }) => {
 		await ready(page);
-		await page.getByRole('button', { name: 'New migration', exact: true }).click();
-		await page.getByRole('dialog').getByTestId('new-csv').click();
+		// Export and update by CSV live in the page menu; import by list is in the new migration dialog.
+		await page.getByRole('button', { name: 'More actions', exact: true }).click();
+		await page.getByRole('menuitem', { name: 'Export / update by CSV' }).click();
 		const dialog = page.getByRole('dialog');
 		await expect(dialog.getByTestId('csv-export')).toHaveAttribute('href', '/api/accounts/export-csv');
 		await dialog.locator('input[type=file]').setInputFiles({ name: 'mailboxes.csv', mimeType: 'text/csv', buffer: Buffer.from('email;password;pst\nx@example.com;pw;missing.pst\n') });
