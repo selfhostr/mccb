@@ -15,8 +15,8 @@ import httpx
 
 from ..server.imap import ImapConn, ImapError, ImapParams, Mailbox, _text, utf7_decode
 from . import registry
-from .base import (CALENDAR, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CONTACTS, MAIL, Changes,
-                   ConnectorError, FetchedItem, Source, SourceFolder, SourceItem, subject_of)
+from .base import (CALENDAR, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_MIRROR, CONTACTS, MAIL,
+                   Changes, ConnectorError, FetchedItem, Listing, Source, SourceFolder, SourceItem, subject_of)
 from .convert import esc, join_lines
 from .imap import _digest, keep_flags, parse_internaldate
 from .jmap import key_of
@@ -31,6 +31,7 @@ SCOPES = {"mail": "https://mail.google.com/", "calendar": "https://www.googleapi
 SCOPE_MAIL_ADMIN = "https://www.googleapis.com/auth/gmail.imap_admin"
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,addresses,organizations,birthdays,urls,biographies,nicknames,metadata"
 FETCH_CHUNK = 500
+MIRROR_TRIES = 3   # full mail scans tried before the mirror is told "not sure"
 
 
 # ------------------------------------------------------------------ authentication
@@ -156,11 +157,11 @@ class GoogleApi:
         if sc == 403:
             raise ConnectorError(text + " (is the API enabled in the Google Cloud project, and the scope granted?)",
                                  ConnectorError.CONFIG)
+        e = ConnectorError(text, ConnectorError.REJECTED)
+        e.status = sc  # type: ignore[attr-defined]
         if sc in (400, 410):
-            e = ConnectorError(text, ConnectorError.REJECTED)
             e.gone = sc == 410 or "EXPIRED_SYNC_TOKEN" in json.dumps(err)  # type: ignore[attr-defined]
-            raise e
-        raise ConnectorError(text, ConnectorError.REJECTED)
+        raise e
 
 
 def _gone(e: ConnectorError) -> bool:
@@ -294,7 +295,18 @@ class GmailImap:
                 chunk = ",".join(str(u) for u in uids[i:i + FETCH_CHUNK])
                 typ, data = m.uid("FETCH", chunk, "(UID FLAGS INTERNALDATE RFC822.SIZE X-GM-MSGID X-GM-LABELS)")
                 recs += parse_scan(c._check(typ, data, "FETCH"))
+            got = {r["uid"] for r in recs}
+            self.last_scan_missing = sum(1 for u in uids if u not in got)   # listed by SEARCH, not read back by FETCH
             return uv, [r for r in recs if "\\deleted" not in {f.lower() for f in r["flags"]}]
+        return self._guard(run)
+
+    def has_message(self, name: str, msgid: str) -> bool:
+        """Is there a message with this X-GM-MSGID in the mailbox? Read only (EXAMINE + UID SEARCH)."""
+        def run():
+            c = self.conn
+            c.select(name, readonly=True)
+            typ, data = c._m().uid("SEARCH", "X-GM-MSGID", msgid)
+            return bool(_text(c._check(typ, data, "SEARCH")).split())
         return self._guard(run)
 
     def fetch_raw(self, name: str, uidvalidity: int, uid: int) -> bytes | None:
@@ -529,6 +541,7 @@ class GoogleSource(Source):
         self._uv: dict[str, int] = {}
         self._events: dict[str, list[list[dict]]] = {}
         self._sync_tokens: dict[str, str] = {}
+        self._missing: dict[str, int | None] = {}  # mailbox -> UIDs the last scan listed and could not read
 
     # -- lifecycle
     def open(self) -> None:
@@ -602,6 +615,7 @@ class GoogleSource(Source):
         for role, name in todo:
             uv, recs = self._mail().scan(name, (after or {}).get(name, 0))
             self._uv[name] = uv
+            self._missing[name] = getattr(self._mail(), "last_scan_missing", None)
             self._tops[name] = max([r["uid"] for r in recs] + [(after or {}).get(name, 0)])
             for r in recs:
                 if role == "all":
@@ -674,7 +688,8 @@ class GoogleSource(Source):
         if d is not None and d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         return SourceItem(key=key_of(f"c{_slug(cal)}-", master.get("recurringEventId") or master["id"]),
-                          alt_key="u:" + _digest(master.get("iCalUID") or master["id"]), date=d, ref=group)
+                          alt_key="u:" + _digest(master.get("iCalUID") or master["id"]), date=d, ref=group,
+                          version=_group_version(group))
 
     # -- listing
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
@@ -709,11 +724,11 @@ class GoogleSource(Source):
                 return out, sync
 
     def _person_item(self, p: dict) -> SourceItem:
-        return SourceItem(key=key_of("p", p["resourceName"].split("/")[-1]), ref=p)
+        return SourceItem(key=key_of("p", p["resourceName"].split("/")[-1]), ref=p, version=p.get("etag") or None)
 
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
-        """Contacts and calendars with the API sync tokens, mail by UID. Deletions are not reported. A token Google no
-        longer accepts gives a full listing."""
+        """Contacts and calendars with the API sync tokens, mail by UID. Deletions are not reported (`Changes` has no field
+        for them: the mirror uses mirror_listing() and exists()). A token Google no longer accepts gives a full listing."""
         kind, ident = folder.ref
         try:
             state = json.loads(cursor) if cursor else None
@@ -757,6 +772,79 @@ class GoogleSource(Source):
         return Changes([self._mail_item(r) for r in self._groups.get(key, [])],
                        json.dumps({"uv": self._uv, "top": self._tops}), reset=False)
 
+    # -- mirror (read only: GET on the APIs, EXAMINE / SEARCH / FETCH BODY.PEEK on IMAP)
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """Complete listing. Mail: a full scan of All Mail (and of Spam and Trash when they are included), repeated while
+        a message listed by SEARCH could not be read back. Calendar and contacts: the full list, complete only when Google
+        ended it with a nextSyncToken (it only gives one on the last page). Deleted events (status cancelled) and
+        contacts (metadata.deleted) are not in the listing: that is what makes them disappear from the target."""
+        kind, ident = folder.ref
+        if kind == "mail":
+            return self._mirror_mail(folder)
+        if kind == "cal":
+            events, sync = self._list_events(ident)
+            items = [self._event_item(ident, g) for g in group_events(events)]
+        else:
+            people, sync = self._list_people(None)
+            items = [self._person_item(p) for p in people]
+        if not sync:
+            return Listing(items, False, problem="Google ended the listing without a sync token: it may be partial")
+        return Listing(items, True)
+
+    def _mirror_mail(self, folder: SourceFolder) -> Listing:
+        key = folder.ref[1]
+        problem = None
+        for _ in range(MIRROR_TRIES):
+            self._groups, self._missing = {}, {}
+            self._scan_mail()
+            unknown = [n for n, m in self._missing.items() if m is None]
+            lost = sum(m or 0 for m in self._missing.values())
+            if unknown:
+                problem = "this IMAP connection cannot tell whether every message listed was read"
+            elif lost:
+                problem = f"{lost} messages listed by the search could not be read (changing mailbox)"
+            else:
+                return Listing([self._mail_item(r) for r in self._groups.get(key, [])], True)
+        return Listing([self._mail_item(r) for r in self._groups.get(key, [])], False, problem=problem)
+
+    def exists(self, folder: SourceFolder, keys: list[str]) -> dict[str, bool]:
+        """Direct read of the items the listing no longer has, before the mirror deletes their copy: {key: False} only
+        when Google answers that the message / event / contact is not there (or is a cancelled event, a deleted contact).
+        Anything else, and keys that cannot be turned back into an id, give True. Errors are raised."""
+        kind, ident = folder.ref
+        out: dict[str, bool] = {}
+        boxes = self._mail_boxes() if kind == "mail" else {}
+        for k in keys:
+            out[k] = True
+            if kind == "mail":
+                msgid = k[1:] if k.startswith("g") else ""
+                if msgid.isdigit():
+                    names = [boxes[r] for r in ("all", "junk", "trash") if r in boxes
+                             and (r == "all" or self.config.get("include_trash_spam"))]
+                    out[k] = any(self._mail().has_message(n, msgid) for n in names) if names else True
+            elif kind == "cal":
+                prefix = f"c{_slug(ident)}-"
+                eid = k[len(prefix):] if k.startswith(prefix) else ""
+                if eid and not re.fullmatch(r"h[0-9a-f]{20}", eid):
+                    try:
+                        ev = self._api().get(f"{CALENDAR_API}/calendars/{_enc(ident)}/events/{_enc(eid)}", {}, "calendar")
+                        out[k] = ev.get("status") != "cancelled"
+                    except ConnectorError as e:
+                        if getattr(e, "status", None) not in (404, 410):
+                            raise
+                        out[k] = False
+            else:
+                pid = k[1:] if k.startswith("p") else ""
+                if pid:
+                    try:
+                        p = self._api().get(f"{PEOPLE_API}/people/{_enc(pid)}", {"personFields": "metadata"}, "contacts")
+                        out[k] = not (p.get("metadata") or {}).get("deleted")
+                    except ConnectorError as e:
+                        if getattr(e, "status", None) != 404:
+                            raise
+                        out[k] = False
+        return out
+
     # -- content
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         kind = folder.ref[0]
@@ -776,6 +864,13 @@ class GoogleSource(Source):
         text, warns = res
         nm = (item.ref.get("names") or [{}])[0].get("displayName") or ""
         return FetchedItem(raw=text.encode("utf-8"), subject=nm[:500], warnings=warns)
+
+
+def _group_version(group: list[dict]) -> str | None:
+    """Changes when any event of the series (or one of its exceptions, cancelled ones included) changes: Google gives an
+    etag per event. None when Google gave neither etag nor updated."""
+    parts = sorted(f"{e.get('id')}:{e.get('etag') or e.get('updated') or ''}" for e in group)
+    return None if all(p.endswith(":") for p in parts) else _digest("|".join(parts))
 
 
 def _master(group: list[dict]) -> dict:
@@ -810,4 +905,4 @@ _FIELDS = (
 registry.register(registry.ConnectorSpec(
     kind="google", label="Google", description="Gmail, Google Calendar and Google Contacts of one account.",
     source=registry.Role(GoogleSource, (MAIL, CALENDAR, CONTACTS),
-                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}), _FIELDS, identity)))
+                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_MIRROR}), _FIELDS, identity)))
