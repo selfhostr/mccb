@@ -209,6 +209,9 @@ LID_WORK_STATE = 0x8047
 LID_WORK_POSTAL = 0x8048
 LID_WORK_COUNTRY = 0x8049
 LID_WORK_POBOX = 0x804A
+LID_DISTLIST_NAME = 0x8053             # PidLidDistributionListName
+LID_DISTLIST_ONE_OFF_MEMBERS = 0x8054  # PidLidDistributionListOneOffMembers (one-off EntryIDs)
+LID_DISTLIST_MEMBERS = 0x8055          # PidLidDistributionListMembers (wrapped or one-off EntryIDs)
 LID_IM_ADDRESS = 0x8062
 LID_EMAIL1_DISPLAY = 0x8080
 LID_EMAIL1_TYPE = 0x8082
@@ -540,6 +543,28 @@ class PropBag:
         except struct.error:
             pass
         return default
+
+
+ONE_OFF_PROVIDER = bytes.fromhex("812b1fa4bea310199d6e00dd010f5402")  # MS-OXCDATA 2.2.5.1
+_MAPI_UNICODE = 0x8000
+
+
+def parse_one_off_entryid(eid: bytes | None, codepage: str = "cp1252") -> tuple[str, str, str] | None:
+    """(display name, address type, address) of a one-off EntryID, None for any other EntryID."""
+    if not eid or len(eid) < 24 or eid[4:20] != ONE_OFF_PROVIDER:
+        return None
+    flags = int.from_bytes(eid[22:24], "little")
+    data = eid[24:]
+    if flags & _MAPI_UNICODE:
+        if len(data) % 2:
+            data = data[:-1]
+        text = data.decode("utf-16-le", "replace")
+    else:
+        text = decode_bytes(data, [codepage, "cp1252"])
+    parts = text.split("\x00")
+    if len(parts) < 3:
+        return None
+    return parts[0].strip(), parts[1].strip(), parts[2].strip()
 
 
 def decode_utf16(d: bytes) -> str:

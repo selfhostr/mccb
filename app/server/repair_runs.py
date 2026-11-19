@@ -288,6 +288,10 @@ def _scan(run: Run, conn: ImapConn, write: bool) -> None:
                 run.progress["seen"] += 1
                 run.report["folders"][name]["seen"] += 1
                 a = repair.analyze(raw)
+                if a.no_recipients:      # reported only: the recipients are not in the message to repair from
+                    fr = run.report["folders"][name]
+                    fr["no_recipients"] = fr.get("no_recipients", 0) + 1
+                    run.report["no_recipients"] = run.report.get("no_recipients", 0) + 1
                 if a.already:
                     run.progress["skipped"] += 1
                     continue

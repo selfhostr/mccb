@@ -46,8 +46,11 @@
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
 			<Button variant="ghost" icon={FlaskConical} disabled={!count} loading={testing} onclick={ontest} data-testid="tenant-test">{m.tenant_bar_test()}</Button>
-			<Button icon={RefreshCw} disabled={!canResync} onclick={onresync} title={canResync ? undefined : m.tenant_bar_resync_hint()} data-testid="tenant-resync">{m.tenant_bar_resync()}</Button>
+			<Button icon={RefreshCw} disabled={!canResync} onclick={onresync} aria-describedby={canResync ? undefined : 'tenant-resync-reason'} data-testid="tenant-resync">{m.tenant_bar_resync()}</Button>
 			<Button variant="primary" icon={Play} disabled={!count} onclick={onstart} data-testid="tenant-start">{m.tenant_bar_start()}</Button>
 		</div>
+		{#if !canResync}
+			<p id="tenant-resync-reason" class="m-0 w-full text-right text-xs text-ink-3" data-testid="tenant-resync-reason">{count ? m.tenant_bar_resync_hint() : m.tenant_bar_resync_none()}</p>
+		{/if}
 	</div>
 </div>

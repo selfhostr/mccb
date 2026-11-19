@@ -8,6 +8,7 @@
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { dedupLook } from '../../lib/status.ts';
 	import Button from '../../lib/ui/Button.svelte';
+	import Disclosure from '../../lib/ui/Disclosure.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import RelTime from '../../lib/ui/RelTime.svelte';
@@ -21,6 +22,7 @@
 	let run = $state.raw<DedupRun | null>(null);
 	let history = $state.raw<DedupRun[]>([]);
 	let error = $state<string | null>(null);
+	let allExamples = $state(false);
 
 	// The full report is read when the run changes, ends, or (while it runs) every few hundred items.
 	const bucket = $derived(Math.floor(seen / 200));
@@ -60,6 +62,11 @@
 	const removal = $derived(run?.mode === 'dedup');
 	const canRemove = $derived(!box.active_run && !box.busy && box.usable && !!box.last_scan && box.last_scan.progress.duplicates > 0);
 
+	/** The report keeps a bounded number of examples (the server's limit); the page shows the first ones until asked. */
+	const EXAMPLES_SHOWN = 20;
+	const EXAMPLES_KEPT = 60;
+	const examples = $derived(allExamples ? (report?.examples ?? []) : (report?.examples ?? []).slice(0, EXAMPLES_SHOWN));
+
 	const histCount = (r: DedupRun) => (r.mode === 'dedup' ? m.dedup_hist_removed({ count: fmtNum(r.progress.deleted) }) : m.dedup_hist_found({ count: fmtNum(r.progress.duplicates) }));
 	const modeLabel = (r: DedupRun) => (r.mode === 'scan' ? m.dedup_mode_scan() : m.dedup_mode_dedup());
 </script>
@@ -84,11 +91,11 @@
 					<thead>
 						<tr class="text-left text-ink-3">
 							<th class="py-1 pr-3 font-medium">{m.dedup_col_type()}</th>
-							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_items()}</th>
-							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_groups()}</th>
+							<th class="py-1 pr-3 text-right font-medium" title={m.dedup_col_items_hint()}>{m.dedup_col_items()}</th>
+							<th class="py-1 pr-3 text-right font-medium" title={m.dedup_col_groups_hint()}>{m.dedup_col_groups()}</th>
 							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_duplicates()}</th>
 							{#if removal}<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_deleted()}</th>{/if}
-							<th class="py-1 text-right font-medium">{m.dedup_col_skipped()}</th>
+							<th class="py-1 text-right font-medium" title={m.dedup_col_skipped_hint()}>{m.dedup_col_skipped()}</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -112,7 +119,7 @@
 		{/if}
 
 		{#if canRemove}
-			<div><Button variant="primary" icon={CopyX} onclick={onremove} data-testid="dedup-detail-remove">{m.dedup_action_remove()}</Button></div>
+			<div><Button variant="danger" icon={CopyX} onclick={onremove} data-testid="dedup-detail-remove">{m.dedup_action_remove()}</Button></div>
 		{/if}
 
 		{#if folders.length}
@@ -122,11 +129,11 @@
 						<tr class="text-left text-ink-3">
 							<th class="py-1 pr-3 font-medium">{m.dedup_col_type()}</th>
 							<th class="py-1 pr-3 font-medium">{m.dedup_col_folder()}</th>
-							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_items()}</th>
-							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_groups()}</th>
+							<th class="py-1 pr-3 text-right font-medium" title={m.dedup_col_items_hint()}>{m.dedup_col_items()}</th>
+							<th class="py-1 pr-3 text-right font-medium" title={m.dedup_col_groups_hint()}>{m.dedup_col_groups()}</th>
 							<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_duplicates()}</th>
 							{#if removal}<th class="py-1 pr-3 text-right font-medium">{m.dedup_col_deleted()}</th>{/if}
-							<th class="py-1 text-right font-medium">{m.dedup_col_skipped()}</th>
+							<th class="py-1 text-right font-medium" title={m.dedup_col_skipped_hint()}>{m.dedup_col_skipped()}</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -152,15 +159,25 @@
 		{#if report.examples.length}
 			<div class="flex flex-col gap-1">
 				<p class="m-0 text-sm font-medium">{m.dedup_detail_examples()}</p>
-				<ul class="m-0 flex list-none flex-col gap-2 p-0" data-testid="dedup-examples">
-					{#each report.examples.slice(0, 20) as ex, i (i)}
-						<li class="flex min-w-0 flex-col">
-							<span class="truncate">{prefs.text(ex.label)}</span>
-							<span class="truncate text-xs text-ink-2">{kindLabel(ex.kind)} · {prefs.text(ex.folder)} · {prefs.text(ex.detail)}</span>
-							<span class="break-all text-xs text-ink-3">{m.dedup_example_copies({ count: ex.copies, keep: ex.keep })}</span>
+				<ul class="m-0 flex list-none flex-col p-0" data-testid="dedup-examples">
+					{#each examples as ex, i (i)}
+						<li class="min-w-0">
+							<Disclosure title={prefs.text(ex.label)} class="min-w-0 [&_summary>span]:truncate">
+								<div class="flex min-w-0 flex-col gap-0.5">
+									<span class="truncate text-xs text-ink-2">{kindLabel(ex.kind)} · {prefs.text(ex.folder)} · {prefs.text(ex.detail)}</span>
+									<span class="text-xs break-all text-ink-3">{m.dedup_example_copies({ count: ex.copies, keep: prefs.text(ex.keep) })}</span>
+									{#if ex.remove.length}<span class="text-xs break-all text-ink-3">{m.dedup_example_remove({ items: ex.remove.map((r) => prefs.text(r)).join(', ') })}</span>{/if}
+								</div>
+							</Disclosure>
 						</li>
 					{/each}
 				</ul>
+				{#if report.examples.length > EXAMPLES_SHOWN}
+					<div><Button variant="ghost" onclick={() => (allExamples = !allExamples)} data-testid="dedup-examples-all">{allExamples ? m.dedup_detail_examples_less() : m.dedup_detail_examples_all({ count: report.examples.length })}</Button></div>
+				{/if}
+				{#if run.progress.groups > report.examples.length}
+					<p class="m-0 text-xs text-ink-3">{m.dedup_detail_examples_note({ max: EXAMPLES_KEPT })}</p>
+				{/if}
 			</div>
 		{/if}
 

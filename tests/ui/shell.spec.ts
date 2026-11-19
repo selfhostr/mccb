@@ -17,7 +17,7 @@ test.describe('at 390 px', () => {
 		await expect(page.getByTestId('selection-bar')).toBeVisible();
 		await noOverflow(page);
 
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await noOverflow(page);
 		await page.getByTestId('import-confirm').click();
 		await row(page, 'alice@example.com').locator('[data-job-link]').click();
@@ -108,7 +108,7 @@ test.describe('reduced motion', () => {
 		expect(duration).toBeLessThan(0.001);
 
 		// The panel is there at once, without a slide.
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await row(page, 'alice@example.com').locator('[data-job-link]').click();
 		expect(await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running' && Number(a.effect?.getTiming().duration ?? 0) > 1).length)).toBe(0);
@@ -170,11 +170,41 @@ test.describe('settings', () => {
 		await expect(page.locator('[data-server="Production"]').getByTestId('server-verdict')).toContainText('Check failed');
 	});
 
+	test('a server is edited from a button of its row, duplicated from the menu, and deleting says how many mailboxes go with it', async ({ page }) => {
+		await ready(page, '/servers');
+		const prod = page.locator('[data-server="Production"]');
+		await expect(prod.getByRole('button', { name: 'Edit Production' })).toBeVisible();
+		await prod.getByRole('button', { name: 'Edit Production' }).click();
+		await expect(page.getByRole('dialog')).toContainText('Edit Production');
+		await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+
+		// Duplicate starts from the settings of the server, under another name.
+		await prod.getByRole('button', { name: 'More actions for Production' }).click();
+		await expect(page.getByRole('menuitem', { name: 'Edit' })).toHaveCount(0);
+		await page.getByRole('menuitem', { name: 'Duplicate' }).click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Duplicate Production');
+		await expect(dialog.getByTestId('server-name')).toHaveValue('Production (copy)');
+		await expect(dialog.getByTestId('server-host')).toHaveValue('imap.example.com');
+		await dialog.getByTestId('server-save').click();
+		await expect(page.locator('[data-server="Production (copy)"]')).toBeVisible();
+
+		// Staging holds two mailboxes: they are deleted with it, and the question says so.
+		await page.locator('[data-server="Staging"]').getByRole('button', { name: 'More actions for Staging' }).click();
+		await page.getByRole('menuitem', { name: 'Delete server' }).click();
+		const confirm = page.getByRole('dialog');
+		await expect(confirm).toContainText('2 mailboxes will be deleted too');
+		await confirm.getByRole('button', { name: 'Cancel' }).click();
+		await expect(page.locator('[data-server="Staging"]')).toBeVisible();
+	});
+
 	test('draws the kinds of server from the catalogue, and tolerates a server without the route', async ({ page }) => {
 		await ready(page, '/servers');
 		await page.getByTestId('server-add').click();
 		// Plain IMAP is always offered; a kind is offered only when the catalogue has it (Microsoft 365 is off by default).
 		await expect(page.getByTestId('server-kinds').locator('[data-kind="imap"]')).toBeVisible();
+		// Each kind says what it can be used as: where mail comes from, where it goes, or both.
+		await expect(page.getByTestId('server-kinds').locator('[data-kind="imap"]').getByTestId('server-kind-role')).toHaveText('Both');
 		await expect(page.getByTestId('server-kinds').locator('[data-kind="m365"]')).toHaveCount(0);
 
 		await mock(page.request, 'reset', { tenant: true });

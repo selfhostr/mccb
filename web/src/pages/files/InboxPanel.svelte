@@ -1,8 +1,12 @@
 <script lang="ts">
-	/** The drop folder: where to copy files, and what is waiting there. Hidden when the folder is off or the route is missing. */
+	/**
+	 * The drop folder: where to copy files, and what is waiting there. Off, it says so with a link to
+	 * the setting; unreachable, it says why. A server without the route (404) shows nothing.
+	 */
+	import FolderInput from '@lucide/svelte/icons/folder-input';
 	import { onMount } from 'svelte';
 	import { m } from '#lib/paraglide/messages.js';
-	import { get } from '../../lib/api/client.ts';
+	import { ApiError, errorText, get } from '../../lib/api/client.ts';
 	import type { InboxListing } from '../../lib/api/types.ts';
 	import { fmtBytes, fmtDuration } from '../../lib/format.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
@@ -10,14 +14,18 @@
 	import Disclosure from '../../lib/ui/Disclosure.svelte';
 
 	let listing = $state.raw<InboxListing | null>(null);
+	let failure = $state<string | null>(null);
 
 	async function refresh() {
 		try {
 			const next = await get<InboxListing>('/intake/inbox');
 			// Same content: keep the same object, nothing re-renders.
 			if (JSON.stringify(next) !== JSON.stringify(listing)) listing = next;
-		} catch {
+			failure = null;
+		} catch (error) {
 			listing = null;
+			// A server without a drop folder at all answers 404: nothing to offer then.
+			failure = error instanceof ApiError && error.status === 404 ? null : errorText(error);
 		}
 	}
 
@@ -28,7 +36,19 @@
 	});
 </script>
 
-{#if listing?.enabled}
+{#if failure}
+	<p class="m-0 flex min-h-10 flex-wrap items-center gap-x-2 text-xs text-advisory-ink" role="status" data-testid="inbox-failed">
+		<FolderInput size={14} class="shrink-0" />
+		<span class="min-w-0 break-words">{m.files_inbox_failed({ error: failure })}</span>
+		<a class="inline-flex min-h-10 items-center text-ink-2 underline hover:text-ink" href="/settings#intake">{m.files_inbox_settings()}</a>
+	</p>
+{:else if listing && !listing.enabled}
+	<p class="m-0 flex min-h-10 flex-wrap items-center gap-x-2 text-xs text-ink-2" data-testid="inbox-off">
+		<FolderInput size={14} class="shrink-0 text-ink-3" />
+		<span>{m.files_inbox_off()}</span>
+		<a class="inline-flex min-h-10 items-center underline hover:text-ink" href="/settings#intake">{m.files_inbox_turn_on()}</a>
+	</p>
+{:else if listing?.enabled}
 	<div data-testid="inbox">
 		<Disclosure title={m.files_inbox_title()} summary={m.files_inbox_waiting({ count: listing.files.length })}>
 			<div class="flex flex-col gap-2">

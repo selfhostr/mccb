@@ -26,7 +26,7 @@ Forwarded messages (`message/rfc822`) are kept exactly as they are.
 
 Click **Repair** on a mailbox, or select several. For each damaged message:
 
-1. The repaired message is built and checked: same sender, recipients, date and Message-ID, the same attachments byte for byte, no new `�`. A message that fails this check is not touched and is listed under the errors.
+1. The repaired message is built and checked: every header other than the subject and the MIME headers is kept byte for byte (sender, `To`, `Cc`, `Bcc`, `Reply-To`, `Resent-*`, date, Message-ID, threading headers), with the same attachments byte for byte and no new `�`. A header the repair does not change is written exactly as it was read, never re-encoded or re-folded. A message that fails this check is not touched and is listed under the errors.
 2. It is written to the same folder, with the same flags and the same date.
 3. The original is copied to `_originaux_avant_reparation/<folder>` in the same mailbox.
 4. Only then is the original removed from the folder (`UID EXPUNGE`, only that message).
@@ -52,5 +52,6 @@ A repair can be stopped and started again at any time, also after a crash or a r
 
 > **Warning.** The real name of an attachment called `piece_jointe_3` is lost: the repair can only give it the right extension. An accent that no other version of the message contains cannot be rebuilt.
 
+- Messages with no `To`, `Cc` or `Bcc` at all are counted in the report (`no_recipients`, per folder) but not changed: the recipients are no longer in the message. They are typically the sent items of a PST converted by a tool that read only the transport headers, which sent items do not have. Only the source (the PST, or the original server) still has them.
 - Only IMAP mailboxes. Calendars and contacts are not checked.
 - The repair reads every message of the mailbox: a large mailbox takes as long as a download of it.
