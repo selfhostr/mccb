@@ -206,7 +206,7 @@ class Analysis:
 def preflight(acc) -> list[dict]:
     """Blocked codes known without any connection."""
     out = []
-    if not (acc["mirror"] if "mirror" in acc.keys() else 0):
+    if not (acc["opt_mirror"] if "opt_mirror" in acc.keys() else 0):
         out.append({"code": MIRROR_OFF, "message": "mirror mode is not enabled for this mailbox"})
     kind = wiring.source_kind(acc)
     try:

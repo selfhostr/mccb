@@ -321,7 +321,7 @@ class AccountUpdate(BaseModel):
     login: str | None = None
     options: dict[str, bool] | None = None
     pst_id: int | None = None
-    mirror: bool | None = None  # also accepted as options.mirror (docs/planning.md "Mirror")
+    mirror: bool | None = None  # same as options.mirror (docs/planning.md "Mirror")
 
 
 def _account_or_404(aid: int):
@@ -380,13 +380,11 @@ def update_account(aid: int, a: AccountUpdate):
         sets.append("password_enc=?"); vals.append(encrypt(a.password))
         sets.append("status='new'")
     if a.options is not None:
-        for k in ("mail", "calendar", "contacts"):
+        for k in ("mail", "calendar", "contacts", "mirror"):
             if k in a.options:
                 sets.append(f"opt_{k}=?"); vals.append(int(bool(a.options[k])))
-        if "mirror" in a.options:
-            sets.append("mirror=?"); vals.append(int(bool(a.options["mirror"])))
-    if a.mirror is not None:
-        sets.append("mirror=?"); vals.append(int(a.mirror))
+    if a.mirror is not None and not (a.options and "mirror" in a.options):
+        sets.append("opt_mirror=?"); vals.append(int(a.mirror))
     if "pst_id" in a.model_fields_set:
         if a.pst_id is not None and not repo.get_pst(a.pst_id):
             raise HTTPException(404, "unknown PST")

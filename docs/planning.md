@@ -123,7 +123,7 @@ Mirror today: IMAP to IMAP (mail), CalDAV to CalDAV (events and tasks), CardDAV 
 
 ### Turn it on and run it
 
-1. Enable the option on the mailbox: `PUT /api/accounts/{id} {"mirror": true}` (also accepted as `options.mirror`). `GET /api/accounts/{id}` returns `mirror`. A mailbox without it is refused with `mirror_off`.
+1. Enable the option on the mailbox: `PUT /api/accounts/{id} {"options": {"mirror": true}}`. `GET /api/accounts/{id}` returns it in `options` (and as `mirror`). A mailbox without it is refused with `mirror_off`.
 2. Look at what a pass would do: `POST /api/runs {account_ids, mode: "mirror"}`. This is a dry run, the default: it connects, lists and compares, and writes nothing anywhere and creates no job.
 3. Run it: the same request with `"dry_run": false`. One job per mailbox is created, with the mode `mirror`.
 

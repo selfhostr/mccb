@@ -82,11 +82,11 @@ def ours(dst, folder):
 def test_mirror_option_on_account(client, box):
     aid, _, _ = make(client, mirror=False)
     acc = client.get(f"/api/accounts/{aid}").json()
-    assert acc["mirror"] is False and "mirror" not in acc["options"]
+    assert acc["mirror"] is False and acc["options"]["mirror"] is False
     assert client.put(f"/api/accounts/{aid}", json={"options": {"mirror": True}}).status_code == 200
-    assert client.get(f"/api/accounts/{aid}").json()["mirror"] is True
+    assert client.get(f"/api/accounts/{aid}").json()["options"]["mirror"] is True
     assert client.put(f"/api/accounts/{aid}", json={"mirror": False}).status_code == 200
-    assert client.get(f"/api/accounts/{aid}").json()["mirror"] is False
+    assert client.get(f"/api/accounts/{aid}").json()["options"]["mirror"] is False
 
 
 def test_mirror_off_is_blocked(client, box):

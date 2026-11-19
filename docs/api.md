@@ -159,7 +159,7 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'|'mirror'` and `priority`.
   `mode:'mirror'` also takes `dry_run` (default true: `{accounts:[{account_id,email,ready,to_add,to_update,to_delete,blocked,sample}]}`,
   nothing written), `max_delete_percent` (20) and `allow_large_delete` (false); with `dry_run:false` → `{accounts,jobs}`. The account
-  field `mirror` (GET/PUT `/api/accounts/{id}`) enables it. See [Mirror](planning.md#mirror).
+  option `options.mirror` (GET/PUT `/api/accounts/{id}`) enables it. See [Mirror](planning.md#mirror).
   `GET/PUT /api/servers/{id}/policy` and `GET/PUT /api/accounts/{id}/policy`: `{policy}` (account: also `effective`); body
   `{folder_map:[{source,target}],exclude_folders:[...],date_from,date_to,max_size_mb}` plus, for a server, `window:{days?,start,end,tz}` and `rate_mb_s`;
   `null` or `{}` clears; **422** with the reason when invalid.
