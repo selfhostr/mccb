@@ -73,7 +73,7 @@ test.describe('mirror mode', () => {
 
 		// A dry run: it asked for it, and no job was created.
 		const call = await lastMirrorCall(page);
-		expect(call).toMatchObject({ account_ids: [1], mode: 'mirror', dry_run: true, max_delete_percent: 20, allow_large_delete: false });
+		expect(call).toMatchObject({ account_ids: [1], mode: 'mirror', dry_run: true, max_delete_percent: 20, min_delete_count: 10, allow_large_delete: false, allow_empty_folders: [] });
 		expect(await mirrorRuns(page)).toEqual([]);
 
 		await expect(dialog.getByTestId('mirror-readonly')).toHaveText('The source is never modified');
@@ -245,6 +245,118 @@ test.describe('mirror mode', () => {
 		await page.getByRole('dialog', { name: 'Delete 60 items at the destination' }).getByRole('button', { name: 'Delete 60 and apply' }).click();
 		await expect(page.getByRole('dialog')).toHaveCount(0);
 		expect((await mirrorRuns(page)).at(-1)).toMatchObject({ account_ids: [1], dry_run: false, allow_large_delete: true });
+	});
+
+	test('a refused deletion says which percentage would let it through; the minimal number of deletions is another way out', async ({ page }) => {
+		await migrated(page, 1);
+		// 60 of 200 items: 30% needed.
+		await scenarios(page, { 1: { add: {}, update: {}, delete: { mail: 60 }, holds: 200 } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+		await expect(dialog.getByTestId('mirror-needed-percent')).toHaveText(/at least 30%/);
+		await expect(dialog.getByTestId('mirror-needed-percent')).toContainText('minimum number of deletions');
+		const count = dialog.getByTestId('mirror-min-count');
+		await expect(count).toHaveValue('10');
+		await expect(dialog.getByTestId('mirror-limit')).toContainText('Minimum number of deletions before the threshold');
+		await expect(dialog.getByTestId('mirror-limit')).toContainText('Below this number of deletions, the percentage threshold does not apply.');
+		await expect(dialog.getByTestId('mirror-apply')).toBeDisabled();
+
+		// Under the minimum, the percentage no longer blocks.
+		await count.fill('100');
+		await count.blur();
+		await expect(dialog.getByTestId('mirror-block-too_many_deletes')).toHaveCount(0);
+		expect(await lastMirrorCall(page)).toMatchObject({ min_delete_count: 100, max_delete_percent: 20, allow_large_delete: false });
+		await expect(dialog.getByTestId('mirror-apply')).toBeEnabled();
+
+		// A value out of range is brought back to a whole number from 0.
+		await count.fill('-5');
+		await count.blur();
+		await expect(count).toHaveValue('0');
+		expect(await lastMirrorCall(page)).toMatchObject({ min_delete_count: 0 });
+		await expect(dialog.getByTestId('mirror-needed-percent')).toHaveText(/at least 30%/);
+	});
+
+	test('a small collection is not blocked by the percentage, unless the minimal number is lowered to 0', async ({ page }) => {
+		await migrated(page, 1);
+		// 5 of 10 items: 50%, but only 5 deletions, under the 10 of the default.
+		await scenarios(page, { 1: { add: {}, update: {}, delete: { mail: 5 }, holds: 10 } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+		await expect(dialog.getByTestId('mirror-block-too_many_deletes')).toHaveCount(0);
+		await expect(dialog.getByTestId('mirror-apply')).toBeEnabled();
+		await dialog.getByTestId('mirror-limit').locator('summary').click();
+		const count = dialog.getByTestId('mirror-min-count');
+		await count.fill('0');
+		await count.blur();
+		await expect(dialog.getByTestId('mirror-needed-percent')).toHaveText(/at least 50%/);
+		expect(await lastMirrorCall(page)).toMatchObject({ min_delete_count: 0 });
+		await expect(dialog.getByTestId('mirror-apply')).toBeDisabled();
+	});
+
+	test('an empty source folder is accepted one folder at a time, without the large deletion, and can be taken back', async ({ page }) => {
+		await migrated(page, 1);
+		await scenarios(page, { 1: { add: {}, update: {}, delete: {}, holds: 1000, emptyFolders: [{ kind: 'mail', folder: 'Projects', count: 42 }, { kind: 'mail', folder: 'Archive', count: 8 }] } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+
+		const folders = dialog.getByTestId('mirror-empty-folder');
+		await expect(folders).toHaveCount(2);
+		await expect(folders.first()).toContainText('Projects');
+		await expect(folders.first()).toContainText('This folder is empty at the source: applying would delete its 42 items at the destination.');
+		await expect(dialog.getByTestId('mirror-apply')).toBeDisabled();
+		// Neither the large deletion nor an accepted folder yet.
+		await expect(dialog.getByTestId('mirror-large')).toHaveCount(0);
+		await expect(dialog.getByTestId('mirror-empty-accepted')).toHaveCount(0);
+
+		await folders.first().getByRole('button', { name: 'Allow this empty folder' }).click();
+		expect(await lastMirrorCall(page)).toMatchObject({ dry_run: true, allow_large_delete: false, allow_empty_folders: ['Projects'] });
+		// Projects is no longer blocked and is listed as accepted; Archive still is.
+		await expect(dialog.getByTestId('mirror-empty-folder')).toHaveCount(1);
+		await expect(dialog.getByTestId('mirror-empty-folder')).toContainText('Archive');
+		await expect(dialog.getByTestId('mirror-empty-accepted')).toContainText('Empty folder accepted: Projects');
+		await expect(dialog.getByTestId('mirror-empty-accepted')).toContainText('delete its 42 items');
+		await expect(dialog.getByTestId('mirror-large')).toHaveCount(0);
+
+		// Taken back: blocked again.
+		// The line leaves the list as soon as it is unticked: a click, not uncheck(), which waits for the box to stay.
+		await dialog.getByTestId('mirror-empty-accepted-item').click();
+		await expect(dialog.getByTestId('mirror-empty-folder')).toHaveCount(2);
+		await expect(dialog.getByTestId('mirror-empty-accepted')).toHaveCount(0);
+		expect(await lastMirrorCall(page)).toMatchObject({ allow_empty_folders: [] });
+
+		// Both accepted: the 50 deletions are confirmed with their number, and the run carries the keys.
+		await dialog.getByTestId('mirror-empty-allow').first().click();
+		await expect(dialog.getByTestId('mirror-empty-folder')).toHaveCount(1);
+		await dialog.getByTestId('mirror-empty-allow').click();
+		await expect(dialog.getByTestId('mirror-empty-folder')).toHaveCount(0);
+		await expect(dialog.getByTestId('mirror-totals')).toHaveText('0 to add, 0 to update, 50 to delete');
+		expect(await lastMirrorCall(page)).toMatchObject({ allow_large_delete: false, allow_empty_folders: ['Projects', 'Archive'] });
+		await dialog.getByTestId('mirror-apply').click();
+		await page.getByRole('dialog', { name: 'Delete 50 items at the destination' }).getByRole('button', { name: 'Delete 50 and apply' }).click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		expect((await mirrorRuns(page)).at(-1)).toMatchObject({ account_ids: [1], dry_run: false, allow_large_delete: false, allow_empty_folders: ['Projects', 'Archive'] });
+	});
+
+	test('an empty folder of another kind is offered like a mail folder', async ({ page }) => {
+		await migrated(page, 1);
+		await scenarios(page, { 1: { add: {}, update: {}, delete: {}, emptyFolders: [{ kind: 'contacts', folder: 'Family', count: 3 }] } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+		await expect(dialog.getByTestId('mirror-empty-folder')).toContainText('delete its 3 items');
+		await expect(dialog.getByTestId('mirror-block-source_empty')).toContainText('A source folder looks empty');
+	});
+
+	test('a note says an item was changed at the destination since, in a neutral tone', async ({ page }) => {
+		await migrated(page, 1);
+		await scenarios(page, { 1: { notes: [{ code: 'target_modified', message: '3 contacts were changed at the destination' }] } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+		const note = dialog.getByTestId('mirror-note-target_modified');
+		await expect(note).toHaveAttribute('data-tone', 'note');
+		await expect(note).toContainText('Item changed at the destination');
+		await expect(note).toContainText('they are neither deleted nor updated');
+		await expect(note).toContainText('3 contacts were changed at the destination');
+		await expect(dialog.getByTestId('mirror-apply')).toBeEnabled();
 	});
 
 	test('the large deletion is not offered for another block, and a percentage out of range is brought back', async ({ page }) => {

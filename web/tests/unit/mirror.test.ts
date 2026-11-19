@@ -8,16 +8,24 @@ import {
 	blockInfo,
 	canApply,
 	canMirrorResync,
+	clampCount,
 	clampPercent,
 	DEFAULT_MAX_DELETE_PERCENT,
+	DEFAULT_MIN_DELETE_COUNT,
 	describeNote,
+	type EmptyFolder,
+	emptyFolderCount,
+	emptyFolderOf,
 	hasWarningNote,
+	MAX_MIN_DELETE_COUNT,
+	mergeEmptyFolders,
 	mirrorReport,
 	mirrorReportRows,
 	mirrorRows,
 	mirrorSkipped,
 	mirrorState,
 	mirrorTotals,
+	neededPercent,
 	NOTE_CODES,
 	type NoteLabels,
 	noteLines,
@@ -25,7 +33,9 @@ import {
 	offersLargeDelete,
 	readyIds,
 	sampleLines,
-	sumCounts
+	startedJobs,
+	sumCounts,
+	toggleEmptyFolder
 } from '../../src/lib/logic/mirror.ts';
 
 const plan = (id: number, over: Partial<MirrorAccountPlan> = {}): MirrorAccountPlan => ({
@@ -93,12 +103,13 @@ describe('state of the whole preview', () => {
 });
 
 describe('blocks', () => {
-	it('knows the seven codes of the API and offers a fix for two', () => {
+	it('knows the seven codes of the API and offers a fix for three', () => {
 		expect([...BLOCK_CODES].sort()).toEqual(['job_active', 'mirror_off', 'no_prior_run', 'source_empty', 'source_unlistable', 'target_unreachable', 'too_many_deletes', 'uidvalidity_changed', 'unknown_account']);
 		for (const code of BLOCK_CODES) expect(blockInfo(code).known).toBe(true);
 		expect(blockInfo('mirror_off').fix).toBe('enable');
 		expect(blockInfo('too_many_deletes').fix).toBe('threshold');
-		expect(blockInfo('source_empty').fix).toBeNull();
+		expect(blockInfo('source_empty').fix).toBe('allow_empty');
+		expect(blockInfo('no_prior_run').fix).toBeNull();
 		expect(blockInfo('something_new')).toEqual({ known: false, fix: null });
 	});
 
@@ -113,6 +124,88 @@ describe('blocks', () => {
 		expect(offersLargeDelete([blocked(1, 'too_many_deletes')])).toBe(true);
 		expect(offersLargeDelete([blocked(1, 'source_empty'), plan(2)])).toBe(false);
 		expect(offersLargeDelete([])).toBe(false);
+	});
+});
+
+describe('empty folders', () => {
+	const empty = (id: number, folder: string, over: Record<string, unknown> = {}) =>
+		plan(id, { ready: false, blocked: [{ code: 'source_empty', kind: 'mail', folder, message: `mail folder '${folder}': the source lists nothing while 42 item(s) were migrated; if it was emptied on purpose, run again with allow_empty_folders: ["${folder}"]`, ...over }] });
+
+	it('reads the folder, the kind and the number of items out of a source_empty block', () => {
+		expect(emptyFolderOf(empty(1, 'Projects').blocked[0])).toEqual({ key: 'Projects', kind: 'mail', count: 42 });
+		expect(emptyFolderOf(empty(1, 'Cal', { kind: 'calendar', message: 'no number here' }).blocked[0])).toEqual({ key: 'Cal', kind: 'calendar', count: null });
+		expect(emptyFolderOf(empty(1, 'X', { kind: 'bogus' }).blocked[0])?.kind).toBeNull();
+	});
+
+	it('a block that names no folder, or another code, cannot be accepted one by one', () => {
+		expect(emptyFolderOf({ code: 'source_empty', message: 'old server' })).toBeNull();
+		expect(emptyFolderOf({ code: 'source_empty', folder: '', message: '' })).toBeNull();
+		expect(emptyFolderOf({ code: 'too_many_deletes', folder: 'Projects', message: '' })).toBeNull();
+	});
+
+	it('takes the number of items from the message only when it says one', () => {
+		expect(emptyFolderCount('the source lists nothing while 7 item(s) were migrated')).toBe(7);
+		expect(emptyFolderCount('a newer wording')).toBeNull();
+		expect(emptyFolderCount(undefined)).toBeNull();
+	});
+
+	it('lists each blocked folder once, and keeps the accepted ones after their block is gone', () => {
+		const first = mergeEmptyFolders(new Map(), [empty(1, 'Projects'), empty(2, 'Projects'), empty(2, 'Archive'), plan(3)], new Set());
+		expect([...first.keys()]).toEqual(['Projects', 'Archive']);
+		// Projects is accepted: the next answer no longer blocks it, but it stays; Archive was neither blocked nor accepted any more.
+		const next = mergeEmptyFolders(first, [plan(1), plan(2)], new Set(['Projects']));
+		expect([...next.keys()]).toEqual(['Projects']);
+		expect(next.get('Projects')).toEqual<EmptyFolder>({ key: 'Projects', kind: 'mail', count: 42 });
+		// A key accepted that was never seen shows nothing.
+		expect(mergeEmptyFolders(new Map(), [], new Set(['Ghost'])).size).toBe(0);
+	});
+
+	it('accepting or taking back a folder gives a new set and leaves the other ones alone', () => {
+		const none = new Set<string>();
+		const one = toggleEmptyFolder(none, 'A', true);
+		expect([...none]).toEqual([]);
+		expect([...toggleEmptyFolder(one, 'B', true)]).toEqual(['A', 'B']);
+		expect([...toggleEmptyFolder(toggleEmptyFolder(one, 'B', true), 'A', false)]).toEqual(['B']);
+		expect([...toggleEmptyFolder(one, 'A', true)]).toEqual(['A']);
+	});
+});
+
+describe('threshold of a refused deletion', () => {
+	it('gives the percentage that lets the deletions through, as a whole number from 1 to 100', () => {
+		expect(neededPercent({ code: 'too_many_deletes', needed_percent: 30 })).toBe(30);
+		expect(neededPercent({ code: 'too_many_deletes', needed_percent: 30.2 })).toBe(31);
+		expect(neededPercent({ code: 'too_many_deletes', needed_percent: 250 })).toBe(100);
+		expect(neededPercent({ code: 'too_many_deletes', needed_percent: 0 })).toBe(1);
+	});
+
+	it('says nothing when the block does not carry it, or is another block', () => {
+		expect(neededPercent({ code: 'too_many_deletes' })).toBeNull();
+		expect(neededPercent({ code: 'too_many_deletes', needed_percent: Number.NaN })).toBeNull();
+		expect(neededPercent({ code: 'source_empty', needed_percent: 30 })).toBeNull();
+	});
+});
+
+describe('minimal number of deletions', () => {
+	it('stays a whole number from 0', () => {
+		expect(clampCount('25')).toBe(25);
+		expect(clampCount('0')).toBe(0);
+		expect(clampCount('-4')).toBe(0);
+		expect(clampCount(7.6)).toBe(8);
+		expect(clampCount('3,2')).toBe(3);
+		expect(clampCount('999999999999')).toBe(MAX_MIN_DELETE_COUNT);
+	});
+
+	it('goes back to the default when it is not a number', () => {
+		expect(clampCount('')).toBe(DEFAULT_MIN_DELETE_COUNT);
+		expect(clampCount('abc')).toBe(DEFAULT_MIN_DELETE_COUNT);
+		expect(DEFAULT_MIN_DELETE_COUNT).toBe(10);
+	});
+});
+
+describe('jobs of a run', () => {
+	it('leaves out a job that was given back as it is', () => {
+		const job = (id: number, over: Record<string, unknown> = {}) => ({ id, account_id: id, status: 'queued', ...over }) as never;
+		expect(startedJobs([job(1), job(2, { existing: true }), job(3, { existing: false })]).map((j) => j.id)).toEqual([1, 3]);
 	});
 });
 
@@ -197,12 +290,18 @@ describe('notes', () => {
 		expect(noteTone('hard_delete')).toBe('warning');
 		expect(noteTone('no_copy_kept')).toBe('note');
 		expect(noteTone('shared_resource')).toBe('note');
+		expect(noteTone('target_modified')).toBe('note');
 		expect(noteTone('brand_new')).toBe('note');
 	});
 
 	it('a known code gets the label of the interface and keeps the API message as its detail', () => {
 		expect(describeNote({ code: 'soft_delete', message: 'no Trash on the destination' }, labels)).toEqual({ code: 'soft_delete', tone: 'warning', label: 'Soft', hint: 'soft hint', detail: 'no Trash on the destination' });
 		expect(describeNote({ code: 'shared_resource', message: '  ' }, labels).detail).toBeNull();
+	});
+
+	it('target_modified is a plain note with its label and hint, and does not open a mailbox', () => {
+		expect(describeNote({ code: 'target_modified', message: '2 contacts changed at the destination' }, labels)).toEqual({ code: 'target_modified', tone: 'note', label: 'Modified', hint: 'modified hint', detail: '2 contacts changed at the destination' });
+		expect(hasWarningNote([{ code: 'target_modified', message: '' }])).toBe(false);
 	});
 
 	it('an unknown code shows the API message as its label, or the code when it has none', () => {

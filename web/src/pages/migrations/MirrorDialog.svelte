@@ -20,7 +20,7 @@
 	import { errorText, post } from '../../lib/api/client.ts';
 	import type { MirrorAccountPlan, MirrorAction, MirrorKind, MirrorPlan, MirrorRun, RunInput } from '../../lib/api/types.ts';
 	import { fmtAbsolute, fmtNum, toDate } from '../../lib/format.ts';
-	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampPercent, DEFAULT_MAX_DELETE_PERCENT, hasWarningNote, mirrorRows, mirrorState, mirrorTotals, offersLargeDelete, readyIds, sampleLines } from '../../lib/logic/mirror.ts';
+	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampCount, clampPercent, DEFAULT_MAX_DELETE_PERCENT, DEFAULT_MIN_DELETE_COUNT, type EmptyFolder, emptyFolderOf, hasWarningNote, mergeEmptyFolders, MAX_MIN_DELETE_COUNT, mirrorRows, mirrorState, mirrorTotals, neededPercent, offersLargeDelete, readyIds, sampleLines, startedJobs, toggleEmptyFolder } from '../../lib/logic/mirror.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
@@ -47,7 +47,12 @@
 	let error = $state<string | null>(null);
 	let percent = $state(DEFAULT_MAX_DELETE_PERCENT);
 	let percentText = $state(String(DEFAULT_MAX_DELETE_PERCENT));
+	let minCount = $state(DEFAULT_MIN_DELETE_COUNT);
+	let minCountText = $state(String(DEFAULT_MIN_DELETE_COUNT));
 	let allowLarge = $state(false);
+	// The folders accepted empty (by key), and the empty folders seen so far: an accepted folder is no longer blocked, so it is remembered to be shown and taken back.
+	let allowedEmpty = $state.raw<ReadonlySet<string>>(new Set());
+	let emptyFolders = $state.raw<ReadonlyMap<string, EmptyFolder>>(new Map());
 	let limitOpen = $state(false);
 	let confirming = $state(false);
 	let applying = $state(false);
@@ -65,6 +70,7 @@
 	const largeOffered = $derived(offersLargeDelete(accounts) || allowLarge);
 	const needsEnable = $derived(blockedBy(accounts, 'mirror_off'));
 	const tooMany = $derived(codes.includes('too_many_deletes'));
+	const acceptedEmpty = $derived([...allowedEmpty].map((key) => emptyFolders.get(key)).filter((f): f is EmptyFolder => !!f));
 
 	// The safety limit is where the way out of a refused deletion is: it opens by itself then.
 	$effect(() => {
@@ -103,7 +109,7 @@
 						: ''
 	);
 
-	const body = (dry: boolean): RunInput => ({ account_ids: dry ? ids : runIds, mode: 'mirror', dry_run: dry, max_delete_percent: percent, allow_large_delete: allowLarge });
+	const body = (dry: boolean): RunInput => ({ account_ids: dry ? ids : runIds, mode: 'mirror', dry_run: dry, max_delete_percent: percent, min_delete_count: minCount, allow_large_delete: allowLarge, allow_empty_folders: [...allowedEmpty] });
 
 	async function compare() {
 		const mine = ++asked;
@@ -113,6 +119,7 @@
 			const answer = await post<MirrorPlan>('/runs', body(true));
 			if (gone || mine !== asked) return;
 			plan = answer;
+			emptyFolders = mergeEmptyFolders(emptyFolders, answer.accounts ?? [], allowedEmpty);
 		} catch (e) {
 			if (gone || mine !== asked) return;
 			plan = null;
@@ -129,6 +136,19 @@
 		percentText = String(next);
 		if (next === percent) return;
 		percent = next;
+		void compare();
+	}
+
+	function commitMinCount() {
+		const next = clampCount(minCountText);
+		minCountText = String(next);
+		if (next === minCount) return;
+		minCount = next;
+		void compare();
+	}
+
+	function toggleEmpty(key: string, on: boolean) {
+		allowedEmpty = toggleEmptyFolder(allowedEmpty, key, on);
 		void compare();
 	}
 
@@ -153,7 +173,8 @@
 		applyError = null;
 		try {
 			// The server answers 200 with a job per mailbox that may run; the others come back with their blocks and no job.
-			const { jobs } = await post<MirrorRun>('/runs', body(false));
+			const { jobs: answered } = await post<MirrorRun>('/runs', body(false));
+			const jobs = startedJobs(answered);
 			for (const job of jobs) data.upsertJob(job);
 			if (!jobs.length) {
 				void compare();
@@ -170,6 +191,7 @@
 		}
 	}
 
+	const emptySentence = (f: EmptyFolder) => (f.count === null ? m.migrations_mirror_empty_sentence_unknown() : m.migrations_mirror_empty_sentence({ count: count(f.count) }));
 	const email = (a: MirrorAccountPlan) => prefs.email(a.email || `#${a.account_id}`);
 	const when = (value: string) => (toDate(value) ? fmtAbsolute(toDate(value)) : value);
 	const count = (n: number) => fmtNum(n);
@@ -216,14 +238,26 @@
 								{#if accounts.length > 1}<span class="text-xs text-ink-2">{@render totalsText(own)}</span>{/if}
 							</summary>
 							<div class="flex flex-col gap-3 pb-3 pl-4 text-xs">
-								{#each account.blocked ?? [] as block (block.code)}
+								{#each account.blocked ?? [] as block, b (b)}
 									{@const text = blockText(block.code)}
+									{@const empty = emptyFolderOf(block)}
+									{@const needed = neededPercent(block)}
 									<div class="flex items-start gap-2 rounded-btn border border-warning/30 bg-warning-soft p-3 text-warning-ink" data-testid={`mirror-block-${block.code}`}>
 										<span class="mt-0.5"><CircleAlert size={14} aria-hidden="true" /></span>
 										<div class="min-w-0">
 											<p class="m-0 font-semibold">{text?.reason ?? prefs.text(block.message)}</p>
 											{#if text && block.message}<p class="m-0 mt-1 font-mono break-words text-ink-2">{prefs.text(block.message)}</p>{/if}
 											{#if text}<p class="m-0 mt-1 text-ink">{text.fix}</p>{/if}
+											{#if needed !== null}<p class="m-0 mt-1 text-ink" data-testid="mirror-needed-percent">{m.migrations_mirror_needed_percent({ percent: needed })}</p>{/if}
+											{#if empty}
+												<div class="mt-2 flex flex-col items-start gap-2" data-testid="mirror-empty-folder">
+													<p class="m-0 text-ink">
+														<span class="font-mono font-medium">{prefs.text(empty.key)}</span>
+														{emptySentence(empty)}
+													</p>
+													<Button onclick={() => toggleEmpty(empty.key, true)} data-testid="mirror-empty-allow">{m.migrations_mirror_empty_allow()}</Button>
+												</div>
+											{/if}
 										</div>
 									</div>
 								{/each}
@@ -283,10 +317,27 @@
 			</ul>
 		{/if}
 
+		{#if acceptedEmpty.length}
+			<div class="flex flex-col gap-1" data-testid="mirror-empty-accepted">
+				{#each acceptedEmpty as folder (folder.key)}
+					<div class="flex flex-col">
+						<label class="flex min-h-10 items-center gap-2">
+							<span class="check"><input type="checkbox" checked onchange={() => toggleEmpty(folder.key, false)} data-testid="mirror-empty-accepted-item" data-folder={folder.key} /></span>
+							{m.migrations_mirror_empty_allowed({ folder: prefs.text(folder.key) })}
+						</label>
+						<p class="m-0 pl-7 text-xs text-ink-2">{emptySentence(folder)}</p>
+					</div>
+				{/each}
+			</div>
+		{/if}
+
 		<Disclosure title={m.migrations_mirror_limit()} summary={m.migrations_mirror_limit_value({ percent })} bind:open={limitOpen} data-testid="mirror-limit">
 			<div class="flex flex-col gap-3 pt-1">
 				<Field label={m.migrations_mirror_limit_label()} hint={m.migrations_mirror_limit_hint()}>
 					<input class="input w-24 font-mono" type="number" min="1" max="100" step="1" inputmode="numeric" bind:value={percentText} onchange={commitPercent} data-testid="mirror-percent" />
+				</Field>
+				<Field label={m.migrations_mirror_min_count_label()} hint={m.migrations_mirror_min_count_hint()}>
+					<input class="input w-24 font-mono" type="number" min="0" max={MAX_MIN_DELETE_COUNT} step="1" inputmode="numeric" bind:value={minCountText} onchange={commitMinCount} data-testid="mirror-min-count" />
 				</Field>
 			</div>
 		</Disclosure>
