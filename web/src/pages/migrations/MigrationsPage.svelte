@@ -2,6 +2,8 @@
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
 	import CircleX from '@lucide/svelte/icons/circle-x';
+	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
+	import FileSpreadsheet from '@lucide/svelte/icons/file-spreadsheet';
 	import Plus from '@lucide/svelte/icons/plus';
 	import Search from '@lucide/svelte/icons/search';
 	import SearchX from '@lucide/svelte/icons/search-x';
@@ -23,6 +25,7 @@
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
+	import Menu from '../../lib/ui/Menu.svelte';
 	import { slide } from '../../lib/ui/motion.ts';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
@@ -312,6 +315,7 @@
 <PageHeader title={m.migrations_page_title()} sentence={data.accounts.size ? sentence : undefined}>
 	{#snippet actions()}
 		{#if data.servers.length}
+			<Menu label={m.migrations_page_more()} icon={EllipsisVertical} items={[{ label: m.migrations_csv_menu(), icon: FileSpreadsheet, onselect: () => (dialog = { kind: 'csv' }) }]} />
 			<Button variant="primary" icon={Plus} onclick={() => (dialog = { kind: 'add' })} data-testid="new-migration">{m.migrations_add_label()}</Button>
 		{/if}
 	{/snippet}
@@ -500,7 +504,7 @@
 {#if dialog?.kind === 'server'}
 	<AddServer onclose={closeDialog} />
 {:else if dialog?.kind === 'add'}
-	<NewMigrationDialog defaultServer={server} onclose={closeDialog} oncsv={() => (dialog = { kind: 'csv' })} />
+	<NewMigrationDialog defaultServer={server} onclose={closeDialog} />
 {:else if dialog?.kind === 'edit'}
 	<AccountDialog account={dialog.account} onclose={closeDialog} />
 {:else if dialog?.kind === 'csv'}
