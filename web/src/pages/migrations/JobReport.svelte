@@ -13,6 +13,7 @@
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import JobCompare from './JobCompare.svelte';
 	import LeftOut from './LeftOut.svelte';
+	import MirrorNotes from './MirrorNotes.svelte';
 
 	type Section = Record<string, number | undefined>;
 	type Report = Record<string, unknown> & { folders?: { path: string[] | string; name?: string; sent?: number; present?: number }[]; sample_check?: unknown };
@@ -137,6 +138,7 @@
 				{#each mirror.blocked ?? [] as block (block.code + block.message)}
 					<Notice><p class="m-0" data-testid={`report-mirror-block-${block.code}`}>{block.message}</p></Notice>
 				{/each}
+				<MirrorNotes notes={mirror.notes} prefix="report-mirror-note" />
 				{#if mirrorSkipped(mirror)}
 					<Notice><p class="m-0" data-testid="report-mirror-skipped">{m.jobs_report_mirror_skipped_note({ count: fmtNum(mirrorSkipped(mirror)) })}</p></Notice>
 				{/if}

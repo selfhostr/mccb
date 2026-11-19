@@ -252,7 +252,9 @@ test.describe('mirror mode', () => {
 		await scenarios(page, { 1: { block: 'source_empty' } });
 		await ready(page);
 		const dialog = await openDialog(page, ALICE);
-		await expect(dialog.getByTestId('mirror-block-source_empty')).toContainText('The source looks empty');
+		await expect(dialog.getByTestId('mirror-block-source_empty')).toContainText('A source folder looks empty');
+		// The API message names the folder and is shown as is.
+		await expect(dialog.getByTestId('mirror-block-source_empty')).toContainText('Folder "Projects" is empty at the source');
 		await expect(dialog.getByTestId('mirror-large')).toHaveCount(0);
 		await dialog.getByTestId('mirror-limit').locator('summary').click();
 		const percent = dialog.getByTestId('mirror-percent');
@@ -298,6 +300,65 @@ test.describe('mirror mode', () => {
 		await settings.getByRole('checkbox', { name: 'Mirror mode for carol@example.com' }).check();
 		await settings.getByTestId('account-mirror-resync').click();
 		await expect(page.getByRole('dialog', { name: 'Resync in mirror mode' }).getByTestId('mirror-block-no_prior_run')).toBeVisible();
+	});
+
+	test('the notes of a comparison show under the counts, a deletion note as a warning, and reach the report of the job', async ({ page }) => {
+		await migrated(page, 1);
+		const notes = [
+			{ code: 'shared_resource', message: '2 events share the calendar "Team"' },
+			{ code: 'soft_delete', message: 'No Trash on the destination: 5 mails flagged \\Deleted' },
+			{ code: 'no_copy_kept', message: '3 tasks were not deleted' },
+			{ code: 'brand_new', message: 'A thing a newer server says' }
+		];
+		await scenarios(page, { 1: { notes } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE);
+
+		const list = dialog.getByTestId('mirror-notes');
+		await expect(list).toBeVisible();
+		// Warnings first, then the notes in the order of the API.
+		await expect(list.locator('[data-testid^="mirror-note-"]')).toHaveCount(4);
+		expect(await list.locator('[data-testid^="mirror-note-"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')))).toEqual(['mirror-note-soft_delete', 'mirror-note-shared_resource', 'mirror-note-no_copy_kept', 'mirror-note-brand_new']);
+		const soft = dialog.getByTestId('mirror-note-soft_delete');
+		await expect(soft).toHaveAttribute('data-tone', 'warning');
+		await expect(soft).toContainText('Soft deletion, no Trash');
+		await expect(soft).toContainText('A mail client that purges the mailbox erases them for good.');
+		await expect(soft).toContainText('No Trash on the destination: 5 mails flagged \\Deleted');
+		await expect(dialog.getByTestId('mirror-note-shared_resource')).toHaveAttribute('data-tone', 'note');
+		await expect(dialog.getByTestId('mirror-note-shared_resource')).toContainText('Resource shared at the destination');
+		await expect(dialog.getByTestId('mirror-note-no_copy_kept')).toContainText('counted as skipped for safety');
+		// An unknown code shows the message of the API as its label.
+		await expect(dialog.getByTestId('mirror-note-brand_new')).toHaveText('A thing a newer server says');
+		// A note is no block: Apply stays available.
+		await expect(dialog.getByTestId('mirror-apply')).toBeEnabled();
+
+		await dialog.getByTestId('mirror-apply').click();
+		await page.getByRole('dialog', { name: 'Delete 7 items at the destination' }).getByRole('button', { name: 'Delete 7 and apply' }).click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		const jobs = await (await page.request.get('/api/jobs')).json();
+		const mirrorJob = jobs.find((j: { mode: string }) => j.mode === 'mirror');
+		await expect.poll(async () => (await (await page.request.get(`/api/jobs/${mirrorJob.id}`)).json()).status, { timeout: 15_000 }).toBe('done');
+		await ready(page, `/jobs/${mirrorJob.id}?tab=report`);
+		const report = page.getByTestId('report-mirror');
+		await expect(report.getByTestId('report-mirror-note-soft_delete')).toContainText('Soft deletion, no Trash');
+		await expect(report.getByTestId('report-mirror-note-shared_resource')).toContainText('2 events share the calendar "Team"');
+		await expect(report.getByTestId('report-mirror-note-brand_new')).toHaveText('A thing a newer server says');
+	});
+
+	test('a mailbox without notes shows none, and a deletion note opens its mailbox among many', async ({ page }) => {
+		await migrated(page, 1);
+		await migrated(page, 2);
+		await migrated(page, 3);
+		await migrated(page, 4);
+		await scenarios(page, { 4: { notes: [{ code: 'hard_delete', message: 'Deleted items are removed for good' }] } });
+		await ready(page);
+		const dialog = await openDialog(page, ALICE, BOB, 'carol@example.com', 'dave@example.com');
+		// More than three mailboxes: the folded ones stay folded, the one with a deletion note is open.
+		const withNote = dialog.getByTestId('mirror-account').filter({ hasText: 'dave@example.com' });
+		await expect(withNote.getByTestId('mirror-note-hard_delete')).toBeVisible();
+		await expect(withNote.getByTestId('mirror-note-hard_delete')).toContainText('A backup copy is kept before each deletion.');
+		await expect(dialog.getByTestId('mirror-note-hard_delete')).toHaveCount(1);
+		await expect(dialog.getByTestId('mirror-notes')).toHaveCount(1);
 	});
 
 	test('narrow screen: the dialog does not overflow', async ({ page }) => {

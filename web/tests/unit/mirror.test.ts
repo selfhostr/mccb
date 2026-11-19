@@ -10,12 +10,18 @@ import {
 	canMirrorResync,
 	clampPercent,
 	DEFAULT_MAX_DELETE_PERCENT,
+	describeNote,
+	hasWarningNote,
 	mirrorReport,
 	mirrorReportRows,
 	mirrorRows,
 	mirrorSkipped,
 	mirrorState,
 	mirrorTotals,
+	NOTE_CODES,
+	type NoteLabels,
+	noteLines,
+	noteTone,
 	offersLargeDelete,
 	readyIds,
 	sampleLines,
@@ -170,5 +176,59 @@ describe('who can be resynced', () => {
 		expect(canMirrorResync(undefined)).toBe(true);
 		for (const status of ['done', 'done_with_errors', 'stopped', 'failed'] as const) expect(canMirrorResync({ status })).toBe(true);
 		for (const status of ['queued', 'running', 'paused', 'stopping'] as const) expect(canMirrorResync({ status })).toBe(false);
+	});
+});
+
+describe('notes', () => {
+	const labels: NoteLabels = {
+		soft_delete: { label: 'Soft', hint: 'soft hint' },
+		hard_delete: { label: 'Hard', hint: 'hard hint' },
+		no_copy_kept: { label: 'No copy', hint: 'no copy hint' },
+		shared_resource: { label: 'Shared', hint: 'shared hint' }
+	};
+
+	it('knows the four codes; a soft or a permanent deletion is a warning, the others plain notes', () => {
+		expect([...NOTE_CODES].sort()).toEqual(['hard_delete', 'no_copy_kept', 'shared_resource', 'soft_delete']);
+		expect(noteTone('soft_delete')).toBe('warning');
+		expect(noteTone('hard_delete')).toBe('warning');
+		expect(noteTone('no_copy_kept')).toBe('note');
+		expect(noteTone('shared_resource')).toBe('note');
+		expect(noteTone('brand_new')).toBe('note');
+	});
+
+	it('a known code gets the label of the interface and keeps the API message as its detail', () => {
+		expect(describeNote({ code: 'soft_delete', message: 'no Trash on the destination' }, labels)).toEqual({ code: 'soft_delete', tone: 'warning', label: 'Soft', hint: 'soft hint', detail: 'no Trash on the destination' });
+		expect(describeNote({ code: 'shared_resource', message: '  ' }, labels).detail).toBeNull();
+	});
+
+	it('an unknown code shows the API message as its label, or the code when it has none', () => {
+		expect(describeNote({ code: 'brand_new', message: 'Something new happens' }, labels)).toEqual({ code: 'brand_new', tone: 'note', label: 'Something new happens', hint: null, detail: null });
+		expect(describeNote({ code: 'brand_new', message: '' }, labels).label).toBe('brand_new');
+	});
+
+	it('lists warnings first, keeps the order otherwise, and drops a note repeated as is', () => {
+		const notes = [
+			{ code: 'shared_resource', message: 'a' },
+			{ code: 'hard_delete', message: 'b' },
+			{ code: 'brand_new', message: 'c' },
+			{ code: 'shared_resource', message: 'a' },
+			{ code: 'soft_delete', message: 'd' },
+			{ code: 'shared_resource', message: 'e' }
+		];
+		expect(noteLines(notes, labels).map((n) => `${n.code}:${n.detail ?? n.label}`)).toEqual(['hard_delete:b', 'soft_delete:d', 'shared_resource:a', 'brand_new:c', 'shared_resource:e']);
+		expect(noteLines(undefined, labels)).toEqual([]);
+		expect(noteLines(null, labels)).toEqual([]);
+	});
+
+	it('only a soft or a permanent deletion makes a mailbox open on its notes', () => {
+		expect(hasWarningNote(undefined)).toBe(false);
+		expect(hasWarningNote([{ code: 'no_copy_kept', message: '' }, { code: 'shared_resource', message: '' }])).toBe(false);
+		expect(hasWarningNote([{ code: 'shared_resource', message: '' }, { code: 'hard_delete', message: '' }])).toBe(true);
+	});
+
+	it('the notes of a job report are read where the server puts them', () => {
+		const report = { mirror: { notes: [{ code: 'soft_delete', message: 'm' }] } };
+		expect(noteLines(mirrorReport(report)?.notes, labels).map((n) => n.code)).toEqual(['soft_delete']);
+		expect(noteLines(mirrorReport({ mirror: { blocked: [] } })?.notes, labels)).toEqual([]);
 	});
 });

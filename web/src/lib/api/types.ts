@@ -329,7 +329,7 @@ export interface MirrorBlock {
 	job_id?: number;
 }
 
-/** Not a block: what the mirror run will do that is worth knowing (soft_delete, hard_delete, no_copy_kept, shared_resource). */
+/** Not a block: what the mirror run will do that is worth knowing (soft_delete, hard_delete, no_copy_kept, shared_resource; a code this version does not know shows its message). */
 export interface MirrorNote {
 	code: string;
 	message: string;
@@ -374,6 +374,7 @@ export interface MirrorCounters {
 export type MirrorReport = {
 	options?: { max_delete_percent: number; allow_large_delete: boolean };
 	blocked?: MirrorBlock[];
+	notes?: MirrorNote[];
 } & Partial<Record<MirrorKind, MirrorCounters>>;
 
 /** One entry of the answer of POST /runs with mode mirror and dry_run false. */
