@@ -125,18 +125,21 @@ export interface ImportPlan {
 	ready: Account[];
 	noPst: Account[];
 	noPassword: Account[];
+	/** The last connection test was refused: left out unless asked for, the job would most likely fail. */
+	refused: Account[];
 	active: Account[];
 }
 
-/** What pressing Import would do, said before it happens. */
+/** What pressing Start would do, said before it happens. */
 export function importPlan(accounts: Account[], jobOf: (id: number) => Job | undefined, pstOf: (id: number) => Pst | undefined): ImportPlan {
-	const plan: ImportPlan = { ready: [], noPst: [], noPassword: [], active: [] };
+	const plan: ImportPlan = { ready: [], noPst: [], noPassword: [], refused: [], active: [] };
 	for (const account of accounts) {
 		const pst = account.pst_id != null ? pstOf(account.pst_id) : undefined;
 		if (isActive(jobOf(account.id))) plan.active.push(account);
 		// A connector source needs no PST; an own target brings its own credentials.
 		else if (!hasCustomSource(account) && (!pst || pst.status !== 'valid')) plan.noPst.push(account);
 		else if (!account.has_password && !(hasOwnTarget(account) && account.target?.has_secret)) plan.noPassword.push(account);
+		else if (account.status === 'auth_failed' || account.status === 'error') plan.refused.push(account);
 		else plan.ready.push(account);
 	}
 	return plan;
