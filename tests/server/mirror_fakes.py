@@ -41,9 +41,11 @@ class Box:
         self.list_errors: dict[str, ConnectorError] = {}   # folder name -> raised by mirror_listing
         self.incomplete: set[str] = set()                   # folder names listed with complete=False
         self.hidden: set[str] = set()                       # Message-IDs a listing misses (still at the source)
+        self.hidden_in: set[tuple[str, str]] = set()        # (folder name, Message-ID): the same, in one folder
         self.exists_errors: dict[str, ConnectorError] = {}  # folder name -> raised by exists
         self.exists_refs: dict = {}                         # refs exists() was given (recorded src_ref)
         self.unstable: set[str] = set()                     # folder names whose epoch is "renamed-or-moved"
+        self.exists_omit: set[str] = set()                  # keys exists() leaves out of its answer
         self.calls: list[str] = []
 
     def add(self, name: str, mid: str, kind: str = MAIL, **kw) -> int:
@@ -60,7 +62,16 @@ class Box:
                     return fk, uid
         raise KeyError(mid)
 
-    def remove(self, mid: str) -> None:
+    def remove(self, mid: str, name: str | None = None) -> None:
+        """Removes `mid` (from the folder `name` only when given: the same item may be in several)."""
+        if name is not None:
+            for kind_name, items in self.folders.items():
+                if kind_name[1] == name:
+                    for uid, m in list(items.items()):
+                        if m.mid == mid:
+                            del items[uid]
+                            return
+            raise KeyError(mid)
         fk, uid = self.find(mid)
         del self.folders[fk][uid]
 
@@ -96,14 +107,15 @@ class BoxSource(Source):
         pass
 
     def folders(self):
-        return [SourceFolder(path=[name], kind=kind, special="inbox" if name == "INBOX" else None,
+        # "A|B" is the folder B inside A (path ["A", "B"]); "A/B" is one folder named "A/B"
+        return [SourceFolder(path=name.split("|"), kind=kind, special="inbox" if name == "INBOX" else None,
                              count=len(items), ref=(kind, name)) for (kind, name), items in self.box.folders.items()]
 
     def _items(self, folder):
         kind, name = folder.ref
         ep = self.box.epoch[(kind, name)]
         for uid, m in sorted(self.box.folders.get((kind, name), {}).items()):
-            if m.mid in self.box.hidden:
+            if m.mid in self.box.hidden or (name, m.mid) in self.box.hidden_in:
                 continue
             yield SourceItem(key=key_of(kind, name, ep, uid), alt_key=f"m:{m.mid}", date=T0 + timedelta(minutes=uid),
                              size=100, flags=list(m.flags), ref=uid, version=None if kind == MAIL else m.version)
@@ -129,7 +141,7 @@ class BoxSource(Source):
         if name in self.box.exists_errors:
             raise self.box.exists_errors[name]
         here = {key_of(kind, name, ep, uid) for uid in self.box.folders.get((kind, name), {})}
-        return {k: k in here for k in keys}
+        return {k: k in here for k in keys if k not in self.box.exists_omit}
 
     def key_epoch(self, key):
         parts = key.rsplit("-", 2)
@@ -169,6 +181,7 @@ class Store:
         # True: events, contacts and tasks are marked by their import id like mail (EWS, Graph, JMAP), their
         # resource name is ignored; False: known by their resource name (DAV)
         self.by_import_id = False
+        self.plan: dict[str, str] = {}   # source folder ("A/B") -> target folder, when not the same name
 
     def native(self, folder: str, raw: bytes, ident: str = "") -> str:
         ref = str(next(self._ref))
@@ -199,7 +212,7 @@ class StoreSession(TargetSession):
 
     def plan_folders(self, folders):
         from app.server.runner import folder_key
-        return {folder_key(f.path): FolderPlan("/".join(f.path)) for f in folders}
+        return {folder_key(f.path): FolderPlan(self.s.plan.get("/".join(f.path), "/".join(f.path))) for f in folders}
 
     def ensure_folder(self, name, flag=None, label=None):
         with self.s.lock:

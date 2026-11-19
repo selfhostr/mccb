@@ -83,7 +83,8 @@
 		source_empty: { reason: m.migrations_mirror_block_source_empty(), fix: m.migrations_mirror_fix_source_empty() },
 		no_prior_run: { reason: m.migrations_mirror_block_no_prior_run(), fix: m.migrations_mirror_fix_no_prior_run() },
 		uidvalidity_changed: { reason: m.migrations_mirror_block_uidvalidity_changed(), fix: m.migrations_mirror_fix_uidvalidity_changed() },
-		target_unreachable: { reason: m.migrations_mirror_block_target_unreachable(), fix: m.migrations_mirror_fix_target_unreachable() }
+		target_unreachable: { reason: m.migrations_mirror_block_target_unreachable(), fix: m.migrations_mirror_fix_target_unreachable() },
+		job_active: { reason: m.migrations_mirror_block_job_active(), fix: m.migrations_mirror_fix_job_active() }
 	});
 	const blockText = (code: string) => (blockInfo(code).known ? BLOCK[code as BlockCode] : undefined);
 

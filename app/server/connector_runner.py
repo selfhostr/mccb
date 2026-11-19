@@ -135,6 +135,7 @@ class ConnectorJobRunner(JobRunner):
         self._cursors: dict[str, str] = {}        # delta cursors to store once the phase is complete
         self._mirror_entries: dict[tuple[str, str], list] = {}  # mirror: (kind, folder key) -> entries to add
         self._known_folders: set[str] = set()     # keys of every folder the source has, excluded ones too
+        self._source_keys: set[str] = set()       # folder_key() of every folder the source has (no old keys)
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -232,6 +233,7 @@ class ConnectorJobRunner(JobRunner):
             self._mark()
             for f in self.folders:
                 self._known_folders |= {folder_key(f.path), legacy_folder_key(f.path)}
+                self._source_keys.add(folder_key(f.path))
             self.folders = [f for f in self.folders if not self._excluded(f)]
             for f in self.folders:
                 if f.skip and f.kind in CARRIED and self._wanted(f.kind):
@@ -540,6 +542,12 @@ class ConnectorJobRunner(JobRunner):
             digest = hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:32]
             raw, name = got.raw, got.name or self.targets[phase].resource_name(got.raw, f"{digest}.{DAV_EXT[phase]}")
             mark = name  # as on the PST path: the hash column of a DAV item is its resource name
+            other = db.q1("SELECT folder FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? AND hash=? "
+                          "AND status IN ('ok','inflight') AND NOT (folder=? AND item_key=?) LIMIT 1",
+                          (self.account_id, self.pst_key, kind, target, name, fkey, key))
+            if other is not None:  # one resource for both on the target; the mirror deletes it only when both go
+                self.log(f"'{got.subject}' ({fkey}) has the resource name '{name}' of an item of '{other['folder']}' "
+                         f"in {target}: one copy for both on the target", "warning")
         if self._size_gate(kind, key, fkey, len(raw), got.subject, target, it.alt_key):
             return
         warnings = db.jdump(got.warnings) if got.warnings else None
@@ -572,15 +580,17 @@ class ConnectorJobRunner(JobRunner):
             an = mm.analyze(self.source, [f for f in self.folders if f.kind in phases], self._known_folders, sessions,
                             {p: self.targets[p].capabilities for p in phases}, self.account_id, self.pst_key,
                             self.policy, opts, retry=self._on_source,
-                            retry_target=lambda s, fn: self._on_session(s, fn), log=self.log)
+                            retry_target=lambda s, fn: self._on_session(s, fn), log=self.log,
+                            source_keys=self._source_keys)
             self.report["mirror"]["blocked"] = an.blocked
+            self.report["mirror"]["notes"] = an.notes
             if an.fatal:
                 raise JobFailed("mirror refused: " + "; ".join(f"{b['code']}: {b['message']}" for b in an.blocked))
             for b in an.blocked:
                 self.problems.append(f"mirror {b['code']}: {b['message']}")
             for p in phases:
                 stats[p]["skipped_by_safety"] = an.skipped.get(p, 0)
-            for r in an.gone_unfinished:
+            for r in an.gone_unfinished:  # confirmed gone by the source (exists), never after a listing error
                 self.set_item(r["id"], "skipped", "no longer at the source")
             for p in phases:
                 self._mirror_apply(p, an, sessions[p], stats[p])
@@ -706,6 +716,11 @@ class ConnectorJobRunner(JobRunner):
                       (a.item.version, got.subject, len(got.raw), self.job_id, now(), a.row["id"]))
                 st["updated"] += 1
                 self.log(f"Mirror update {phase} key={key} ref={','.join(r.ref for r in a.refs)} in '{target}': ok")
+        for a in an.of(phase, "release"):  # its resource is also the copy of another item still at the source
+            self.set_item(a.row["id"], "deleted", "mirror: deleted at the source; its resource on the target is "
+                          "shared with another item still at the source: kept")
+            self.log(f"Mirror delete {phase} key={a.row['item_key']} in '{a.row['target']}': resource "
+                     f"'{a.row['hash']}' shared with another item, kept on the target", "warning")
         ready: dict[str, list[tuple]] = {}  # target folder -> [(action, ref, mode)] to delete
         for a in an.of(phase, "delete"):
             key, target = a.row["item_key"], a.row["target"]
@@ -769,8 +784,11 @@ class ConnectorJobRunner(JobRunner):
                      "status='ok'", where)["n"]
         names = None
         if kind != MAIL:
-            names = {r["hash"] for r in db.q("SELECT hash FROM items WHERE account_id=? AND pst_key=? AND kind=? AND "
-                                             "target=? AND status='ok' AND hash IS NOT NULL", where)}
+            named = [r["hash"] for r in db.q("SELECT hash FROM items WHERE account_id=? AND pst_key=? AND kind=? AND "
+                                             "target=? AND status='ok' AND hash IS NOT NULL", where)]
+            names = set(named)
+            # one resource per name: the same UID in two source folders sent to one collection is one item there
+            n_ok -= len(named) - len(names)
         try:
             present = self._on_session(session, lambda: session.count_ours(target, self.pst_key, names))
         except ConnectorError as e:

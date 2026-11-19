@@ -130,7 +130,7 @@ Mirror today: IMAP to IMAP (mail), CalDAV to CalDAV (events and tasks), CardDAV 
 | field | default | meaning |
 |---|---|---|
 | `dry_run` | `true` | compute only |
-| `max_delete_percent` | `20` | refuse the deletions of a kind when more than this share of its migrated items would be deleted |
+| `max_delete_percent` | `20` | refuse the deletions of a kind when more than this share of its migrated items would be deleted; the share is taken over the folders mirrored in this pass only (listed, not excluded, not refused) |
 | `allow_large_delete` | `false` | lift `too_many_deletes` and `source_empty` |
 
 The dry run answers per mailbox:
@@ -140,13 +140,22 @@ The dry run answers per mailbox:
   "to_add": {"mail": 12, "calendar": 0, "contacts": 1, "tasks": 0},
   "to_update": {"mail": 30, "calendar": 2, "contacts": 0, "tasks": 0},
   "to_delete": {"mail": 3, "calendar": 1, "contacts": 0, "tasks": 0},
-  "blocked": [],
+  "blocked": [], "notes": [],
   "sample": [{"kind": "mail", "action": "delete", "detail": "delete", "folder": "INBOX", "subject": "Lunch", "date": ""}]}]}
 ```
 
-`sample` holds 20 actions at most, deletions first, subjects cut to 80 characters. In it, a move and a change of flags are `update`, and `detail` says which. With `dry_run: false` the answer is `{"accounts": [{account_id, email, ready, blocked, job_id?}], "jobs": [...]}`, and only the codes known without connecting are checked there. The job checks every rule again when it runs.
+`sample` holds 20 actions at most, deletions first, subjects cut to 80 characters. In it, a move and a change of flags are `update`, and `detail` says which. With `dry_run: false` the answer is `{"accounts": [{account_id, email, ready, blocked, job_id?}], "jobs": [...]}`, and only the codes known without connecting are checked there (and `job_active`). The job checks every rule again when it runs. Each such request is written to the application log as one `AUDIT mirror run requested` line: the mailboxes, the jobs, `allow_large_delete`, `max_delete_percent`, and who asked (`via=session`, or `via=token` with the public prefix of the API token, never the token itself), with the client address.
 
-The job, `GET /api/jobs/{id}`, has `mirror: {options, blocked, mail: {...}, calendar: {...}, contacts: {...}, tasks: {...}}`, each kind with `added`, `updated`, `deleted`, `skipped_by_safety` and `errors`. The report has the same `mirror` section, and `totals.<kind>.mirror`. The log has one line per action, with the key, the identifier on the target, the folder and the result. It never has a subject or any content.
+`notes` lists what the pass will do that is worth knowing, without blocking it:
+
+| note | meaning |
+|---|---|
+| `soft_delete` | the mail target has no trash folder (or the mails are in it): deleted mails are only flagged `\Deleted` and `$MccbMirrorDeleted`, never expunged |
+| `hard_delete` | the target deletes for good (DAV, JMAP cards, To Do tasks): a copy is kept first under `<data>/mirror-trash/` |
+| `no_copy_kept` | the target deletes for good and cannot give a copy back first: those deletions are not done, they are counted in `skipped_by_safety` (Graph tasks) |
+| `shared_resource` | one resource of the target is the copy of two items (the same UID in two source folders sent to one collection): it is kept while one of them is still at the source, and not overwritten by the other |
+
+The job, `GET /api/jobs/{id}`, has `mirror: {options, blocked, notes, mail: {...}, calendar: {...}, contacts: {...}, tasks: {...}}`, each kind with `added`, `updated`, `deleted`, `skipped_by_safety` and `errors`. The report has the same `mirror` section, and `totals.<kind>.mirror`. The log has one line per action, with the key, the identifier on the target, the folder and the result. It never has a subject or any content.
 
 ### Safety rules
 
@@ -155,18 +164,22 @@ The job, `GET /api/jobs/{id}`, has `mirror: {options, blocked, mail: {...}, cale
 | `mirror_off` | the mailbox does not have the option | nothing |
 | `no_prior_run` | the mailbox has never finished a job | nothing: run a first full pass |
 | `target_unreachable` | a target cannot be reached or listed | nothing |
-| `source_unlistable` | the source cannot be mirrored, a folder could not be listed, a listing was incomplete, the source could not confirm a deletion, or a folder is no longer at the source | no deletion at all in this pass; additions and updates go on |
+| `job_active` | a job of the mailbox is still queued, running, paused or stopping (with its `job_id`) | no mirror job is created: wait for that job or stop it |
+| `source_unlistable` | the source cannot be mirrored, a folder could not be listed, a listing was incomplete (a DAV server that says in its answer that it cut it short, 507, counts), the source could not confirm a deletion, or a folder is no longer at the source | no deletion, no move and no item given up at all in this pass; additions and updates go on |
 | `uidvalidity_changed` | the keys of a folder were reset (IMAP UIDVALIDITY, or an epoch marked `renamed-or-moved` / `unverified`) | that folder is left alone: run a full pass |
-| `source_empty` | the source lists nothing for a kind while items of it were migrated | no deletion of that kind, unless `allow_large_delete` |
-| `too_many_deletes` | more than `max_delete_percent` % of the migrated items of a kind would be deleted | no deletion of that kind, unless `allow_large_delete` |
+| `source_empty` | a folder of the source lists nothing while items of it were migrated | no deletion in that folder, unless `allow_large_delete` |
+| `too_many_deletes` | more than `max_delete_percent` % of the migrated items of a kind, in the folders mirrored in this pass, would be deleted | no deletion of that kind, unless `allow_large_delete` |
 
 `ready` is true when nothing is blocked. A job that runs with a non-fatal code ends `done_with_errors`, with the code in `error`, and the deletions held back are counted in `skipped_by_safety`.
 
 Other rules:
 
 - **Only what mccb wrote is touched.** The mirror works from the `items` table: an item is deleted or updated only if mccb migrated it (status `ok`), and it is found on the target by its import id (mail) or its resource name (DAV). The content the target had before the migration, and mail that arrived on the target directly, are never in that list.
-- **A deletion needs proof.** The folder must have been listed completely and without error in this pass, and the source is asked once more, item by item, just before deleting. A folder that is no longer listed (deleted or renamed at the source) deletes nothing.
-- **Mail goes to the trash.** A deleted mail is moved to the trash folder of the target and marked `$MccbMirrorDeleted`, so that it can be found and restored. Without a trash folder, or in the trash itself, it is flagged `\Deleted` and marked, and never expunged by mccb. DAV has no trash: before deleting an event, a contact or a task, mccb keeps a copy under `<data>/mirror-trash/job-<id>/`, and deletes nothing it could not copy. The DAV deletion uses `If-Match`: an item changed on the target since the listing is not deleted.
+- **A deletion needs proof.** The folder must have been listed completely and without error in this pass, and the source is asked once more, item by item, just before deleting (`exists`): only an explicit "gone" counts; an item left out of that answer, or one the source cannot read by itself (a DAV row migrated before resource names were recorded), is kept. A folder that is no longer listed (deleted or renamed at the source) deletes nothing. The same proof is needed to move a mail on the target, and to give up an item that was never written (`pending`, `inflight`, `error`): a listing that misses it is not enough.
+- **One resource, several items.** A DAV target names an event or a contact by its UID: the same UID in two source folders sent to one collection is one resource there. It is deleted only when it is gone from every one of them, and an update of one is not written over it while the other is still at the source (`shared_resource`).
+- **Folder names with a slash.** The rows of an import made before folder keys were escaped are found under their old key (`A/B`), unless that old key is the key of another folder of the source (the folder `B` inside `A`): those rows are that folder's.
+- **Mail goes to the trash.** A deleted mail is moved to the trash folder of the target and marked `$MccbMirrorDeleted`, so that it can be found and restored. Without a trash folder, or in the trash itself, it is flagged `\Deleted` and marked, and never expunged by mccb. DAV has no trash: before deleting an event, a contact or a task, mccb keeps a copy under `<data>/mirror-trash/job-<id>/`, and deletes nothing it could not copy. These copies are readable by mccb only (directories `0700`, files `0600`); the worker removes the `job-<id>` directories untouched for `MIRROR_TRASH_DAYS` days (30 by default, `0` keeps them for ever), never while a job is running. The DAV deletion and update use `If-Match` with the etag of the listing: an item changed on the target since is neither deleted nor overwritten (an update gets a temporary error and is tried again at the next pass).
+- **An update never leaves an item only in the trash.** A target that cannot change an item in place (Exchange: a mail, a recurring series; Graph: a draft, a series) writes the new copy first and only then moves the old one to its trash; a failed write leaves the old copy where it was. An item to update that the target no longer has is added again.
 - **Idempotent.** A pass right after another finds nothing to do and writes nothing. An item deleted at the source is recorded as `deleted`; if it comes back at the source, the next pass copies it again.
 - **What is compared.** For mail, the flags at the source against those recorded when it was last written; items migrated before this version have no record, and their flags are compared once with the target. A mail moved to another folder at the source is moved on the target (same Message-ID, gone from one folder, new in the other), and keeps its import id. For events, contacts and tasks, the etag at the source; an item whose etag is unknown is never updated. Changes made on the target to our items are overwritten by the next change at the source.
 

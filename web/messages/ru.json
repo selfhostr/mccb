@@ -277,6 +277,8 @@
 	"migrations_mirror_fix_uidvalidity_changed": "Run a full migration again, then use the mirror.",
 	"migrations_mirror_block_target_unreachable": "The destination cannot be reached",
 	"migrations_mirror_fix_target_unreachable": "Test the connection to the destination in the mailbox panel, then compare again.",
+	"migrations_mirror_block_job_active": "Задание для этого почтового ящика ещё не завершено",
+	"migrations_mirror_fix_job_active": "Дождитесь окончания текущего задания или остановите его, затем сравните снова.",
 	"migrations_mirror_limit": "Safety limit",
 	"migrations_mirror_limit_value": "{percent}%",
 	"migrations_mirror_limit_label": "Largest deletion allowed, in percent",

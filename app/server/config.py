@@ -43,6 +43,8 @@ class Settings:
         # 1 = allow link-local / metadata addresses (not recommended)
         self.fetch_allow_link_local = os.environ.get("FETCH_ALLOW_LINK_LOCAL", "0") == "1"
         self.fetch_parallel = max(1, _int("FETCH_PARALLEL", 2))
+        # mirror: days the copies kept before a final deletion stay in DATA_DIR/mirror-trash (0 = for ever)
+        self.mirror_trash_days = max(0, _int("MIRROR_TRASH_DAYS", 30))
 
     @property
     def db_path(self) -> Path:

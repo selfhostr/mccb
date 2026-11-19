@@ -88,7 +88,7 @@ describe('state of the whole preview', () => {
 
 describe('blocks', () => {
 	it('knows the seven codes of the API and offers a fix for two', () => {
-		expect([...BLOCK_CODES].sort()).toEqual(['mirror_off', 'no_prior_run', 'source_empty', 'source_unlistable', 'target_unreachable', 'too_many_deletes', 'uidvalidity_changed']);
+		expect([...BLOCK_CODES].sort()).toEqual(['job_active', 'mirror_off', 'no_prior_run', 'source_empty', 'source_unlistable', 'target_unreachable', 'too_many_deletes', 'uidvalidity_changed']);
 		for (const code of BLOCK_CODES) expect(blockInfo(code).known).toBe(true);
 		expect(blockInfo('mirror_off').fix).toBe('enable');
 		expect(blockInfo('too_many_deletes').fix).toBe('threshold');

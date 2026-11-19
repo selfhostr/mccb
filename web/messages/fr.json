@@ -277,6 +277,8 @@
 	"migrations_mirror_fix_uidvalidity_changed": "Relancez une migration complète, puis utilisez le miroir.",
 	"migrations_mirror_block_target_unreachable": "La destination est injoignable",
 	"migrations_mirror_fix_target_unreachable": "Testez la connexion à la destination dans le panneau de la boîte, puis comparez à nouveau.",
+	"migrations_mirror_block_job_active": "Une tâche de cette boîte n'est pas encore terminée",
+	"migrations_mirror_fix_job_active": "Attendez la fin de la tâche en cours, ou arrêtez-la, puis comparez à nouveau.",
 	"migrations_mirror_limit": "Seuil de sécurité",
 	"migrations_mirror_limit_value": "{percent} %",
 	"migrations_mirror_limit_label": "Suppression maximale autorisée, en pourcentage",

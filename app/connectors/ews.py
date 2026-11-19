@@ -1333,6 +1333,10 @@ class EwsSession(TargetSession):
 
     # -- writing
     def put(self, folder: str, item: OutgoingItem) -> str | None:
+        return self._put(folder, item)
+
+    def _put(self, folder: str, item: OutgoingItem, exclude: frozenset[str] = frozenset()) -> str | None:
+        """put(); `exclude`: ids of occurrences that are not the new series' (another series of the same UID)."""
         target = self._folder_xml(folder)
         if item.kind == MAIL:
             return self._create(target, "SaveOnly", mail_xml(item.raw, item.import_id, item.flags, item.internal_date))
@@ -1345,7 +1349,7 @@ class EwsSession(TargetSession):
         event = pim.ics_to_event(item.raw)
         if event.all_day and not event.tz:
             event.tz = self.time_zone
-        return self._put_event(target, event, item.import_id)
+        return self._put_event(target, event, item.import_id, exclude)
 
     def _create(self, target: str, disposition: str | None, xml: str) -> str | None:
         attrs = f' MessageDisposition="{disposition}"' if disposition else ""
@@ -1364,8 +1368,29 @@ class EwsSession(TargetSession):
                       f'AffectedTaskOccurrences="AllOccurrences"><m:ItemIds><t:ItemId Id={quoteattr(rid)}/></m:ItemIds>'
                       "</m:DeleteItem>")
 
-    def _occurrence(self, target: str, e: pim.Event, original: datetime | date) -> str | None:
-        """Id of the occurrence of the series `e` whose original start is `original`."""
+    def _occurrence(self, target: str, e: pim.Event, original: datetime | date,
+                    exclude: frozenset[str] = frozenset()) -> str | None:
+        """Id of the occurrence of the series `e` whose original start is `original` (none of `exclude`)."""
+        for rid, when in self._view(target, e, original):
+            if rid in exclude:
+                continue
+            same = (when == original) if isinstance(original, datetime) else all_day_date(when, e.tz) == original
+            if same:
+                return rid
+        return None
+
+    def _series_occurrences(self, target: str, e: pim.Event) -> frozenset[str]:
+        """Ids of the occurrences of UID e.uid around every exception of `e`, as they are now: those of a series
+        already there, to tell them from the occurrences of a new series of the same UID (update())."""
+        if e.recurrence is None or not (e.exdates or e.overrides):
+            return frozenset()
+        out: set[str] = set()
+        for original in [*e.exdates, *(o.recurrence_id for o in e.overrides)]:
+            out |= {rid for rid, _when in self._view(target, e, original)}
+        return frozenset(out)
+
+    def _view(self, target: str, e: pim.Event, original: datetime | date) -> list[tuple[str, datetime]]:
+        """[(id, original start)] of the occurrences of UID e.uid within two days of `original`."""
         anchor = original if isinstance(original, datetime) else pim.date_at_midnight(original)
         begin, end = anchor - timedelta(days=2), anchor + timedelta(days=2)
         msg = self._c().one(
@@ -1376,17 +1401,16 @@ class EwsSession(TargetSession):
             f"<m:ParentFolderIds>{target}</m:ParentFolderIds></m:FindItem>")
         root = msg.find(m_("RootFolder"))
         box = root.find(t_("Items")) if root is not None else None
+        out = []
         for el in box if box is not None else []:
             if _text(el, "UID") != e.uid:
                 continue
             when = pim.parse_utc(_text(el, "OriginalStart") or _text(el, "Start"))
-            if when is None:
+            ident = el.find(t_("ItemId"))
+            if when is None or ident is None or not ident.get("Id"):
                 continue
-            same = (when == original) if isinstance(original, datetime) else all_day_date(when, e.tz) == original
-            if same:
-                ident = el.find(t_("ItemId"))
-                return ident.get("Id") if ident is not None else None
-        return None
+            out.append((ident.get("Id"), when))
+        return out
 
     def _update_occurrence(self, rid: str, o: pim.Event, tz: str | None) -> None:
         def field(uri: str, inner: str) -> str:
@@ -1400,7 +1424,8 @@ class EwsSession(TargetSession):
                       f"<m:ItemChanges><t:ItemChange><t:ItemId Id={quoteattr(rid)}/><t:Updates>" + "".join(updates)
                       + "</t:Updates></t:ItemChange></m:ItemChanges></m:UpdateItem>")
 
-    def _put_event(self, target: str, e: pim.Event, import_id: str) -> str | None:
+    def _put_event(self, target: str, e: pim.Event, import_id: str,
+                   exclude: frozenset[str] = frozenset()) -> str | None:
         """The series, then its exceptions. All or nothing: a series left without its exceptions would be taken as
         migrated by find(), so it is removed if any of them fails, and the whole item is tried again."""
         rid = self._create(target, None, event_xml(e, import_id))
@@ -1408,11 +1433,11 @@ class EwsSession(TargetSession):
             return rid
         try:
             for original in e.exdates:
-                occ = self._occurrence(target, e, original)
+                occ = self._occurrence(target, e, original, exclude)
                 if occ is not None:
                     self._delete(occ)
             for o in e.overrides:
-                occ = self._occurrence(target, e, o.recurrence_id)
+                occ = self._occurrence(target, e, o.recurrence_id, exclude)
                 if occ is None:
                     xb.log.info("event %s: occurrence %s not found", e.uid, o.recurrence_id)
                     continue
@@ -1649,11 +1674,18 @@ class EwsSession(TargetSession):
 
     def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
         """Exchange cannot replace the content of an item in place (the MIME of a mail is fixed, a series carries its
-        exceptions): the old copy goes to Deleted Items (no cancellation sent, a series with all its occurrences),
-        then the new one is written, a series again with its exceptions."""
-        if self._one_owned(ref, item.import_id) is not None:  # raises (rejected) when not the copy of this item
+        exceptions): the new copy is written FIRST (a series with its exceptions), then the old one goes to Deleted
+        Items (no cancellation sent, a series with all its occurrences). A write that fails leaves the old copy
+        where it was; a move to Deleted Items that fails leaves both (an error: never an item only in the trash)."""
+        old = self._one_owned(ref, item.import_id)  # raises (rejected) when not the copy of this item
+        exclude: frozenset[str] = frozenset()
+        if old is not None and item.kind not in (MAIL, CONTACTS, TASKS):
+            # both series are there for a moment, with the same UID: the exceptions go to the new one only
+            exclude = self._series_occurrences(self._folder_xml(folder), pim.ics_to_event(item.raw))
+        new = self._put(folder, item, exclude)
+        if old is not None:
             self.delete(folder, ref, item.import_id)
-        return self.put(folder, item)
+        return new
 
     def info(self) -> dict:
         return {"protocol": "EWS", "mailbox": self.config.get("mailbox") or self.config.get("login")}
