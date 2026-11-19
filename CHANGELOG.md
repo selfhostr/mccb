@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Mirror mode for migrations from a mail server to a mail server (`POST /api/runs {mode: "mirror"}`): a pass after the migration adds what is new at the source, deletes on the target what disappeared from the source (mail to the trash of the target, marked `$MccbMirrorDeleted`; events, contacts and tasks with a copy kept under `mirror-trash/`), and updates what changed (mail flags and folder, events, contacts and tasks by their etag). It only runs on mailboxes with the new `mirror` option, it is a dry run unless `dry_run: false`, and it refuses to delete when a listing of the source failed or was incomplete, when the source is empty, when the keys were reset (UIDVALIDITY), or when more than `max_delete_percent` % (20 by default) of the migrated items would go. The source is only ever read, and only items mccb wrote itself are touched on the target. IMAP to IMAP and CalDAV/CardDAV to DAV in this version. See [Plan, filter and control](docs/planning.md#mirror).
+- Connector interface for the mirror: `CAP_MIRROR`, `mirror_listing`, `exists`, `key_epoch` and `SourceItem.version` on sources, `CAP_INVENTORY`, `CAP_DELETE`, `CAP_UPDATE`, `CAP_SET_FLAGS` and `CAP_MOVE` on targets, `Changes.removed`. See [Connectors](docs/connectors.md#mirror-mode).
+
 ## 2.2.0
 mccb 2.2.0 simplifies the interface and makes it faster to work on many mailboxes at once: servers of any kind can be shared by mailboxes, lists of mailboxes can be imported and edited in bulk, and jobs can be paused, resumed or retried on a selection. Repair keeps untouched headers byte for byte, and the contacts of a PST are no longer dropped without a sign.
 

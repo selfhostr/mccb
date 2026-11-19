@@ -400,11 +400,12 @@ def _lookup_missing(sess, account_id: int, key: str, target: str) -> list[dict]:
     from ..connectors.base import OutgoingItem
     from .runner import import_id_of
     out = []
-    cur = db.conn().execute("SELECT item_key, subject FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+    cur = db.conn().execute("SELECT item_key, subject, stamp FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
                             "AND target=? AND status='ok' ORDER BY id LIMIT ?", (account_id, key, target, DETAIL_MAX))
     for r in cur.fetchall():
         try:
-            found = sess.find(target, OutgoingItem("mail", b"", import_id_of(key, r["item_key"])))
+            # stamp: the import id a mail moved by the mirror still carries (see mirror.py)
+            found = sess.find(target, OutgoingItem("mail", b"", r["stamp"] or import_id_of(key, r["item_key"])))
         except ConnectorError:
             found = [None]  # cannot tell: not reported as missing
         if not found:

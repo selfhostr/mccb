@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from ..connectors import registry, wiring
-from ..connectors.base import (CAP_INCREMENTAL, CAP_PARALLEL, CAP_READBACK, MAIL, TASKS, ConnectorError, FolderPlan,
-                               OutgoingItem, Target, stamp_import_id)
+from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
+                               CAP_UPDATE, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, OutgoingItem, Target,
+                               stamp_import_id)
 from . import crash, db, foldermap, ordering
+from . import mirror as mm
 from . import policy as pol
 from .config import settings
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
@@ -131,6 +133,8 @@ class ConnectorJobRunner(JobRunner):
         self.totals["task"] = 0
         self._incremental = False                 # the source can list what changed since a cursor (delta mode)
         self._cursors: dict[str, str] = {}        # delta cursors to store once the phase is complete
+        self._mirror_entries: dict[tuple[str, str], list] = {}  # mirror: (kind, folder key) -> entries to add
+        self._known_folders: set[str] = set()     # keys of every folder the source has, excluded ones too
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -203,11 +207,18 @@ class ConnectorJobRunner(JobRunner):
         if not self.pst_key:
             raise JobFailed("no PST linked to the mailbox" if self.source_kind == wiring.PST else "source not set")
         ctx = {"guard": _NativeGuard(self)}
+        if self.mode == "mirror":
+            blocked = mm.preflight(self.acc)
+            if blocked:
+                self.report["mirror"] = {"blocked": blocked}
+                raise JobFailed("mirror refused: " + "; ".join(f"{b['code']}: {b['message']}" for b in blocked))
         try:
             self.targets = wiring.targets_of_account(self.acc, self.srv)
             self.source = wiring.source_of_account(self.acc, ctx)
         except ConnectorError as e:
             raise JobFailed(str(e)) from e
+        if self.mode == "mirror":
+            self.source = mm.ReadOnlySource(self.source)  # nothing but reads can reach the source
         self.report["source"] = {"kind": self.source_kind, "namespace": self.pst_key}
         self.log(f"Route: {self.source_kind} to " + (self.acc["target_kind"] or "the server of the mailbox"))
         try:
@@ -219,6 +230,8 @@ class ConnectorJobRunner(JobRunner):
             except ConnectorError as e:
                 raise JobFailed(f"Source ({self.source_kind}): {e}") from e
             self._mark()
+            for f in self.folders:
+                self._known_folders |= {folder_key(f.path), legacy_folder_key(f.path)}
             self.folders = [f for f in self.folders if not self._excluded(f)]
             for f in self.folders:
                 if f.skip and f.kind in CARRIED and self._wanted(f.kind):
@@ -248,8 +261,11 @@ class ConnectorJobRunner(JobRunner):
                 self.totals[kind] += sum(int(f.count or 0) for f in mine)
             self.flush(force=True)
             self.precheck_targets(phases)
-            for phase in phases:
-                self._run_phase(phase)
+            if self.mode == "mirror":
+                self._run_mirror(phases)
+            else:
+                for phase in phases:
+                    self._run_phase(phase)
             self.verify_targets(phases)
             if TASKS in phases:
                 self.report[TASKS] = dict(self.progress.get(TASKS) or {})
@@ -291,7 +307,7 @@ class ConnectorJobRunner(JobRunner):
 
     # ------------------------------------------------------------ one phase
     def _rows(self, kind: str, fkey: str, path: list[str]) -> dict[str, dict]:
-        rows = db.q("SELECT id, item_key, status, target, hash, error, source_ref FROM items WHERE account_id=? AND "
+        rows = db.q("SELECT id, item_key, status, target, hash, error, source_ref, stamp FROM items WHERE account_id=? AND "
                     "pst_key=? AND kind=? AND folder IN (?, ?)",
                     (self.account_id, self.pst_key, kind, fkey, legacy_folder_key(path)))
         return {r["item_key"]: dict(r) for r in rows}
@@ -307,7 +323,7 @@ class ConnectorJobRunner(JobRunner):
             self.log(f"{n} 'inflight' item(s) and {len(todo) - n} in error to check on the target")
         for r in todo:
             self.check()
-            probe = OutgoingItem(PHASE_OF_KIND[kind], b"", import_id_of(self.pst_key, r["item_key"]),
+            probe = OutgoingItem(PHASE_OF_KIND[kind], b"", r.get("stamp") or import_id_of(self.pst_key, r["item_key"]),
                                  name=None if kind == MAIL else r["hash"])
             try:
                 found = self._on_session(session, lambda: session.find(r["target"], probe))
@@ -327,6 +343,10 @@ class ConnectorJobRunner(JobRunner):
     def _list_folder(self, session, f, kind: str, fi: int, plan_name: str) -> list:
         """Entries (sort value, key, folder index, item) of a folder still to migrate."""
         fkey = folder_key(f.path)
+        if self.mode == "mirror":  # listed and judged by the mirror analysis already
+            entries = self._mirror_entries.get((kind, fkey), [])
+            self.log(f"Folder '{fkey}' -> {plan_name}: {len(entries)} new item(s) to add (mirror)")
+            return entries
         rows = self._rows(kind, fkey, f.path)
         self._resolve(session, kind, rows)
         self.current_folder = f"Listing {fkey}"
@@ -526,9 +546,216 @@ class ConnectorJobRunner(JobRunner):
         if got.warnings:
             self.log(f"Warning '{got.subject}': {', '.join(got.warnings)}", "warning")
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=target, subject=got.subject, hash=mark,
-                                   size=len(raw), warnings=warnings, source_ref=it.alt_key)
+                                   size=len(raw), warnings=warnings, source_ref=it.alt_key,
+                                   version=mm.version_of(phase, it), src_ref=mm.ref_json(it.ref))
         self._submit(pool, TargetTask(item_id, target, raw, list(got.flags), date, len(raw), import_id, kind=phase,
                                       name=name))
+
+    # ------------------------------------------------------------ mirror (docs/planning.md "Mirror")
+    def _run_mirror(self, phases: list[str]) -> None:
+        """Analysis (read only), then moves, flags, updates and deletions of OUR items on the target, then the new
+        items through the normal pipeline. Every action is logged with its key, its target ref and its result."""
+        opts = mm.Options.of((db.jload(self.job["mirror"], {}) or {}).get("options"))
+        self.set_phase("mirror")
+        stats = {p: mm.counters() for p in phases}
+        self.report["mirror"] = {"options": opts.view(), "blocked": [], **stats}
+        sessions = {}
+        try:
+            for p in phases:
+                s = self.targets[p].session()
+                self._on_session(s, s.ensure)
+                sessions[p] = s
+            for p in phases:  # what a previous run left inflight may be on the target already: settled first
+                kind = CARRIED[p]
+                for f in [f for f in self.folders if f.kind == p]:
+                    self._resolve(sessions[p], kind, self._rows(kind, folder_key(f.path), f.path))
+            an = mm.analyze(self.source, [f for f in self.folders if f.kind in phases], self._known_folders, sessions,
+                            {p: self.targets[p].capabilities for p in phases}, self.account_id, self.pst_key,
+                            self.policy, opts, retry=self._on_source,
+                            retry_target=lambda s, fn: self._on_session(s, fn), log=self.log)
+            self.report["mirror"]["blocked"] = an.blocked
+            if an.fatal:
+                raise JobFailed("mirror refused: " + "; ".join(f"{b['code']}: {b['message']}" for b in an.blocked))
+            for b in an.blocked:
+                self.problems.append(f"mirror {b['code']}: {b['message']}")
+            for p in phases:
+                stats[p]["skipped_by_safety"] = an.skipped.get(p, 0)
+            for r in an.gone_unfinished:
+                self.set_item(r["id"], "skipped", "no longer at the source")
+            for p in phases:
+                self._mirror_apply(p, an, sessions[p], stats[p])
+        finally:
+            for s in sessions.values():
+                s.close()
+            mm.save_counters(self.job_id, self.report["mirror"])
+        adds: dict[str, list[int]] = {}
+        for p in phases:
+            kind = CARRIED[p]
+            for a in an.of(p, "add"):
+                ts = a.item.date.timestamp() if a.item.date is not None else None
+                self._mirror_entries.setdefault((kind, folder_key(a.folder.path)), []).append(
+                    (-ts if ts is not None else ordering.NO_DATE, a.item.key, self._folder_index(a.folder), a.item))
+                adds.setdefault(p, []).append(a.item.key)
+        try:
+            for p in phases:
+                if adds.get(p):
+                    self._run_phase(p)
+        finally:
+            for p, keys in adds.items():
+                kind = CARRIED[p]
+                for i in range(0, len(keys), 500):
+                    chunk = keys[i:i + 500]
+                    rows = db.q(f"SELECT status, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? AND "
+                                f"item_key IN ({','.join('?' * len(chunk))}) GROUP BY status",
+                                (self.account_id, self.pst_key, kind, *chunk))
+                    c = {r["status"]: r["n"] for r in rows}
+                    stats[p]["added"] += c.get("ok", 0)
+                    stats[p]["errors"] += c.get("error", 0)
+            mm.save_counters(self.job_id, self.report["mirror"])
+        for p in phases:
+            if stats[p]["errors"]:
+                self.problems.append(f"mirror: {stats[p]['errors']} {p} action(s) failed")
+            self.log(f"Mirror {p}: " + ", ".join(f"{k} {v}" for k, v in stats[p].items()))
+
+    def _mirror_act(self, session, st: dict, what: str, key: str, fn):
+        """(result, ok) of one write on the target; a failure is counted and logged, the pass goes on."""
+        self.check()
+        try:
+            return self._on_session(session, fn), True
+        except ConnectorError as e:
+            if e.kind in (ConnectorError.AUTH, ConnectorError.QUOTA):
+                raise JobFailed(f"Target: {e}") from e
+            st["errors"] += 1
+            self._item_log(f"Mirror {what} key={key}: failed ({e})", "error")
+            return None, False
+
+    def _mirror_apply(self, phase: str, an: "mm.Analysis", session, st: dict) -> None:
+        caps = self.targets[phase].capabilities
+        plan = self.plans[phase]
+        now = time.time
+        for a in an.of(phase, "move"):
+            key, old_target = a.row["item_key"], a.row["target"]
+            new_fk = folder_key(a.folder.path)
+            if new_fk not in plan:
+                continue
+            new_target = plan[new_fk].name
+            ref = a.refs[0].ref
+            if new_target != old_target:
+                _, ok = self._mirror_act(session, st, "ensure folder", key,
+                                         lambda: session.ensure_folder(new_target, plan[new_fk].flag))
+                if not ok:
+                    continue
+                moved, ok = self._mirror_act(session, st, "move", key, lambda: session.move(old_target, ref, new_target))
+                if not ok:
+                    continue
+                ref = moved
+            ident = mm.ident_of(phase, self.pst_key, a.row)
+            with db.tx() as c:  # the row follows the mail: new key and folder, the import id it still carries
+                c.execute("DELETE FROM items WHERE account_id=? AND pst_key=? AND kind=? AND item_key=? AND id<>?",
+                          (self.account_id, self.pst_key, CARRIED[phase], a.item.key, a.row["id"]))
+                c.execute("UPDATE items SET item_key=?, folder=?, target=?, stamp=?, job_id=?, updated_at=? WHERE id=?",
+                          (a.item.key, new_fk, new_target, ident, self.job_id, now(), a.row["id"]))
+            st["updated"] += 1
+            self.log(f"Mirror move {phase} key={key} -> key={a.item.key} ref={a.refs[0].ref}: '{old_target}' -> "
+                     f"'{new_target}': ok")
+            # flags changed as well: set on the moved mail when its new ref is known, else at the next pass
+            src = mm.canon_flags(a.item.flags)
+            if a.row["version"] is not None and a.row["version"] != src and ref and CAP_SET_FLAGS in caps:
+                old, new = mm.split_flags(a.row["version"]), mm.split_flags(src)
+                _, ok = self._mirror_act(session, st, "flags", a.item.key, lambda: session.set_flags(
+                    new_target, ref, sorted(new - old), sorted(old - new)))
+                if ok:
+                    db.ex("UPDATE items SET version=? WHERE id=?", (src, a.row["id"]))
+        for a in an.of(phase, "flags"):
+            key, target = a.row["item_key"], a.row["target"]
+            if CAP_SET_FLAGS not in caps:
+                self.log(f"Mirror flags {phase} key={key}: the target cannot change flags, skipped", "warning")
+                continue
+            ok = True
+            for r in a.refs:
+                ok = self._mirror_act(session, st, "flags", key,
+                                      lambda: session.set_flags(target, r.ref, a.add, a.remove))[1] and ok
+            if ok:
+                db.ex("UPDATE items SET version=?, job_id=?, updated_at=? WHERE id=?",
+                      (mm.canon_flags(a.item.flags), self.job_id, now(), a.row["id"]))
+                st["updated"] += 1
+                self.log(f"Mirror flags {phase} key={key} ref={','.join(r.ref for r in a.refs)} in '{target}': "
+                         f"+{' '.join(a.add) or '-'} -{' '.join(a.remove) or '-'}: ok")
+        for a in an.of(phase, "record"):  # written before versions were kept, same flags on both sides
+            db.ex("UPDATE items SET version=? WHERE id=?", (mm.canon_flags(a.item.flags), a.row["id"]))
+        for a in an.of(phase, "update"):
+            key, target = a.row["item_key"], a.row["target"]
+            if CAP_UPDATE not in caps:
+                self.log(f"Mirror update {phase} key={key}: the target cannot update items, skipped", "warning")
+                continue
+            import_id = import_id_of(self.pst_key, key)
+            try:
+                got = self._on_source(lambda: self.source.fetch(a.folder, a.item, import_id))
+            except ConnectorError as e:
+                st["errors"] += 1
+                self._item_log(f"Mirror update {phase} key={key}: cannot read the source ({e})", "error")
+                continue
+            if got is None:
+                continue
+            item = OutgoingItem(phase, got.raw, import_id, name=a.row["hash"])
+            ok = True
+            for r in a.refs:
+                ok = self._mirror_act(session, st, "update", key, lambda: session.update(target, r.ref, item))[1] and ok
+            if ok:
+                db.ex("UPDATE items SET version=?, subject=?, size=?, job_id=?, updated_at=? WHERE id=?",
+                      (a.item.version, got.subject, len(got.raw), self.job_id, now(), a.row["id"]))
+                st["updated"] += 1
+                self.log(f"Mirror update {phase} key={key} ref={','.join(r.ref for r in a.refs)} in '{target}': ok")
+        ready: dict[str, list[tuple]] = {}  # target folder -> [(action, ref, mode)] to delete
+        for a in an.of(phase, "delete"):
+            key, target = a.row["item_key"], a.row["target"]
+            if not a.refs:  # gone from the target already (deleted there by hand): only recorded
+                self.set_item(a.row["id"], "deleted", "mirror: deleted at the source, already absent from the target")
+                self.log(f"Mirror delete {phase} key={key} in '{target}': already absent")
+                continue
+            if CAP_DELETE not in caps:
+                st["skipped_by_safety"] += 1
+                self.log(f"Mirror delete {phase} key={key}: the target cannot delete, kept", "warning")
+                continue
+            mode = session.delete_mode(target)
+            kept = False
+            for r in a.refs:
+                if mode == DELETE_HARD:  # gone for good: a copy is kept first, or nothing is deleted
+                    raw = None
+                    if CAP_READBACK in caps:
+                        raw, _ = self._mirror_act(session, st, "read before delete", key,
+                                                  lambda: session.read(target, r.ref))
+                    if not raw:
+                        kept = True
+                        self.log(f"Mirror delete {phase} key={key} ref={r.ref}: no copy could be kept, kept", "warning")
+                        continue
+                    path = mm.backup_copy(self.job_id, phase, a.ident + r.ref, raw)
+                    self.log(f"Mirror delete {phase} key={key} ref={r.ref}: copy kept in {path}")
+                ready.setdefault(target, []).append((a, r.ref, mode))
+            if kept:
+                st["skipped_by_safety"] += 1
+                a.row["_kept"] = True
+        done_refs: dict[int, list[bool]] = {}
+        for target, group in ready.items():
+            for i in range(0, len(group), 100):
+                chunk = group[i:i + 100]
+                expected = {ref: a.ident for a, ref, _ in chunk}
+                res, good = self._mirror_act(session, st, "delete", f"{len(chunk)} item(s) in '{target}'",
+                                             lambda: session.delete_many(target, [ref for _, ref, _ in chunk], expected))
+                res = res or {}
+                for a, ref, mode in chunk:
+                    ok = good and ref in res
+                    done_refs.setdefault(id(a), []).append(ok)
+                    self.log(f"Mirror delete {phase} key={a.row['item_key']} ref={ref} in '{target}': "
+                             + (res[ref] if ok else "failed"), "info" if ok else "error")
+                    if good and not ok:
+                        st["errors"] += 1
+        for a in an.of(phase, "delete"):
+            results = done_refs.get(id(a))
+            if results and all(results) and not a.row.get("_kept"):
+                self.set_item(a.row["id"], "deleted", f"mirror: deleted at the source "
+                              f"({session.delete_mode(a.row['target'])})")
+                st["deleted"] += 1
 
     # ------------------------------------------------------------ checks
     def _check_target(self, session, phase: str, fkeys: list[str], target: str) -> dict:
@@ -608,7 +835,7 @@ class ConnectorJobRunner(JobRunner):
         for iid in random.sample(ids, min(settings.verify_sample, len(ids))):
             self.check()
             it = db.q1("SELECT * FROM items WHERE id=?", (iid,))
-            probe = OutgoingItem(MAIL, b"", import_id_of(self.pst_key, it["item_key"]))
+            probe = OutgoingItem(MAIL, b"", it["stamp"] or import_id_of(self.pst_key, it["item_key"]))
             checked += 1
             try:
                 found = self._on_session(session, lambda: session.find(it["target"], probe))

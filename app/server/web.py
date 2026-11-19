@@ -321,6 +321,7 @@ class AccountUpdate(BaseModel):
     login: str | None = None
     options: dict[str, bool] | None = None
     pst_id: int | None = None
+    mirror: bool | None = None  # same as options.mirror (docs/planning.md "Mirror")
 
 
 def _account_or_404(aid: int):
@@ -379,9 +380,11 @@ def update_account(aid: int, a: AccountUpdate):
         sets.append("password_enc=?"); vals.append(encrypt(a.password))
         sets.append("status='new'")
     if a.options is not None:
-        for k in ("mail", "calendar", "contacts"):
+        for k in ("mail", "calendar", "contacts", "mirror"):
             if k in a.options:
                 sets.append(f"opt_{k}=?"); vals.append(int(bool(a.options[k])))
+    if a.mirror is not None and not (a.options and "mirror" in a.options):
+        sets.append("opt_mirror=?"); vals.append(int(a.mirror))
     if "pst_id" in a.model_fields_set:
         if a.pst_id is not None and not repo.get_pst(a.pst_id):
             raise HTTPException(404, "unknown PST")
@@ -574,12 +577,22 @@ class RunIn(BaseModel):
     # optional: a named batch groups the jobs started together (GET /api/batches); mode "delta" is the final resync
     # (what arrived since the previous pass); priority: higher runs first among the queued jobs
     name: str | None = Field(None, max_length=120)
-    mode: str = Field("full", pattern="^(full|delta)$")
+    mode: str = Field("full", pattern="^(full|delta|mirror)$")
     priority: int = 0
+    # mode "mirror" only (docs/planning.md "Mirror"): dry_run (the default) computes and writes nothing
+    dry_run: bool = True
+    max_delete_percent: int = Field(20, ge=0, le=100)
+    allow_large_delete: bool = False
 
 
 @app.post("/api/runs")
 def create_runs(body: RunIn):
+    if body.mode == "mirror":
+        from . import mirror
+        opts = mirror.Options(body.max_delete_percent, body.allow_large_delete)
+        if body.dry_run:
+            return {"accounts": [mirror.preview_account(aid, opts) for aid in body.account_ids]}
+        return mirror.start(body.account_ids, opts, body.name, body.priority)
     jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})
