@@ -3,6 +3,8 @@
 	 * Native modal dialog: focus trap, Esc and the inert background come from the browser.
 	 * It opens as a panel on the right edge, full height; `center` keeps the small box in the
 	 * middle, for a yes/no question. Mount it when needed; closing calls `onclose`.
+	 * On open the focus goes to an element marked `data-autofocus`, else to the first control of
+	 * the content, else to the first action; the close button only when there is nothing else.
 	 */
 	import X from '@lucide/svelte/icons/x';
 	import type { Snippet } from 'svelte';
@@ -20,9 +22,19 @@
 
 	let { title, children, actions, wide = false, center = false, onclose }: Props = $props();
 	let dialog = $state<HTMLDialogElement>();
+	let body = $state<HTMLElement>();
+	let footer = $state<HTMLElement>();
+
+	const FOCUSABLE = 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])';
+
+	function first(scope: HTMLElement | undefined): HTMLElement | null | undefined {
+		return [...(scope?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])].find((el) => el.getClientRects().length > 0);
+	}
 
 	onMount(() => {
 		dialog?.showModal();
+		const target = dialog?.querySelector<HTMLElement>('[data-autofocus]:not([disabled])') ?? first(body) ?? first(footer);
+		target?.focus();
 	});
 </script>
 
@@ -41,7 +53,7 @@
 				<X size={16} />
 			</button>
 		</div>
-		<div class={center ? 'p-5' : 'min-h-0 flex-1 overflow-y-auto p-5'}>{@render children()}</div>
-		{#if actions}<div class="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line px-5 py-3">{@render actions()}</div>{/if}
+		<div bind:this={body} class={center ? 'p-5' : 'min-h-0 flex-1 overflow-y-auto p-5'}>{@render children()}</div>
+		{#if actions}<div bind:this={footer} class="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line px-5 py-3">{@render actions()}</div>{/if}
 	</div>
 </dialog>
