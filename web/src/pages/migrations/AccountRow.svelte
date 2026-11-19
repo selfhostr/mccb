@@ -113,7 +113,7 @@
 	</a>
 </div>
 <div class="acct-status" data-testid={phase ? 'test-state' : 'row-status'}>
-	<Plate tone={look.tone} icon={look.icon} label={look.label} />
+	<Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} />
 </div>
 <div class="acct-bar">
 	<ProgressCell accountId={id} />

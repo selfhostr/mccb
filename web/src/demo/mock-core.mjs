@@ -31,52 +31,169 @@ function makeAccount(id, email, serverId, over = {}) {
 	return { id, server_id: serverId, email, login: email, has_password: true, status: 'new', last_test: null, last_test_result: null, pst_id: null, source: undefined, target: { kind: null, config: {}, has_secret: false }, options: { mail: true, calendar: true, contacts: true }, job: null, ...over };
 }
 
-// Same contract as app/connectors/registry.py catalogue(): the UI draws forms from it.
-const field = (name, label, type = 'text', over = {}) => ({ name, label, type, required: false, secret: false, default: null, ...over });
+// Same contract as app/connectors/registry.py catalogue() (sorted by kind): the UI draws forms from it.
+// Kinds, labels, fields, defaults, options and help are those of app/connectors/*.py, plus one fake kind, `future`.
+const field = (name, label, type = 'text', over = {}) => ({ name, label, type, required: false, secret: false, default: null, scope: 'mailbox', ...over });
+const MAIL = 'mail', CALENDAR = 'calendar', CONTACTS = 'contacts', TASKS = 'tasks';
+const role = (items, capabilities, fields) => ({ items, capabilities: [...capabilities].sort(), fields });
+const READ = ['folders', 'flags', 'internal_date', 'incremental'];
+const READ_RULES = [...READ, 'rules'];
+const FILES = ['folders', 'flags', 'internal_date'];
+const WRITE_MAIL = ['folders', 'flags', 'internal_date', 'quota', 'parallel_writes', 'readback'];
+const WRITE_EXCHANGE = ['folders', 'flags', 'internal_date', 'parallel_writes'];
+const verifyTls = () => field('verify_tls', 'Verify the TLS certificate', 'boolean', { default: true });
+const rootFolder = (help) => field('root_folder', 'Root folder', 'text', { help });
+const timeZone = () => field('time_zone', 'Time zone of all-day events', 'text', { help: 'IANA name, such as Europe/Paris, for all-day events that do not say. Empty: UTC.' });
+
+const DAV_FIELDS = [
+	field('url', 'URL', 'url', { help: 'Empty: discovery from the host below. May contain {email}, {user}, {domain}, {login}.' }),
+	field('discovery_host', 'Host for discovery'),
+	field('email', 'Email address'),
+	field('login', 'Login', 'text', { required: true }),
+	verifyTls(),
+	field('password', 'Password', 'password', { required: true, secret: true })
+];
+
+const EWS_FIELDS = [
+	field('url', 'EWS URL', 'url', { required: true, help: 'Usually https://mail.example.com/EWS/Exchange.asmx' }),
+	field('login', 'Login', 'text', { required: true, help: 'DOMAIN\\user or user@example.com' }),
+	field('password', 'Password', 'password', { required: true, secret: true }),
+	field('auth', 'Authentication', 'select', { default: 'auto', options: ['auto', 'ntlm', 'basic'], help: 'auto follows what the server asks for. Basic is refused over plain HTTP.' }),
+	field('access', 'Access', 'select', { default: 'own', options: ['own', 'impersonation', 'delegate'], help: 'impersonation: one account with the ApplicationImpersonation role reaches every mailbox. delegate: the login has rights on a shared mailbox.' }),
+	field('mailbox', 'Mailbox address', 'text', { help: 'SMTP address of the mailbox, for impersonation or delegate.' }),
+	field('server_version', 'Server version', 'select', { default: 'Exchange2013', options: ['Exchange2010_SP2', 'Exchange2013', 'Exchange2016'] }),
+	verifyTls()
+];
+
+const GOOGLE_FIELDS = [
+	field('user', 'Google account', 'text', { required: true, help: 'The email address of the user to read.' }),
+	field('auth', 'Access', 'select', { default: 'service_account', options: ['service_account', 'oauth'], help: 'service_account: Workspace domain-wide delegation. oauth: a refresh token of this user.' }),
+	field('service_account_key', 'Service account key (JSON)', 'password', { secret: true, help: 'The JSON key file of the service account, pasted whole. For access=service_account.' }),
+	field('client_id', 'OAuth client id', 'text', { help: 'For access=oauth.' }),
+	field('client_secret', 'OAuth client secret', 'password', { secret: true, help: 'For access=oauth.' }),
+	field('refresh_token', 'OAuth refresh token', 'password', { secret: true, help: 'For access=oauth.' }),
+	field('sync_mail', 'Mail (Gmail over IMAP)', 'boolean', { default: true }),
+	field('sync_calendar', 'Calendars', 'boolean', { default: true }),
+	field('sync_contacts', 'Contacts', 'boolean', { default: true }),
+	field('include_trash_spam', 'Include Spam and Trash', 'boolean', { default: false })
+];
+
+const IMAP_SERVER = [
+	field('host', 'Server', 'text', { required: true }),
+	field('port', 'Port', 'number', { default: 993 }),
+	field('security', 'Security', 'select', { default: 'ssl', options: ['ssl', 'starttls', 'none'] }),
+	verifyTls(),
+	field('login', 'Login', 'text', { required: true })
+];
+const IMAP_CONNECTION = [
+	...IMAP_SERVER,
+	field('password', 'Password', 'password', { required: true, secret: true }),
+	field('master_user', 'Master user', 'text', { help: "Dovecot-style admin access: the password above is the master's, the login is the mailbox to reach." }),
+	field('master_separator', 'Master user separator', 'text', { help: 'Between the login and the master user. Empty: *' })
+];
+const IMAP_OAUTH_CONNECTION = [
+	...IMAP_SERVER,
+	field('token_url', 'Token endpoint', 'url', { required: true, help: 'For Microsoft 365: https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token' }),
+	field('client_id', 'Client ID', 'text', { required: true }),
+	field('scope', 'Scope', 'text', { help: 'For Microsoft 365 app-only: https://outlook.office365.com/.default' }),
+	field('client_secret', 'Client secret', 'password', { secret: true }),
+	field('refresh_token', 'Refresh token', 'password', { secret: true, help: 'Empty: the client credentials grant, for app-only access.' })
+];
+
+const JMAP_FIELDS = [
+	field('url', 'Session URL', 'url', { required: true, help: 'https://host/.well-known/jmap, or the session URL of the provider.' }),
+	field('auth', 'Authentication', 'select', { default: 'basic', options: ['basic', 'bearer'], help: 'bearer: the secret below is an access token or an app token.' }),
+	field('login', 'Login', 'text', { help: 'Required for basic authentication.' }),
+	field('account_id', 'Account id', 'text', { help: 'Empty: the primary account.' }),
+	verifyTls(),
+	field('password', 'Password or token', 'password', { required: true, secret: true })
+];
+
+const M365_FIELDS = [
+	field('tenant_id', 'Tenant ID', 'text', { required: true, help: 'Directory (tenant) ID of the Entra application.', scope: 'connection' }),
+	field('client_id', 'Client ID', 'text', { required: true, help: 'Application (client) ID.', scope: 'connection' }),
+	field('client_secret', 'Client secret', 'password', { required: true, secret: true, scope: 'connection' }),
+	field('mailbox', 'Mailbox', 'text', { required: true, help: 'User principal name or address of the mailbox, shared mailboxes too.' }),
+	field('cloud', 'Cloud', 'select', { default: 'global', options: ['global', 'usgov', 'china'], scope: 'connection' }),
+	field('include_tasks', 'Include tasks', 'boolean', { default: true, help: 'Microsoft To Do. Turn off for a mailbox without To Do, or if Tasks.ReadWrite.All is not granted.' })
+];
+
 const CATALOGUE = [
-	{ kind: 'caldav', label: 'CalDAV', description: 'Calendars over CalDAV.', source: null, target: { items: ['calendar'], capabilities: [], fields: [field('url', 'Calendar URL', 'url', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] } },
+	{ kind: 'caldav', label: 'CalDAV', description: 'Calendars and tasks on a CalDAV server.', source: role([CALENDAR, TASKS], ['folders'], DAV_FIELDS), target: role([CALENDAR, TASKS], ['readback'], DAV_FIELDS), directory: false },
+	{ kind: 'carddav', label: 'CardDAV', description: 'Address books on a CardDAV server.', source: role([CONTACTS], ['folders'], DAV_FIELDS), target: role([CONTACTS], ['readback'], DAV_FIELDS), directory: false },
 	{
-		kind: 'ews',
-		label: 'Exchange (EWS)',
-		description: 'Read a mailbox from Exchange Web Services.',
-		source: { items: ['mail'], capabilities: ['folders'], fields: [field('server', 'Server URL', 'url', { required: true, help: 'Usually https://mail.example.com/EWS/Exchange.asmx' }), field('verify_tls', 'Verify the certificate', 'boolean', { default: true }), field('password', 'Password', 'password', { required: true, secret: true })] },
-		target: null
+		kind: 'exchange_ews',
+		label: 'Exchange on premises (EWS)',
+		description: 'Exchange Server 2010 SP2 to 2019 through EWS. Tested against simulated servers, not real Exchange.',
+		source: role([MAIL, CALENDAR, CONTACTS, TASKS], READ_RULES, [...EWS_FIELDS, field('include_archive', 'Include the online archive', 'boolean', { default: false, help: "Its folders are copied under 'Online Archive'." })]),
+		target: role([MAIL, CALENDAR, CONTACTS, TASKS], WRITE_EXCHANGE, [...EWS_FIELDS, rootFolder('Put everything but the well-known folders under this folder.'), timeZone()]),
+		directory: false
 	},
 	{
+		kind: 'files',
+		label: 'Files (mbox, Maildir, .eml, .msg, .ics, .vcf, .zip)',
+		description: 'A file uploaded to this server, or dropped in the inbox folder: mail, calendars, contacts.',
+		source: role([MAIL, CALENDAR, CONTACTS], FILES, [field('pst_id', 'File', 'number', { required: true, help: 'Identifier of an uploaded file (GET /api/psts).' })]),
+		target: null,
+		directory: false
+	},
+	{
+		// Not a real connector: a kind the UI has never heard of.
 		kind: 'future',
 		label: 'Future mail service',
 		description: 'A kind the UI has never heard of.',
-		source: { items: ['mail'], capabilities: [], fields: [field('mailbox', 'Mailbox', 'text', { required: true }), field('mode', 'Mode', 'select', { options: ['fast', 'careful'], default: 'fast' }), field('batch', 'Batch size', 'number', { default: 50 }), field('weird', 'Strange field', 'hologram'), field('api_key', 'API key', 'password', { secret: true, required: true })] },
-		target: null
+		source: role([MAIL], [], [field('mailbox', 'Mailbox', 'text', { required: true }), field('mode', 'Mode', 'select', { options: ['fast', 'careful'], default: 'fast' }), field('batch', 'Batch size', 'number', { default: 50 }), field('weird', 'Strange field', 'hologram'), field('api_key', 'API key', 'password', { secret: true, required: true })]),
+		target: null,
+		directory: false
+	},
+	{
+		kind: 'google',
+		label: 'Google',
+		description: 'Gmail, Google Calendar and Google Contacts of one account.',
+		source: role([MAIL, CALENDAR, CONTACTS], READ, GOOGLE_FIELDS),
+		target: null,
+		directory: false
 	},
 	{
 		kind: 'imap',
 		label: 'IMAP',
-		description: 'Any IMAP mailbox.',
-		source: { items: ['mail'], capabilities: ['folders'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] },
-		target: { items: ['mail'], capabilities: ['parallel'], fields: [field('host', 'Server', 'text', { required: true }), field('port', 'Port', 'number', { default: 993 }), field('security', 'Security', 'select', { options: ['ssl', 'starttls', 'none'], default: 'ssl' }), field('username', 'User', 'text', { required: true }), field('password', 'Password', 'password', { required: true, secret: true })] }
+		description: 'Any IMAP mailbox, read without altering it or written to.',
+		source: role([MAIL], READ, IMAP_CONNECTION),
+		target: role([MAIL], WRITE_MAIL, [...IMAP_CONNECTION, rootFolder('Put everything under this folder.')]),
+		directory: false
+	},
+	{
+		kind: 'imap_oauth2',
+		label: 'IMAP (OAuth2)',
+		description: 'An IMAP mailbox reached with an OAuth2 token (XOAUTH2).',
+		source: role([MAIL], READ, IMAP_OAUTH_CONNECTION),
+		target: role([MAIL], WRITE_MAIL, [...IMAP_OAUTH_CONNECTION, rootFolder('Put everything under this folder.')]),
+		directory: false
+	},
+	{
+		kind: 'jmap',
+		label: 'JMAP',
+		description: 'Mail and contacts of a JMAP server (RFC 8620, 8621, 9610). Calendars: use CalDAV.',
+		source: role([MAIL, CONTACTS], READ, JMAP_FIELDS),
+		target: role([MAIL, CONTACTS], WRITE_MAIL, [...JMAP_FIELDS, rootFolder('Put all mail under this mailbox.')]),
+		directory: false
 	},
 	{
 		kind: 'm365_graph',
-		label: 'Microsoft 365 (Graph)',
-		description: 'Read mailboxes, calendars, contacts and tasks from Microsoft 365 through the Graph API.',
+		label: 'Exchange Online (Microsoft Graph)',
+		description: 'Microsoft 365 mailboxes, with one Entra application. Tested against simulated servers, not real Exchange.',
+		source: role([MAIL, CALENDAR, CONTACTS, TASKS], READ_RULES, M365_FIELDS),
+		target: role([MAIL, CALENDAR, CONTACTS, TASKS], ['folders', 'flags', 'parallel_writes'], [
+			...M365_FIELDS.slice(0, -1),
+			rootFolder('Put everything but the well-known folders under this folder.'),
+			timeZone(),
+			field('import_mode', 'Mail import', 'select', { default: 'import_mime', options: ['import_mime', 'draft'], help: 'import_mime: normal messages, through a beta API, needs Mail-Advanced.ReadWrite.All. draft: stable API, but every message stays a draft. The received date is the date of the import in both.' }),
+			field('send_invitations', 'Send invitations for events with attendees', 'boolean', { default: false, help: 'Graph mails every attendee when it creates such an event, and this cannot be turned off. Off: attendees are written as text in the body of the event.' })
+		]),
 		directory: true,
-		provision: true,
-		source: {
-			items: ['mail', 'calendar', 'contacts'],
-			capabilities: ['folders'],
-			fields: [
-				field('tenant_id', 'Tenant ID', 'text', { required: true, scope: 'connection' }),
-				field('client_id', 'Client ID', 'text', { required: true, scope: 'connection' }),
-				field('client_secret', 'Client secret', 'password', { required: true, secret: true, scope: 'connection' }),
-				field('cloud', 'Cloud', 'select', { options: ['global', 'usgov', 'china'], default: 'global', scope: 'connection' }),
-				field('mailbox', 'Mailbox', 'text', { required: true, scope: 'mailbox' }),
-				field('include_tasks', 'Include tasks', 'boolean', { default: true, scope: 'mailbox' })
-			]
-		},
-		target: null
+		provision: true
 	},
-	{ kind: 'pst', label: 'PST file', description: 'A Personal Folders file.', source: { items: ['mail', 'calendar', 'contacts'], capabilities: ['folders'], fields: [] }, target: null }
+	{ kind: 'pst', label: 'Outlook PST file', description: 'A PST file uploaded to this server.', source: role([MAIL, CALENDAR, CONTACTS], FILES, [field('pst_id', 'PST file', 'number', { required: true, help: 'Identifier of an uploaded PST (GET /api/psts).' })]), target: null, directory: false }
 ];
 
 function defaultIntake() {

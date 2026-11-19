@@ -215,7 +215,7 @@
 				<Button variant="primary" icon={ExternalLink} onclick={() => window.open(flow?.verification_uri, '_blank', 'noopener,noreferrer')} data-testid="provision-open">{m.provision_open()}</Button>
 			</div>
 		{:else}
-			<p class="m-0 flex items-center gap-2 text-sm text-ink-2"><LoaderCircle size={14} class="animate-spin" />{m.provision_starting()}</p>
+			<p class="m-0 flex items-center gap-2 text-sm text-ink-2"><LoaderCircle size={14} class="busy" />{m.provision_starting()}</p>
 		{/if}
 		<ol class="m-0 flex list-none flex-col gap-1.5 p-0" data-testid="provision-steps">
 			{#each STEPS as step, i (step)}
@@ -223,7 +223,7 @@
 				<li class={`flex items-start gap-2 text-sm ${st === 'pending' ? 'text-ink-3' : 'text-ink'}`} data-step={step} data-state={st}>
 					<span class="mt-0.5 shrink-0">
 						{#if st === 'done'}<Check size={14} class="text-signal-ink" />
-						{:else if st === 'current'}<LoaderCircle size={14} class="animate-spin" />
+						{:else if st === 'current'}<LoaderCircle size={14} class="busy" />
 						{:else}<CircleDashed size={14} />{/if}
 					</span>
 					<span>{WORDS[step]()}</span>

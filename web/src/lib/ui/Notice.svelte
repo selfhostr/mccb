@@ -8,7 +8,7 @@
 	const Icon = $derived(tone === 'note' ? Info : TriangleAlert);
 </script>
 
-<div class={`flex items-start gap-2 rounded-btn border p-3 ${tone === 'note' ? 'border-line bg-surface text-ink-2' : 'border-advisory/30 bg-advisory-soft text-advisory-ink'}`}>
+<div class={`appear flex items-start gap-2 rounded-btn border p-3 ${tone === 'note' ? 'border-line bg-surface text-ink-2' : 'border-advisory/30 bg-advisory-soft text-advisory-ink'}`}>
 	<span class="mt-0.5"><Icon size={14} /></span>
 	<div class="min-w-0">{@render children()}</div>
 </div>

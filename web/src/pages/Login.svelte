@@ -42,7 +42,7 @@
 			<h1 class="text-xl">mccb</h1>
 		</div>
 		{#if expired}<Notice>{m.login_form_expired()}</Notice>{/if}
-		<Field label={m.login_form_password()}>
+		<Field label={m.login_form_password()} hint={m.login_form_password_help()}>
 			<input bind:this={input} class="input" type="password" autocomplete="current-password" required bind:value={password} data-testid="login-password" />
 		</Field>
 		{#if error}<ErrorNotice title={m.login_form_failed()} message={error} />{/if}

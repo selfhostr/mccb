@@ -47,6 +47,7 @@
 	import Button from '../../lib/ui/Button.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
+	import Help from '../../lib/ui/Help.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import Panel from '../../lib/ui/Panel.svelte';
 	import RelTime from '../../lib/ui/RelTime.svelte';
@@ -282,7 +283,7 @@
 	</div>
 {/snippet}
 
-<div class="flex flex-col gap-4 pb-24 sm:pb-8" data-testid="tenant-page">
+<div class="flex flex-col gap-4 pb-24" data-testid="tenant-page">
 	<header class="flex flex-col gap-3 pt-5">
 		<a class="inline-flex min-h-10 w-fit items-center gap-1.5 text-sm text-ink-2 no-underline hover:text-ink" href="/"><ArrowLeft size={14} />{m.shell_nav_migrations()}</a>
 		<div class="flex flex-wrap items-end justify-between gap-3">
@@ -354,7 +355,7 @@
 		{#if !rows.length}
 			<EmptyState icon={Building} title={m.tenant_empty_title()} description={m.tenant_empty_text()} />
 		{:else}
-			<div class="flex flex-col gap-2">
+			<div class="relative flex flex-col gap-2">
 				<div class="flex flex-wrap items-center gap-1.5" role="group" aria-label={m.tenant_chips_label()} data-testid="tenant-chips">
 					{#each CHIPS as chip (chip.value)}
 						{@const look = chip.value ? matchLook(chip.value, serverName) : null}
@@ -372,6 +373,7 @@
 							<span class="font-mono text-ink-2">{chip.count}</span>
 						</button>
 					{/each}
+					<Help text={m.tenant_states_help()} label={m.tenant_states_help_label()} />
 				</div>
 				<div class="flex flex-wrap items-center gap-2">
 					<label class="relative min-w-40 flex-1 basis-56 sm:max-w-[320px]">
@@ -380,9 +382,7 @@
 						<input class="input pl-8" type="search" placeholder={m.tenant_search()} value={q} oninput={(e) => router.setParams({ q: e.currentTarget.value || null })} data-testid="tenant-q" />
 					</label>
 					<Toggle checked={rooms} label={m.tenant_rooms({ count: resources })} onchange={(on) => router.setParams({ rooms: on ? '1' : null })} />
-					{#if readyVisible}
-						<Button variant="ghost" icon={ListChecks} class="ml-auto" onclick={() => (ticked = tickReady(visible, ticked))} data-testid="tenant-tick-ready">{m.tenant_tick_ready()}</Button>
-					{/if}
+					<Button variant="ghost" icon={ListChecks} class="ml-auto" disabled={!readyVisible} onclick={() => (ticked = tickReady(visible, ticked))} data-testid="tenant-tick-ready">{m.tenant_tick_ready()}</Button>
 				</div>
 			</div>
 

@@ -1,5 +1,6 @@
 import { m } from '#lib/paraglide/messages.js';
 import type { DedupBox, DedupFolder, DedupKind } from '../../lib/api/types.ts';
+import { toDate } from '../../lib/format.ts';
 
 export const KINDS: DedupKind[] = ['mail', 'calendar', 'contacts'];
 
@@ -32,12 +33,16 @@ export interface Plan {
 	keys: string[];
 	/** Selected boxes left out because they were never analysed. */
 	unanalysed: number;
+	/** Each box that will run, with its duplicates per kind (the chosen kinds only). */
+	boxes: { key: string; email: string; counts: Record<DedupKind, number> }[];
+	/** The oldest analysis behind the plan (ms since the epoch), null when there is none. */
+	oldest: number | null;
 }
 
 /** What "Remove duplicates" would do for these boxes, from their last analysis. Exactly what the dialog states. */
 export function planRemoval(boxes: DedupBox[], kinds: Iterable<DedupKind>): Plan {
 	const chosen = [...kinds];
-	const plan: Plan = { counts: { mail: 0, calendar: 0, contacts: 0 }, keys: [], unanalysed: 0 };
+	const plan: Plan = { counts: { mail: 0, calendar: 0, contacts: 0 }, keys: [], unanalysed: 0, boxes: [], oldest: null };
 	for (const box of boxes) {
 		if (!box.last_scan) {
 			plan.unanalysed++;
@@ -45,12 +50,19 @@ export function planRemoval(boxes: DedupBox[], kinds: Iterable<DedupKind>): Plan
 		}
 		if (box.active_run || box.busy || !box.usable) continue;
 		let some = 0;
+		const counts: Record<DedupKind, number> = { mail: 0, calendar: 0, contacts: 0 };
 		for (const kind of chosen) {
 			const n = box.last_scan.totals[kind]?.duplicates ?? 0;
 			plan.counts[kind] += n;
+			counts[kind] = n;
 			some += n;
 		}
-		if (some > 0) plan.keys.push(box.key);
+		if (some > 0) {
+			plan.keys.push(box.key);
+			plan.boxes.push({ key: box.key, email: box.email, counts });
+			const at = toDate(box.last_scan.finished_at ?? box.last_scan.created_at)?.getTime() ?? null;
+			if (at != null && (plan.oldest == null || at < plan.oldest)) plan.oldest = at;
+		}
 	}
 	return plan;
 }

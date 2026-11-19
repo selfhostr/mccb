@@ -72,7 +72,7 @@
 		<div class="min-w-0 flex-1 basis-56">
 			<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 				<span class="truncate">{batch.name}</span>
-				<Plate tone={look.tone} icon={look.icon} label={look.label} />
+				<Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} />
 			</p>
 			<p class="m-0 text-xs text-ink-2" data-testid="batch-totals">{m.batch_totals({ jobs: batch.jobs, done: fmtNum(items.done), total: fmtNum(items.total), errors: fmtNum(items.errors) })}</p>
 		</div>

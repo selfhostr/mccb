@@ -30,6 +30,7 @@
 	<p class="m-0">{text}</p>
 	{#snippet actions()}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
-		<Button variant={danger ? 'danger' : 'primary'} loading={busy} onclick={run}>{confirm}</Button>
+		<!-- The dialog focuses Cancel first, unless the action is harmless: then the action itself. -->
+		<Button variant={danger ? 'danger' : 'primary'} loading={busy} onclick={run} data-autofocus={danger ? undefined : ''}>{confirm}</Button>
 	{/snippet}
 </Dialog>

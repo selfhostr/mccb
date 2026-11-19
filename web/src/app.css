@@ -46,6 +46,54 @@
 	--radius-card: 12px;
 }
 
+/*
+ * Motion, one vocabulary for the whole app. The easing is --ease (tokens.css), the durations are these three;
+ * only transform and opacity ever move. Motion answers something: a page opened, a panel, a row arriving,
+ * a job finishing. The only thing that moves on its own is the slow "in progress" pulse.
+ */
+:root {
+	--dur-1: 120ms;
+	--dur-2: 180ms;
+	--dur-3: 240ms;
+	--stagger: 24ms;
+}
+
+@keyframes fade {
+	from {
+		opacity: 0;
+	}
+}
+@keyframes rise {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+}
+@keyframes pop {
+	0% {
+		opacity: 0;
+		transform: scale(0.6);
+	}
+	60% {
+		opacity: 1;
+		transform: scale(1.12);
+	}
+}
+/* Slow and shallow: says "working" without asking to be looked at. */
+@keyframes breathe {
+	50% {
+		opacity: 0.45;
+	}
+}
+@keyframes shimmer {
+	from {
+		transform: translateX(-100%);
+	}
+	to {
+		transform: translateX(100%);
+	}
+}
+
 @layer base {
 	html {
 		font-size: 16px;
@@ -86,9 +134,15 @@
 	dialog::backdrop {
 		background: var(--c-scrim);
 	}
-	/* A panel slides in from the edge it stays on. */
+	/* A panel slides in from the edge it stays on; a centred dialog settles in place. */
 	dialog.drawer[open] {
-		animation: drawer-in 220ms var(--ease);
+		animation: drawer-in var(--dur-3) var(--ease);
+	}
+	dialog:not(.drawer)[open] {
+		animation: settle var(--dur-2) var(--ease);
+	}
+	dialog[open]::backdrop {
+		animation: fade var(--dur-2) var(--ease);
 	}
 	@keyframes drawer-in {
 		from {
@@ -96,8 +150,15 @@
 			opacity: 0;
 		}
 	}
+	@keyframes settle {
+		from {
+			transform: scale(0.98);
+			opacity: 0;
+		}
+	}
 	@media (prefers-reduced-motion: reduce) {
-		dialog.drawer[open] {
+		dialog[open],
+		dialog[open]::backdrop {
 			animation: none;
 		}
 	}
@@ -117,7 +178,7 @@
 		background: var(--c-surface);
 		color: var(--c-ink);
 		font: inherit;
-		transition: border-color 200ms var(--ease);
+		transition: border-color var(--dur-3) var(--ease);
 	}
 	.input:hover {
 		border-color: var(--c-ink-3);
@@ -154,7 +215,7 @@
 		border: 1px solid var(--c-line-strong);
 		border-radius: 999px;
 		background: var(--c-surface-2);
-		transition: background-color 200ms, border-color 200ms;
+		transition: background-color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease);
 	}
 	.check input.switch::after {
 		content: '';
@@ -165,7 +226,7 @@
 		height: 14px;
 		border-radius: 50%;
 		background: var(--c-ink-2);
-		transition: transform 200ms, background-color 200ms;
+		transition: transform var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease);
 	}
 	.check input.switch:checked {
 		border-color: var(--c-primary);
@@ -174,6 +235,13 @@
 	.check input.switch:checked::after {
 		background: var(--c-on-primary);
 		transform: translateX(16px);
+	}
+	/* The box gives a little as it is pressed: the click is felt before the state changes. */
+	.check input {
+		transition: transform var(--dur-1) var(--ease);
+	}
+	.check:active input:not(.switch, :disabled) {
+		transform: scale(0.9);
 	}
 	.check input.switch:disabled {
 		opacity: 0.5;
@@ -201,8 +269,101 @@
 		width: 100%;
 		height: 100%;
 		transform-origin: 0 50%;
-		transition: transform 400ms var(--ease);
+		transition: transform var(--dur-3) var(--ease);
 		will-change: transform;
+	}
+
+	/*
+	 * A page arrives with a fade, its header with a 6 px rise; nothing waits for it, it lasts --dur-2.
+	 * The page itself never gets a transform: it would hold the fixed bars inside it (selection, tenant) for that time.
+	 */
+	.page-enter {
+		animation: fade var(--dur-2) var(--ease);
+	}
+	.is-entering .page-enter header {
+		animation: rise var(--dur-2) var(--ease);
+	}
+	/*
+	 * The rows of a page that has just opened come in one after the other, the first ten only and never
+	 * later than 10 x --stagger. Outside that moment (scroll, live updates) rows just appear: Shell sets
+	 * .is-entering for a short while after each navigation.
+	 */
+	.is-entering :is(.row-list, .stagger) > :nth-child(-n + 10) {
+		animation: rise var(--dur-2) var(--ease) both;
+		animation-delay: calc(var(--i, 0) * var(--stagger));
+	}
+	.is-entering :is(.row-list, .stagger) > :nth-child(2) { --i: 1; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(3) { --i: 2; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(4) { --i: 3; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(5) { --i: 4; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(6) { --i: 5; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(7) { --i: 6; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(8) { --i: 7; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(9) { --i: 8; }
+	.is-entering :is(.row-list, .stagger) > :nth-child(10) { --i: 9; }
+
+	/* An empty state's icon settles in once, a beat after its text. */
+	.empty-mark {
+		animation: mark-in var(--dur-3) var(--ease) 60ms both;
+	}
+	@keyframes mark-in {
+		from {
+			opacity: 0;
+			transform: scale(0.8);
+		}
+	}
+
+	/* Something that shows up after a page is open (a notice, an empty state, an opened disclosure). */
+	.appear {
+		animation: rise var(--dur-2) var(--ease);
+	}
+
+	/* A pressed control gives a little under the finger (its own transition list must include transform). */
+	.press:not(:disabled):active {
+		transform: scale(0.96);
+	}
+
+	/* A placeholder: a faint band passes over it, slowly, so it reads as "loading" and not as an empty box. */
+	.skeleton {
+		position: relative;
+		overflow: hidden;
+	}
+	.skeleton::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(90deg, transparent, var(--c-surface-2), transparent);
+		opacity: 0.6;
+		transform: translateX(-100%);
+		animation: shimmer 1.6s var(--ease) infinite;
+	}
+
+	/* In progress: the status icon breathes, once every 2.4 s, and never below 45 % opacity. */
+	.busy {
+		animation: breathe 2.4s ease-in-out infinite;
+	}
+	/* Just finished: the check mark pops once, at the moment the status turns. */
+	.done-pop {
+		animation: pop var(--dur-3) var(--ease);
+	}
+	/* The small dot next to a page that has work running. */
+	.live-dot {
+		display: inline-block;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--c-info-ink);
+		animation: breathe 2.4s ease-in-out infinite;
+	}
+
+	/* The current page's mark in the navigation grows from its middle. */
+	.nav-mark {
+		animation: grow var(--dur-2) var(--ease);
+	}
+	@keyframes grow {
+		from {
+			transform: scaleY(0);
+		}
 	}
 	[dir='rtl'] .bar-fill {
 		transform-origin: 100% 50%;
@@ -232,12 +393,15 @@
 		align-items: center;
 		min-height: var(--row-h);
 		border-top: 1px solid var(--c-line);
-		transition: background-color 200ms var(--ease);
+		transition: background-color var(--dur-3) var(--ease);
 	}
+	/* The hover comes at once and lingers --dur-3 as the pointer leaves, so a row does not flicker. */
 	.acct-row:hover,
 	.file-row:hover {
 		background: var(--c-surface-2);
+		transition-duration: var(--dur-1);
 	}
+
 	/* A row's hover colour keeps to the panel's corners. */
 	.row-list:last-child > li:last-child {
 		border-radius: 0 0 calc(var(--radius-card) - 1px) calc(var(--radius-card) - 1px);
@@ -299,9 +463,13 @@
 		position: relative;
 	}
 	.file-row {
-		grid-template: 'name kind size status bar menu' auto / minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
+		grid-template: 'sel name kind size status bar menu' auto / 40px minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
 		column-gap: 16px;
-		padding: 8px 8px 8px 16px;
+		padding: 8px;
+	}
+	/* The checkbox of a file; the upload queue leaves it empty. */
+	.file-sel {
+		grid-area: sel;
 	}
 	.file-name {
 		grid-area: name;
@@ -339,9 +507,9 @@
 		}
 		.file-row {
 			grid-template:
-				'name name name menu' auto
-				'kind size status menu' auto
-				'bar bar bar bar' auto / auto auto minmax(0, 1fr) 40px;
+				'sel name name name menu' auto
+				'. kind size status menu' auto
+				'. bar bar bar bar' auto / 40px auto auto minmax(0, 1fr) 40px;
 			column-gap: 12px;
 			row-gap: 4px;
 		}

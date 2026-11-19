@@ -6,8 +6,9 @@ html[data-theme='dark'] {
 	--c-canvas-deep: #050607;
 	--c-surface: #0b0d10;
 	--c-surface-2: #111419;
-	--c-line: #16191e;
-	--c-line-strong: #23272e;
+	--c-line: #262b33;
+	/* Field and control edges: at least 3:1 on canvas, surface and surface-2. */
+	--c-line-strong: #5c636e;
 	--c-ink: #eceef1;
 	--c-ink-2: #8a919c;
 	--c-ink-3: #7a818c;

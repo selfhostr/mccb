@@ -5,6 +5,7 @@
 	import { davDetected } from '../../lib/logic/dav.ts';
 	import CalendarDays from '@lucide/svelte/icons/calendar-days';
 	import Check from '@lucide/svelte/icons/check';
+	import Copy from '@lucide/svelte/icons/copy';
 	import ContactRound from '@lucide/svelte/icons/contact-round';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -35,7 +36,10 @@
 	] as const;
 
 	let editing = $state.raw<Server | null>(null);
+	let duplicating = $state.raw<Server | null>(null);
 	let removing = $state.raw<Server | null>(null);
+	/** The mailboxes that go with a server when it is deleted. */
+	const boxesOf = (server: Server) => [...data.accounts.values()].filter((a) => a.server_id === server.id).length;
 	/** Tests run from this page: their details stay open until the page closes. The verdict itself is stored. */
 	const results = new SvelteMap<number, TestResult>();
 	const testing = new SvelteSet<number>();
@@ -44,12 +48,12 @@
 
 	/** The verdict next to the name: verified, failed, never checked, or checking now. */
 	function verdict(server: Server) {
-		if (testing.has(server.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running() };
+		if (testing.has(server.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running(), busy: true };
 		const result = results.get(server.id) ?? server.last_test_result;
-		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.settings_server_check_never() };
+		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.settings_server_check_never(), busy: false };
 		return passed(result)
-			? { tone: 'signal' as const, icon: CircleCheck, label: m.settings_server_check_ok() }
-			: { tone: 'warning' as const, icon: TriangleAlert, label: m.settings_server_check_failed() };
+			? { tone: 'signal' as const, icon: CircleCheck, label: m.settings_server_check_ok(), busy: false }
+			: { tone: 'warning' as const, icon: TriangleAlert, label: m.settings_server_check_failed(), busy: false };
 	}
 
 	export async function test(server: Server, quiet = false) {
@@ -102,7 +106,7 @@
 </script>
 
 {#if data.servers.length}
-	<ul class="m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="server-list">
+	<ul class="stagger m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="server-list">
 		{#each data.servers as server (server.id)}
 			{@const stored = server.last_test_result}
 			{@const result = results.get(server.id) ?? (stored && !passed(stored) ? stored : undefined)}
@@ -114,7 +118,7 @@
 					<div class="min-w-0 flex-1 basis-56">
 						<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 							<span>{server.name}</span>
-							<span data-testid="server-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
+							<span data-testid="server-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></span>
 						</p>
 						<p class="m-0 font-mono text-xs text-ink-2">
 							{prefs.host(server.imap_host)}:{server.imap_port}
@@ -128,11 +132,12 @@
 					{/if}
 					<div class="flex shrink-0 items-center">
 						<IconButton icon={FlaskConical} label={m.settings_server_test({ name: server.name })} loading={testing.has(server.id)} onclick={() => test(server)} />
+						<Button variant="ghost" icon={Pencil} aria-label={m.settings_server_edit_title({ name: server.name })} onclick={() => (editing = server)} data-testid="server-edit">{m.settings_server_edit()}</Button>
 						<Menu
 							label={m.settings_server_more({ name: server.name })}
 							icon={EllipsisVertical}
 							items={[
-								{ label: m.settings_server_edit(), icon: Pencil, onselect: () => (editing = server) },
+								{ label: m.settings_server_duplicate(), icon: Copy, onselect: () => (duplicating = server) },
 								{ label: m.settings_server_delete(), icon: Trash2, danger: true, onselect: () => (removing = server) }
 							]}
 						/>
@@ -165,7 +170,11 @@
 {#if editing}
 	<ServerDialog server={editing} onclose={() => (editing = null)} onsaved={(saved) => test(saved)} />
 {/if}
+{#if duplicating}
+	<ServerDialog duplicate={duplicating} onclose={() => (duplicating = null)} onsaved={(saved) => test(saved)} />
+{/if}
 {#if removing}
 	{@const target = removing}
-	<Confirm title={m.settings_server_delete_title()} text={m.settings_server_delete_text({ name: target.name })} confirm={m.settings_server_delete()} danger onconfirm={() => remove(target)} onclose={() => (removing = null)} />
+	{@const boxes = boxesOf(target)}
+	<Confirm title={m.settings_server_delete_title()} text={boxes ? m.settings_server_delete_text_boxes({ name: target.name, count: boxes }) : m.settings_server_delete_text({ name: target.name })} confirm={m.settings_server_delete()} danger onconfirm={() => remove(target)} onclose={() => (removing = null)} />
 {/if}

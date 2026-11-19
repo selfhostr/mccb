@@ -13,24 +13,31 @@ test.describe('duplicates', () => {
 		await expect(page.getByTestId('maintenance-tabs').getByRole('tab', { name: 'Duplicates' })).toHaveAttribute('aria-selected', 'true');
 		const row = alice(page);
 		await expect(row.getByTestId('dedup-state')).toContainText('Not analysed');
+		// The next step is on the row: analyse first.
+		await expect(row.getByTestId('dedup-next')).toHaveText('Analyse');
 
-		// Removal is not offered before an analysis.
+		// Removal is not offered before an analysis, and the menu says why (aria-disabled keeps it readable).
 		await row.getByRole('button', { name: 'More actions for alice@example.com' }).click();
-		await expect(page.getByRole('menuitem', { name: 'Remove duplicates' })).toBeDisabled();
-		await page.getByRole('menuitem', { name: 'Analyse' }).click();
+		const removal = page.getByRole('menuitem', { name: /^Remove duplicates/ });
+		await expect(removal).toHaveAttribute('aria-disabled', 'true');
+		await expect(removal).toContainText('Analyse this mailbox first');
+		await page.getByRole('menuitem', { name: 'Analyse', exact: true }).click();
 		await expect(row.getByTestId('dedup-state')).toContainText('Duplicates found');
+		await expect(row.getByTestId('dedup-next')).toHaveText('Remove duplicates');
 		await expect(row.getByTestId('dedup-line')).toContainText('653 duplicates in 433 groups');
 
 		await row.getByTestId('dedup-open').click();
 		const detail = page.getByTestId('dedup-detail');
 		await expect(detail.getByTestId('dedup-folders')).toContainText('Archive/2023');
-		await expect(detail.getByTestId('dedup-refused')).toContainText('UIDPLUS');
+		await expect(detail.getByTestId('dedup-refused')).toContainText('does not allow safe deletion');
 		await expect(detail.getByTestId('dedup-examples')).toContainText('Facture mars 2024');
 		await expect(detail.getByTestId('dedup-history')).toContainText('Analysis');
 
 		await detail.getByTestId('dedup-detail-remove').click();
 		const dialog = page.getByRole('dialog');
 		await expect(dialog.getByTestId('dedup-confirm-counts')).toContainText('604 messages, 37 events, 12 contacts in 1 mailboxes');
+		// The mailboxes that will be touched are named, with what is removed in each.
+		await expect(dialog.getByTestId('dedup-confirm-boxes')).toContainText('alice@example.com');
 		await expect(dialog).toContainText('PERMANENT');
 		await expect(dialog).toContainText('One copy of each item is always kept');
 		await dialog.getByTestId('dedup-confirm-go').click();
@@ -72,7 +79,7 @@ test.describe('duplicates at 390 px', () => {
 		await noOverflow(page);
 		const row = alice(page);
 		await row.getByRole('button', { name: 'More actions for alice@example.com' }).click();
-		await page.getByRole('menuitem', { name: 'Analyse' }).click();
+		await page.getByRole('menuitem', { name: 'Analyse', exact: true }).click();
 		await expect(row.getByTestId('dedup-state')).toContainText('Duplicates found');
 		await row.getByTestId('dedup-open').click();
 		await expect(page.getByTestId('dedup-detail').getByTestId('dedup-folders')).toBeVisible();

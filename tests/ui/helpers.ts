@@ -52,6 +52,9 @@ export async function ready(page: Page, url = '/') {
 	// The page says nothing while it is live: only "Reconnecting" shows, until the event stream is open.
 	await expect(page.locator('#main')).toBeVisible();
 	await expect(page.getByTestId('live')).toHaveCount(0);
+	// The header and the first rows rise by 6 px for a moment after each navigation (.is-entering):
+	// measuring a position or a size before the end of it reads a box mid-motion.
+	await expect(page.locator('#main')).not.toHaveClass(/is-entering/);
 }
 
 export async function noOverflow(page: Page) {
