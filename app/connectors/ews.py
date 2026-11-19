@@ -14,9 +14,10 @@ import httpx
 
 from . import exchange_base as xb
 from . import oauth, pim, registry
-from .base import (CALENDAR, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_RULES,
-                   CONTACTS, MAIL, TASKS, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem, Source,
-                   SourceFolder, SourceItem, Target, TargetSession, subject_of)
+from .base import (CALENDAR, CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY,
+                   CAP_MIRROR, CAP_PARALLEL, CAP_RULES, CAP_SET_FLAGS, CAP_UPDATE, CONTACTS, DELETE_SOFT, DELETE_TRASH,
+                   MAIL, MIRROR_DELETED_FLAG, TASKS, Changes, ConnectorError, FetchedItem, FolderPlan, Listing,
+                   OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
 
 NS_M = "http://schemas.microsoft.com/exchange/services/2006/messages"
 NS_T = "http://schemas.microsoft.com/exchange/services/2006/types"
@@ -48,6 +49,9 @@ CONFIG_CODES = {"ErrorNonExistentMailbox", "ErrorInvalidSmtpAddress", "ErrorMail
 BUSY_CODES = {"ErrorServerBusy", "ErrorTooManyObjectsOpened", "ErrorExceededConnectionCount"}
 FOLDER_CODES = {"ErrorFolderNotFound", "ErrorParentFolderNotFound"}
 GONE_CODES = {"ErrorItemNotFound", "ErrorInvalidIdNotAnItemId"}
+NOT_FOUND = "ErrorItemNotFound"  # the only answer the mirror takes as "deleted at the source"
+CONFLICT_CODES = {"ErrorIrresolvableConflict", "ErrorChangeKeyRequiredForWriteOperations", "ErrorStaleObject"}
+SYNC_MAX_PAGES = 10000  # 5 million changes: a sync state that never reaches the end is a broken server
 BAD_SYNC_CODES = {"ErrorInvalidSyncStateData", "ErrorSyncFolderNotFound"}
 DAY_NAMES = {"SU": "Sunday", "MO": "Monday", "TU": "Tuesday", "WE": "Wednesday", "TH": "Thursday", "FR": "Friday",
              "SA": "Saturday"}
@@ -527,6 +531,15 @@ def _categories(item) -> list[str]:
     return [c.text for c in box.findall(t_("String")) if c.text] if box is not None else []
 
 
+def all_day_date(dt: datetime, tz: str | None) -> date:
+    """Day of an all-day boundary. Exchange stores it as midnight in the zone of the event: without a known zone,
+    midnight UTC is not a safe guess (22:00Z is the next day in Paris), the NEAREST midnight UTC is (right for every
+    offset up to 12 hours). Rewriting the event then keeps its day instead of moving it back one day each time."""
+    if pim.zone(tz) is None and (dt.hour, dt.minute) != (0, 0):
+        return (dt + timedelta(hours=12)).date()
+    return pim.all_day_date(dt, tz)
+
+
 def event_from_xml(item, warnings: list[str], tz: str | None = None) -> pim.Event:
     tz = _tz_of_item(item) or tz
     start = pim.parse_utc(_text(item, "Start"))
@@ -538,7 +551,7 @@ def event_from_xml(item, warnings: list[str], tz: str | None = None) -> pim.Even
     begin: datetime | date = start
     finish: datetime | date = end
     if _bool(item, "IsAllDayEvent"):
-        begin, finish = pim.all_day_date(start, tz), pim.all_day_date(end, tz)
+        begin, finish = all_day_date(start, tz), all_day_date(end, tz)
         if finish <= begin:
             finish = begin + timedelta(days=1)
     ident = item.find(t_("ItemId"))
@@ -809,6 +822,11 @@ class EwsSource(Source):
         self.client: EwsClient | None = None
         self.include_archive = bool(config.get("include_archive"))
         self._paths: dict[str, list[str]] = {}
+        self._folders: list[SourceFolder] = []
+        # mirror: item id hash -> folder hash, for every folder listed in this run (see key_epoch)
+        self._seen: dict[str, str] = {}
+        self._indexed: set[str] = set()
+        self._index_problem: str | None = None
 
     def open(self) -> None:
         client = EwsClient(self.config, self.secrets)
@@ -886,6 +904,7 @@ class EwsSource(Source):
                     raise
         out.sort(key=lambda f: (f.kind, f.path))
         self._paths = {f.ref: f.path for f in out}
+        self._folders = out
         return out
 
     def _item_of(self, folder: SourceFolder, el) -> SourceItem | None:
@@ -897,7 +916,10 @@ class EwsSource(Source):
         size = _int(_text(el, "Size"))
         key = xb.item_key(folder.path, rid)
         if folder.kind != MAIL:
-            return SourceItem(key=key, date=when, size=size, ref=rid)
+            # the ChangeKey changes with every change of the item: the version of events, contacts and tasks
+            return SourceItem(key=key, date=when, size=size, ref=rid, version=ident.get("ChangeKey") or None)
+        # mail: no version. The MIME of a message does not change, and its ChangeKey changes with every flag (read,
+        # follow-up): taken as a version, each of them would replace the message. Flags are compared on their own.
         ext = _ext_values(el)
         flags = xb.flags_of(_bool(el, "IsRead"), _int(ext.get(int(TAG_FLAG, 0))) == xb.FLAG_FLAGGED,
                             _int(ext.get(int(TAG_VERB, 0))), _bool(el, "IsDraft"))
@@ -927,35 +949,198 @@ class EwsSource(Source):
                 return
             offset += len(got)
 
+    def _sync_page(self, folder: SourceFolder, state: str, shape: str) -> ET.Element:
+        """One answer of SyncFolderItems. Read only: the sync state is kept by the client, nothing changes at the
+        source."""
+        state_xml = f"<m:SyncState>{_x(state)}</m:SyncState>" if state else ""
+        return self._c().one(f"<m:SyncFolderItems><m:ItemShape>{shape}</m:ItemShape><m:SyncFolderId>"
+                             f"<t:FolderId Id={quoteattr(folder.ref)}/></m:SyncFolderId>{state_xml}"
+                             f"<m:MaxChangesReturned>{SYNC_PAGE}</m:MaxChangesReturned></m:SyncFolderItems>")
+
+    @staticmethod
+    def _change_id(change) -> str:
+        ident = change.find(t_("ItemId"))
+        return (ident.get("Id") or "") if ident is not None else ""
+
+    @staticmethod
+    def _set_read(it: SourceItem, read: bool) -> None:
+        it.flags = [f for f in it.flags if f != "\\Seen"]
+        if read:
+            it.flags.insert(0, "\\Seen")
+
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
-        """SyncFolderItems: created and changed items since the sync state. Deleted ones are not reported."""
-        c = self._c()
+        """SyncFolderItems: created and changed items since the sync state, read flag changes (the item is re-read
+        for a full line), deletions. A deletion is reported in `removed` (keys) only once GetItem answers
+        ErrorItemNotFound for it: never on the word of the sync state alone."""
         state = cursor or ""
         reset = not cursor
-        items: list[SourceItem] = []
+        items: dict[str, SourceItem] = {}
+        deleted: list[str] = []
+        reread: list[str] = []
+        pages = 0
         while True:
-            state_xml = f"<m:SyncState>{_x(state)}</m:SyncState>" if state else ""
+            pages += 1
             try:
-                msg = c.one(f"<m:SyncFolderItems><m:ItemShape>{_list_shape(folder.kind)}</m:ItemShape><m:SyncFolderId>"
-                            f"<t:FolderId Id={quoteattr(folder.ref)}/></m:SyncFolderId>{state_xml}"
-                            f"<m:MaxChangesReturned>{SYNC_PAGE}</m:MaxChangesReturned></m:SyncFolderItems>")
+                msg = self._sync_page(folder, state, _list_shape(folder.kind))
             except ConnectorError as e:
                 if state and any(code in str(e) for code in BAD_SYNC_CODES):
-                    state, reset, items = "", True, []  # the state is no longer valid: everything again
+                    state, reset, items, deleted, reread = "", True, {}, [], []  # no longer valid: everything again
                     continue
                 raise
             state = msg.findtext(m_("SyncState")) or state
             box = msg.find(m_("Changes"))
             for change in box if box is not None else []:
-                if _local(change.tag) not in ("Create", "Update"):
-                    continue  # a read flag change or a deletion: nothing to copy in one-way migration
-                for el in change:
-                    it = self._item_of(folder, el)
-                    if it is not None:
-                        items.append(it)
+                kind = _local(change.tag)
+                if kind in ("Create", "Update"):
+                    for el in change:
+                        it = self._item_of(folder, el)
+                        if it is not None:
+                            items[it.ref] = it
+                elif kind == "Delete":
+                    rid = self._change_id(change)
+                    items.pop(rid, None)
+                    deleted.append(rid)
+                elif kind == "ReadFlagChange":
+                    rid = self._change_id(change)
+                    if rid in items:
+                        self._set_read(items[rid], _bool(change, "IsRead"))
+                    else:
+                        reread.append(rid)
             if (msg.findtext(m_("IncludesLastItemInRange")) or "true").lower() == "true":
                 break
-        return Changes(items, state or None, reset=reset)
+            if pages >= SYNC_MAX_PAGES:
+                raise ConnectorError("EWS: SyncFolderItems never reached the end of the folder", ConnectorError.TRANSIENT)
+        reread = [r for r in dict.fromkeys(reread) if r and r not in items]
+        for i in range(0, len(reread), GET_BATCH):
+            for rid, el in self._c().get_items(reread[i:i + GET_BATCH], _list_shape(folder.kind)):
+                it = self._item_of(folder, el) if el is not None else None
+                if it is not None:
+                    items[rid] = it
+                else:
+                    deleted.append(rid)
+        gone = self.exists([r for r in dict.fromkeys(deleted) if r and r not in items])
+        out = Changes(list(items.values()), state or None, reset=reset)
+        # not a field of base.Changes yet: read with getattr(changes, "removed", []) by the mirror
+        out.removed = [xb.item_key(folder.path, rid) for rid, there in gone.items() if not there]  # type: ignore[attr-defined]
+        return out
+
+    # ---- mirror. READ ONLY: GetFolder, SyncFolderItems, GetItem. Never a write, a flag, a move at the source.
+    def exists(self, refs: list[str]) -> dict[str, bool]:
+        """{item id: still at the source}. False only when GetItem answers ErrorItemNotFound; any other error is
+        raised, so that nothing is deleted on a doubt."""
+        c = self._c()
+        out: dict[str, bool] = {}
+        refs = [r for r in dict.fromkeys(refs) if r]
+        for i in range(0, len(refs), GET_BATCH):
+            batch = refs[i:i + GET_BATCH]
+            id_xml = "".join(f"<t:ItemId Id={quoteattr(r)}/>" for r in batch)
+            resp = c.call("<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape>"
+                          f"<m:ItemIds>{id_xml}</m:ItemIds></m:GetItem>")
+            answers = c.messages(resp)
+            if len(answers) != len(batch):
+                raise ConnectorError("EWS: GetItem answered for another number of items", ConnectorError.TRANSIENT)
+            for rid, msg in zip(batch, answers):
+                if msg.get("ResponseClass") == "Error" and msg.findtext(m_("ResponseCode")) == NOT_FOUND:
+                    out[rid] = False
+                    continue
+                c.check(msg)
+                out[rid] = True
+        return out
+
+    def _total(self, folder: SourceFolder) -> int | None:
+        msg = self._c().one('<m:GetFolder><m:FolderShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>'
+                            '<t:FieldURI FieldURI="folder:TotalCount"/></t:AdditionalProperties></m:FolderShape>'
+                            f"<m:FolderIds><t:FolderId Id={quoteattr(folder.ref)}/></m:FolderIds></m:GetFolder>")
+        for el in msg.iter(t_("TotalCount")):
+            return _int(el.text)
+        return None
+
+    def _enumerate(self, folder: SourceFolder, shape: str) -> tuple[dict[str, ET.Element], str | None]:
+        """Every item of the folder by SyncFolderItems from an empty state ({id: element}, problem). Unlike FindItem,
+        it does not page by position: an item deleted or added meanwhile does not shift the next pages."""
+        found: dict[str, ET.Element] = {}
+        state, pages = "", 0
+        while True:
+            pages += 1
+            msg = self._sync_page(folder, state, shape)
+            box = msg.find(m_("Changes"))
+            for change in box if box is not None else []:
+                kind = _local(change.tag)
+                if kind in ("Create", "Update"):
+                    for el in change:
+                        ident = el.find(t_("ItemId"))
+                        if ident is not None and ident.get("Id"):
+                            found[ident.get("Id")] = el
+                elif kind == "Delete":
+                    found.pop(self._change_id(change), None)
+                elif kind == "ReadFlagChange" and self._change_id(change) in found:
+                    el = found[self._change_id(change)]
+                    for old in el.findall(t_("IsRead")):
+                        old.text = "true" if _bool(change, "IsRead") else "false"
+            if (msg.findtext(m_("IncludesLastItemInRange")) or "true").lower() == "true":
+                return found, None
+            new_state = msg.findtext(m_("SyncState")) or ""
+            if not new_state or new_state == state:
+                return found, "the sync state of the folder did not move on"
+            if pages >= SYNC_MAX_PAGES:
+                return found, "the listing of the folder never reached its end"
+            state = new_state
+
+    def _index(self, folder: SourceFolder, ids) -> None:
+        here = xb.folder_hash(folder.path)
+        for rid in ids:
+            self._seen[xb.id_hash(rid)] = here
+        self._indexed.add(folder.ref)
+
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """Every item, with its ChangeKey as version (events, contacts, tasks) and its flags (mail). Incomplete, so no
+        deletion in this folder, when the count of the folder changed during the listing or differs from it."""
+        before = self._total(folder)
+        found, problem = self._enumerate(folder, _list_shape(folder.kind))
+        after = self._total(folder)
+        items = [it for it in (self._item_of(folder, el) for el in found.values()) if it is not None]
+        self._index(folder, found)
+        if problem is None:
+            if before is None or after is None:
+                problem = "the folder does not say how many items it holds"
+            elif before != after:
+                problem = f"the folder changed during the listing ({before} then {after} items)"
+            elif len(items) != after:
+                problem = f"{len(items)} items listed, the folder holds {after}"
+        return Listing(items, complete=problem is None, epoch=xb.KEY_EPOCH, problem=problem)
+
+    def _index_all(self) -> None:
+        """Lists (ids only) every folder not listed yet in this run, once."""
+        if self._index_problem is not None:
+            return
+        try:
+            if not self._folders:
+                self.folders()
+            for f in self._folders:
+                if f.ref not in self._indexed:
+                    found, problem = self._enumerate(f, "<t:BaseShape>IdOnly</t:BaseShape>")
+                    if problem is not None:
+                        raise ConnectorError(f"{'/'.join(f.path)}: {problem}", ConnectorError.TRANSIENT)
+                    self._index(f, found)
+        except ConnectorError as e:
+            self._index_problem = str(e) or "error"
+            xb.log.warning("EWS mirror: cannot tell whether folders were renamed (%s): no deletion", e)
+
+    def key_epoch(self, key: str) -> str | None:
+        """KEY_EPOCH, unless the item of this key is now seen in ANOTHER folder of the source under the same id: its
+        folder was renamed or moved (Exchange keeps the item ids then, the keys change with the path). The key then
+        gets another epoch, and the mirror refuses the folder instead of deleting copies of items still there. Also
+        another epoch when the folders could not all be listed to tell."""
+        parts = xb.key_parts(key)
+        if parts is None:
+            return xb.KEY_EPOCH
+        self._index_all()
+        if self._index_problem is not None:
+            return f"{xb.KEY_EPOCH}:unverified"
+        where = self._seen.get(parts[1])
+        if where is not None and where != parts[0]:
+            return f"{xb.KEY_EPOCH}:renamed-or-moved:{where}"
+        return xb.KEY_EPOCH
 
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         if folder.kind == MAIL:
@@ -1002,7 +1187,7 @@ class EwsSource(Source):
         for occ in box.findall(t_("DeletedOccurrence")) if box is not None else []:
             when = pim.parse_utc(_text(occ, "Start"))
             if when is not None:
-                e.exdates.append(pim.all_day_date(when, e.tz) if e.all_day else when)
+                e.exdates.append(all_day_date(when, e.tz) if e.all_day else when)
         box = el.find(t_("ModifiedOccurrences"))
         ids = []
         originals: dict[str, datetime | None] = {}
@@ -1023,7 +1208,7 @@ class EwsSource(Source):
                 if original is None:
                     warnings.append("exception-without-original-start")
                     continue
-                o.recurrence_id = pim.all_day_date(original, e.tz) if e.all_day else original
+                o.recurrence_id = all_day_date(original, e.tz) if e.all_day else original
                 e.overrides.append(o)
         raw = pim.event_to_ics(e)
         return FetchedItem(raw=raw, subject=e.subject, warnings=warnings)
@@ -1047,6 +1232,7 @@ class EwsSession(TargetSession):
         self.time_zone = config.get("time_zone") or None
         self.client: EwsClient | None = None
         self._ids: dict[str, str] = {}  # folder path text -> id
+        self._ours: dict[str, str] = {}  # item id -> import id, as inventory() saw them
 
     @property
     def connected(self) -> bool:
@@ -1152,6 +1338,8 @@ class EwsSession(TargetSession):
         return None
 
     def _delete(self, rid: str) -> None:
+        """HardDelete: ONLY for an occurrence of a series being written, or that series itself when writing it failed.
+        The mirror deletes through _trash, never through this."""
         self._c().one('<m:DeleteItem DeleteType="HardDelete" SendMeetingCancellations="SendToNone" '
                       f'AffectedTaskOccurrences="AllOccurrences"><m:ItemIds><t:ItemId Id={quoteattr(rid)}/></m:ItemIds>'
                       "</m:DeleteItem>")
@@ -1174,7 +1362,7 @@ class EwsSession(TargetSession):
             when = pim.parse_utc(_text(el, "OriginalStart") or _text(el, "Start"))
             if when is None:
                 continue
-            same = (when == original) if isinstance(original, datetime) else pim.all_day_date(when, e.tz) == original
+            same = (when == original) if isinstance(original, datetime) else all_day_date(when, e.tz) == original
             if same:
                 ident = el.find(t_("ItemId"))
                 return ident.get("Id") if ident is not None else None
@@ -1251,13 +1439,193 @@ class EwsSession(TargetSession):
                        f"<t:Constant Value={value}/></t:Contains>")
         return self._restriction_ids(target, restriction, 1)[1]
 
+    # -- mirror: only items carrying OUR MccbImportId, checked on the server right before any change
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """{import id: [RemoteItem(item id, flags, ChangeKey)]} of the items of the folder written by us under this
+        namespace. Read only. Raises (transient) when the folder changed during the paging: an item skipped by the
+        offsets would be taken as missing and written twice."""
+        kind = xb.parse_spec(folder)[0]
+        target = self._folder_xml(folder)
+        prefix = f"<{namespace}-"
+        props = IMPORT_URI
+        if kind == MAIL:
+            props += ('<t:FieldURI FieldURI="message:IsRead"/><t:FieldURI FieldURI="item:IsDraft"/>'
+                      + _prop_uri(TAG_FLAG, "Integer") + _prop_uri(TAG_VERB, "Integer"))
+        restriction = (f'<t:Contains ContainmentMode="Prefixed" ContainmentComparison="IgnoreCase">{IMPORT_URI}'
+                       f"<t:Constant Value={quoteattr(prefix)}/></t:Contains>")
+        out: dict[str, list[RemoteItem]] = {}
+        offset, total = 0, None
+        while True:
+            msg = self._c().one(
+                f'<m:FindItem Traversal="Shallow"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>'
+                f"{props}</t:AdditionalProperties></m:ItemShape>"
+                f'<m:IndexedPageItemView MaxEntriesReturned="{PAGE}" Offset="{offset}" BasePoint="Beginning"/>'
+                f"<m:Restriction>{restriction}</m:Restriction><m:ParentFolderIds>{target}</m:ParentFolderIds></m:FindItem>")
+            root = msg.find(m_("RootFolder"))
+            if root is None:
+                break
+            seen_total = _int(root.get("TotalItemsInView"))
+            if total is not None and seen_total != total:
+                raise ConnectorError("EWS: the folder changed while its items were listed", ConnectorError.TRANSIENT)
+            total = seen_total
+            box = root.find(t_("Items"))
+            got = list(box) if box is not None else []
+            for el in got:
+                ident = el.find(t_("ItemId"))
+                value = _ext_values(el).get(xb.IMPORT_PROP) or ""
+                if ident is None or not ident.get("Id") or not value.startswith(prefix):  # the server ignores case
+                    continue
+                flags: list[str] = []
+                if kind == MAIL:
+                    ext = _ext_values(el)
+                    flags = xb.flags_of(_bool(el, "IsRead"), _int(ext.get(int(TAG_FLAG, 0))) == xb.FLAG_FLAGGED,
+                                        _int(ext.get(int(TAG_VERB, 0))), _bool(el, "IsDraft"))
+                out.setdefault(value, []).append(RemoteItem(ident.get("Id"), flags, ident.get("ChangeKey") or None))
+                self._ours[ident.get("Id")] = value
+            if root.get("IncludesLastItemInRange", "true").lower() == "true" or not got:
+                break
+            offset += len(got)
+        return out
+
+    def _owned(self, refs: list[str]) -> dict[str, ET.Element | None]:
+        """{item id: the item, None when already gone}, read from the server right now. Raises (rejected), before any
+        change, when one of them does not carry our MccbImportId, or another one than inventory() saw."""
+        shape = ("<t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>" + IMPORT_URI
+                 + '<t:FieldURI FieldURI="item:Categories"/></t:AdditionalProperties>')
+        out: dict[str, ET.Element | None] = {}
+        refs = [r for r in dict.fromkeys(refs) if r]
+        for i in range(0, len(refs), GET_BATCH):
+            for rid, el in self._c().get_items(refs[i:i + GET_BATCH], shape):
+                if el is not None:
+                    value = _ext_values(el).get(xb.IMPORT_PROP) or ""
+                    if not (value.startswith("<") and value.endswith(">")):
+                        raise ConnectorError(f"EWS: item {rid[:60]} was not written by mccb: left alone",
+                                             ConnectorError.REJECTED)
+                    known = self._ours.get(rid)
+                    if known is not None and known != value:
+                        raise ConnectorError(f"EWS: item {rid[:60]} now carries another import id: left alone",
+                                             ConnectorError.REJECTED)
+                out[rid] = el
+        return out
+
+    def _update_items(self, changes: list[tuple[ET.Element, str]]) -> None:
+        """UpdateItem of our items: AutoResolve with the ChangeKey just read (a change made meanwhile on the target is
+        not overwritten blindly), and never a mail to attendees."""
+        for i in range(0, len(changes), GET_BATCH):
+            batch = changes[i:i + GET_BATCH]
+            parts = []
+            for el, updates in batch:
+                ident = el.find(t_("ItemId"))
+                ck = f" ChangeKey={quoteattr(ident.get('ChangeKey'))}" if ident.get("ChangeKey") else ""
+                parts.append(f"<t:ItemChange><t:ItemId Id={quoteattr(ident.get('Id'))}{ck}/>"
+                             f"<t:Updates>{updates}</t:Updates></t:ItemChange>")
+            c = self._c()
+            resp = c.call('<m:UpdateItem MessageDisposition="SaveOnly" ConflictResolution="AutoResolve" '
+                          'SendMeetingInvitationsOrCancellations="SendToNone"><m:ItemChanges>' + "".join(parts)
+                          + "</m:ItemChanges></m:UpdateItem>")
+            for msg in c.messages(resp):
+                code = msg.findtext(m_("ResponseCode")) or ""
+                if msg.get("ResponseClass") == "Error" and code in CONFLICT_CODES:
+                    raise ConnectorError(f"EWS {code}: changed on the target meanwhile, tried again later",
+                                         ConnectorError.TRANSIENT)
+                if msg.get("ResponseClass") == "Error" and code in GONE_CODES:
+                    continue
+                c.check(msg)
+
+    def _trash(self, refs: list[str]) -> None:
+        """To the Deleted Items of the target (recoverable there), never HardDelete; no cancellation is sent for an
+        event, a series goes with all its occurrences."""
+        c = self._c()
+        for i in range(0, len(refs), GET_BATCH):
+            batch = refs[i:i + GET_BATCH]
+            id_xml = "".join(f"<t:ItemId Id={quoteattr(r)}/>" for r in batch)
+            resp = c.call('<m:DeleteItem DeleteType="MoveToDeletedItems" SendMeetingCancellations="SendToNone" '
+                          f'AffectedTaskOccurrences="AllOccurrences"><m:ItemIds>{id_xml}</m:ItemIds></m:DeleteItem>')
+            for msg in c.messages(resp):
+                if msg.get("ResponseClass") == "Error" and msg.findtext(m_("ResponseCode")) in GONE_CODES:
+                    continue  # already gone: not an error
+                c.check(msg)
+            for r in batch:
+                self._ours.pop(r, None)
+
+    def delete_mode(self, folder: str) -> str:
+        """Moved to Deleted Items; in Deleted Items itself, only marked (deleting there would be final)."""
+        return DELETE_SOFT if xb.parse_spec(folder)[1] == "deleteditems" else DELETE_TRASH
+
+    def delete_many(self, folder: str, refs: list[str]) -> dict[str, str]:
+        """delete() for many items at once (batches of GET_BATCH): every one is checked before any is touched."""
+        mode = self.delete_mode(folder)
+        owned = self._owned(refs)
+        present = [(r, el) for r, el in owned.items() if el is not None]
+        if xb.parse_spec(folder)[0] == MAIL:
+            marks = []
+            for _r, el in present:
+                cats = _categories(el)
+                if MIRROR_DELETED_FLAG not in cats:
+                    marks.append((el, '<t:SetItemField><t:FieldURI FieldURI="item:Categories"/>'
+                                      f"<t:{_local(el.tag)}>{_categories_xml(cats + [MIRROR_DELETED_FLAG])}"
+                                      f"</t:{_local(el.tag)}></t:SetItemField>"))
+            self._update_items(marks)
+        if mode == DELETE_TRASH:
+            self._trash([r for r, _el in present])
+        return {r: mode for r in owned}
+
+    def delete(self, folder: str, ref: str) -> str:
+        return self.delete_many(folder, [ref])[ref]
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        """\\Seen (IsRead), \\Flagged (follow-up flag), \\Answered and $Forwarded (last verb). Other keywords have no
+        place in Exchange and are left out."""
+        el = self._owned([ref])[ref]
+        if el is None:
+            xb.log.info("EWS mirror: %s already gone, flags not changed", ref[:60])
+            return
+        tag = _local(el.tag)
+        plus, minus = {f.lower() for f in add}, {f.lower() for f in remove} - {f.lower() for f in add}
+
+        def put(uri: str, value) -> str:
+            return f"<t:SetItemField>{uri}<t:{tag}>{_ext(uri, value)}</t:{tag}></t:SetItemField>"
+
+        flag_uri, verb_uri = _prop_uri(TAG_FLAG, "Integer"), _prop_uri(TAG_VERB, "Integer")
+        updates = []
+        if "\\seen" in plus or "\\seen" in minus:
+            read = "true" if "\\seen" in plus else "false"
+            updates.append(f'<t:SetItemField><t:FieldURI FieldURI="message:IsRead"/><t:{tag}><t:IsRead>{read}'
+                           f"</t:IsRead></t:{tag}></t:SetItemField>")
+        if "\\flagged" in plus:
+            updates.append(put(flag_uri, xb.FLAG_FLAGGED))
+        elif "\\flagged" in minus:
+            updates.append(f"<t:DeleteItemField>{flag_uri}</t:DeleteItemField>")
+        if "\\answered" in plus:
+            updates.append(put(verb_uri, xb.VERB_REPLY))
+        elif "$forwarded" in plus:
+            updates.append(put(verb_uri, xb.VERB_FORWARD))
+        elif {"\\answered", "$forwarded"} & minus:
+            updates.append(f"<t:DeleteItemField>{verb_uri}</t:DeleteItemField>")
+        if updates:
+            self._update_items([(el, "".join(updates))])
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        """Exchange cannot replace the content of an item in place (the MIME of a mail is fixed, a series carries its
+        exceptions): the old copy goes to Deleted Items (no cancellation sent, a series with all its occurrences),
+        then the new one is written, a series again with its exceptions."""
+        el = self._owned([ref])[ref]
+        if el is not None:
+            if (_ext_values(el).get(xb.IMPORT_PROP) or "") != item.import_id:
+                raise ConnectorError(f"EWS: item {ref[:60]} is not the copy of {item.import_id}: left alone",
+                                     ConnectorError.REJECTED)
+            self.delete(folder, ref)
+        return self.put(folder, item)
+
     def info(self) -> dict:
         return {"protocol": "EWS", "mailbox": self.config.get("mailbox") or self.config.get("login")}
 
 
 class EwsTarget(Target):
     # no CAP_READBACK: Exchange rewrites the MIME it stores, a re-read never hashes the same
-    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_PARALLEL})
+    # mirror: no CAP_MOVE (a mail moved at the source is deleted from the old folder and copied to the new one)
+    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_INVENTORY, CAP_DELETE,
+                              CAP_UPDATE, CAP_SET_FLAGS})
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
@@ -1300,7 +1668,8 @@ registry.register(registry.ConnectorSpec(
     kind="exchange_ews", label="Exchange on premises (EWS)",
     description="Exchange Server 2010 SP2 to 2019 through EWS. Tested against simulated servers, not real Exchange.",
     source=registry.Role(EwsSource, _ITEMS,
-                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_RULES}),
+                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_RULES,
+                                    CAP_MIRROR}),
                          _SOURCE_FIELDS, identity),
     target=registry.Role(EwsTarget, _ITEMS, EwsTarget.capabilities, _TARGET_FIELDS, identity),
 ))
