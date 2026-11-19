@@ -14,12 +14,18 @@ test.describe('repair', () => {
 		await page.getByTestId('repair-box-password').fill('secret');
 		await page.getByTestId('repair-box-save').click();
 
+		// The mailbox is tested right after it is saved: the dialog closes when the connection works.
+		await expect(page.getByRole('dialog')).toHaveCount(0);
 		const row = page.locator('[data-repair-box="carol@example.com"]');
 		await expect(row.getByTestId('repair-conn-state')).toHaveAttribute('data-conn', 'ok');
 		await expect(row.getByTestId('repair-state')).toContainText('Not analysed');
 
+		// Repair is off until an analysis found damage, and the menu says why.
 		await row.getByRole('button', { name: 'More actions for carol@example.com' }).click();
-		await page.getByRole('menuitem', { name: 'Analyse' }).click();
+		const repairItem = page.getByRole('menuitem', { name: /^Repair/ });
+		await expect(repairItem).toHaveAttribute('aria-disabled', 'true');
+		await expect(repairItem).toContainText('Run an analysis that finds damaged messages first');
+		await page.getByRole('menuitem', { name: 'Analyse', exact: true }).click();
 		await expect(row.getByTestId('repair-state')).toContainText('Damaged');
 		await expect(row.getByTestId('repair-line')).toContainText('Damaged: 14 of 420 messages');
 
@@ -32,9 +38,40 @@ test.describe('repair', () => {
 		await page.getByRole('button', { name: 'Close' }).last().click();
 
 		await detail.getByTestId('repair-detail-repair').click();
-		await expect(page.getByRole('dialog')).toContainText('_originaux_avant_reparation');
-		await page.getByRole('dialog').getByRole('button', { name: 'Repair' }).click();
+		// The confirmation says how many messages in how many mailboxes, and where the originals go.
+		const confirm = page.getByRole('dialog');
+		await expect(confirm).toContainText('Repair these mailboxes?');
+		await expect(confirm.getByTestId('repair-confirm-counts')).toHaveText('14 messages in 1 mailboxes');
+		await expect(confirm).toContainText('_originaux_avant_reparation');
+		await confirm.getByRole('button', { name: 'Repair', exact: true }).click();
 		await expect(row.getByTestId('repair-state')).toContainText('Repaired');
+	});
+
+	test('the next step is on the row itself, and a mailbox leaves the list without being deleted', async ({ page }) => {
+		await ready(page, '/repair');
+		// Nothing yet: the page offers to add a mailbox, not a button in the header.
+		await expect(page.getByTestId('repair-add')).toHaveCount(1);
+		await page.getByTestId('repair-add').click();
+		await page.getByTestId('repair-box-email').fill('carol@example.com');
+		await page.getByTestId('repair-box-password').fill('secret');
+		await page.getByTestId('repair-box-save').click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+
+		const row = page.locator('[data-repair-box="carol@example.com"]');
+		await expect(row.getByTestId('repair-next')).toHaveText('Analyse');
+		await row.getByTestId('repair-next').click();
+		await expect(row.getByTestId('repair-state')).toContainText('Damaged');
+		await expect(row.getByTestId('repair-next')).toHaveText('Repair');
+
+		// "Remove from list" says that nothing changes in the mailbox itself.
+		await row.getByRole('button', { name: 'More actions for carol@example.com' }).click();
+		await page.getByRole('menuitem', { name: 'Remove from list' }).click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Remove this mailbox from the list?');
+		await expect(dialog).toContainText('Nothing changes in the mailbox itself');
+		await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
+		await expect(page.getByTestId('toast').filter({ hasText: 'carol@example.com removed from the list' })).toBeVisible();
+		await expect(row).toHaveCount(0);
 	});
 
 	test('a wrong password shows at a glance, and the selection runs in bulk', async ({ page }) => {
@@ -45,11 +82,21 @@ test.describe('repair', () => {
 			await page.getByTestId('repair-box-password').fill('x');
 			await page.getByTestId('repair-box-save').click();
 			await expect(page.locator(`[data-repair-box="${email}"]`)).toBeVisible();
+			if (email.startsWith('bad')) {
+				// A refused login keeps the dialog open, with the reason: it has to be closed by hand.
+				const dialog = page.getByRole('dialog');
+				await expect(dialog).toContainText('Mailbox saved, but the connection failed');
+				await expect(dialog).toContainText('LOGIN failed');
+				await dialog.getByRole('button', { name: 'Close' }).last().click();
+			}
+			await expect(page.getByRole('dialog')).toHaveCount(0);
 		}
 		await expect(page.locator('[data-repair-box="bad@example.com"]').getByTestId('repair-conn-state')).toHaveAttribute('data-conn', 'failed');
 		await expect(page.getByTestId('repair-conn')).toContainText('Failed: 1');
 
 		await page.getByRole('checkbox', { name: 'Select all' }).check();
+		// Nothing was analysed yet, so nothing can be repaired in bulk.
+		await expect(page.getByTestId('bulk-repair')).toBeDisabled();
 		await page.getByTestId('bulk-scan').click();
 		await expect(page.locator('[data-repair-box="clean@example.com"]').getByTestId('repair-state')).toContainText('Intact');
 	});

@@ -125,7 +125,7 @@ test('starting an import runs a job', async ({ page }) => {
 	await open(page);
 	const email = 'ines.costa@example.com';
 	await row(page, email).getByRole('checkbox').check();
-	await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+	await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 	await page.getByTestId('import-confirm').click();
 	await expect(row(page, email)).toContainText(/Queued|Importing/);
 });

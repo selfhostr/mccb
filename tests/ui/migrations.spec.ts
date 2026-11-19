@@ -31,7 +31,7 @@ test.describe('migrations', () => {
 		await mock(page.request, 'reset');
 		await ready(page);
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await expect(page.getByTestId('toast').first()).toContainText('1');
 		await expect(row(page, 'alice@example.com').locator('[data-job-link]')).toBeVisible();
@@ -44,7 +44,7 @@ test.describe('migrations', () => {
 		const alice = row(page, 'alice@example.com');
 		await alice.evaluate((el) => el.setAttribute('data-marker', 'same-node'));
 		const settings = await openMailbox(page, 'alice@example.com');
-		const select = settings.locator('select');
+		const select = settings.getByRole('combobox', { name: 'PST file for alice@example.com' });
 		await select.evaluate((el) => el.setAttribute('data-marker', 'same-select'));
 		await select.focus();
 
@@ -76,7 +76,7 @@ test.describe('migrations', () => {
 		await expect.poll(emails).toEqual(['alice@example.com', 'bob@example.com', 'carol@example.com', 'dave@example.com', 'erin@example.org', 'frank@example.org']);
 
 		await row(page, 'carol@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await expect.poll(async () => (await emails())[0]).toBe('carol@example.com');
 
@@ -105,7 +105,7 @@ test.describe('migrations', () => {
 		await mock(page.request, 'reset', { hold: true });
 		await ready(page);
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 
 		await expect(page.getByTestId('chip-all')).toContainText('6');
@@ -121,13 +121,23 @@ test.describe('migrations', () => {
 		await page.getByTestId('chip-all').click();
 		await expect(rows(page)).toHaveCount(6);
 
-		// The narrower states wait behind one button, and show by themselves when in use.
+		// The mailboxes without a source have a chip of their own: nothing to open first.
 		await expect(page.getByTestId('filter-status')).toHaveCount(0);
-		await page.getByTestId('filter-more').click();
-		await page.getByTestId('filter-status').selectOption('no_pst');
+		await expect(page.getByTestId('chip-no_pst')).toContainText('3');
+		await page.getByTestId('chip-no_pst').click();
 		await expect(page).toHaveURL(/status=no_pst/);
+		await expect(page.getByTestId('chip-no_pst')).toHaveAttribute('aria-pressed', 'true');
+		await expect(rows(page)).toHaveCount(3);
 		await page.reload();
+		await expect(page.getByTestId('chip-no_pst')).toHaveAttribute('aria-pressed', 'true');
+		await expect(rows(page)).toHaveCount(3);
+
+		// The narrower states (not tested, tested ok...) wait behind one button, on the same filter.
+		await page.getByTestId('filter-more').click();
 		await expect(page.getByTestId('filter-status')).toHaveValue('no_pst');
+		await page.getByTestId('filter-status').selectOption('untested');
+		await expect(page).toHaveURL(/status=untested/);
+		await expect(page.getByTestId('chip-no_pst')).toHaveAttribute('aria-pressed', 'false');
 	});
 
 	test('the sentence says how far it is, and the bar moves with it', async ({ page }) => {
@@ -135,7 +145,7 @@ test.describe('migrations', () => {
 		await ready(page);
 		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done.');
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 
 		const progress = { mail: { done: 300, total: 900, errors: 0 }, calendar: { done: 0, total: 0, errors: 0 }, contacts: { done: 0, total: 0, errors: 0 } };
@@ -192,7 +202,8 @@ test.describe('migrations', () => {
 		await rowAction(page, 'bob@example.com', 'Test connection');
 		await expect(bob.getByTestId('test-state')).toContainText('Testing');
 		await bob.getByRole('button', { name: 'More actions for bob@example.com' }).click();
-		await expect(page.getByRole('menuitem', { name: 'Testing' })).toBeDisabled();
+		// aria-disabled, not disabled: the item stays reachable.
+		await expect(page.getByRole('menuitem', { name: 'Testing' })).toHaveAttribute('aria-disabled', 'true');
 		await page.keyboard.press('Escape');
 		const settings = await openMailbox(page, 'bob@example.com');
 		await expect(settings.getByTestId('account-test')).toBeDisabled();
@@ -219,7 +230,7 @@ test.describe('migrations', () => {
 		await mock(page.request, 'reset', { jobTick: 400 });
 		await ready(page);
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await row(page, 'alice@example.com').locator('[data-job-link]').click();
 		await expect(page).toHaveURL(/\/jobs\/1/);
@@ -244,44 +255,191 @@ test.describe('migrations', () => {
 		await expect(page).toHaveURL(/\/$/);
 	});
 
-	test('a new migration is one form, and its panel says what is missing before the start', async ({ page }) => {
+	test('a new migration is one form between two servers, and its panel is ready to start', async ({ page }) => {
 		await ready(page);
 		await page.getByRole('button', { name: 'New migration', exact: true }).click();
-		let dialog = page.getByRole('dialog');
-		await expect(dialog.getByText('From', { exact: true })).toBeVisible();
-		await expect(dialog.getByText('To', { exact: true })).toBeVisible();
+		const dialog = page.getByRole('dialog');
+		// Servers only: a file is migrated from the Files tab.
+		await expect(dialog.getByRole('radiogroup', { name: 'From' })).toBeVisible();
+		await expect(dialog.getByRole('radiogroup', { name: 'Destination server' })).toBeVisible();
+		await expect(dialog.getByTestId('new-source')).toHaveCount(0);
+		await dialog.getByRole('textbox', { name: 'Source login' }).fill('new.one@legacy.example');
+		await dialog.getByLabel('Source password').fill('old-pw');
 		await dialog.getByRole('textbox', { name: 'Destination address' }).fill('new.one@example.com');
-		await dialog.locator('input[type=password]').fill('pw');
+		await dialog.getByLabel('Destination password').fill('pw');
 		await dialog.getByTestId('new-submit').click();
 		await expect(dialog).toHaveCount(0);
 
-		// Saving opens the panel of the new mailbox: no source yet, so the start waits for one.
+		// One mailbox goes on in its own panel, with its source already set from the form.
 		const panel = page.getByTestId('job-panel');
 		await expect(panel).toContainText('new.one@example.com');
-		await expect(panel.getByTestId('account-start')).toBeDisabled();
-		await expect(panel.getByTestId('start-hint')).toHaveText('Choose where the mail comes from first');
-		await expect(row(page, 'new.one@example.com')).toContainText('No source yet');
-
-		const select = panel.getByRole('combobox', { name: /^PST file for/ });
-		await select.selectOption({ index: 1 });
+		await expect(panel.getByTestId('source-type')).toHaveValue('server-1');
 		await expect(panel.getByTestId('account-start')).toBeEnabled();
+		await expect(row(page, 'new.one@example.com')).not.toContainText('No source yet');
+
 		await panel.getByTestId('account-start').click();
-		dialog = page.getByRole('dialog');
-		await expect(dialog).toContainText('Ready to start: 1');
-		await dialog.getByTestId('import-confirm').click();
+		const confirm = page.getByRole('dialog');
+		await expect(confirm).toContainText('Ready to start: 1');
+		// The batch name and the mode are in the dialog itself, not behind a disclosure.
+		await confirm.getByTestId('import-confirm').click();
 		await expect(page.getByTestId('toast').filter({ hasText: 'Jobs queued: 1' })).toBeVisible();
 		await expect(panel.getByTestId('account-start')).toHaveCount(0);
 	});
 
-	test('a new migration can take a file already on the server', async ({ page }) => {
+	test('several new mailboxes come back selected, ready to be tested and started', async ({ page }) => {
 		await ready(page);
 		await page.getByRole('button', { name: 'New migration', exact: true }).click();
 		const dialog = page.getByRole('dialog');
-		await dialog.getByTestId('new-source').selectOption({ index: 1 });
-		await dialog.getByRole('textbox', { name: 'Destination address' }).fill('with.file@example.com');
-		await dialog.locator('input[type=password]').fill('pw');
+		await dialog.getByTestId('new-row-add').click();
+		const rowsIn = dialog.getByTestId('new-row');
+		await expect(rowsIn).toHaveCount(2);
+		for (const [i, name] of ['one', 'two'].entries()) {
+			const line = rowsIn.nth(i);
+			await line.getByRole('textbox', { name: 'Source login' }).fill(`${name}@legacy.example`);
+			await line.getByLabel('Source password').fill('old-pw');
+			await line.getByRole('textbox', { name: 'Destination address' }).fill(`${name}.new@example.com`);
+			await line.getByLabel('Destination password').fill('pw');
+		}
+		await expect(dialog.getByTestId('new-submit')).toHaveText('Add 2 mailboxes');
 		await dialog.getByTestId('new-submit').click();
-		await expect(page.getByTestId('job-panel').getByTestId('account-start')).toBeEnabled();
+		await expect(dialog).toHaveCount(0);
+		await expect(page.getByTestId('toast').filter({ hasText: '2 mailboxes added and selected' })).toBeVisible();
+
+		// No panel opens: the new mailboxes are the selection, and the bar offers the next step.
+		await expect(page.getByTestId('job-panel')).toHaveCount(0);
+		await expect(page.getByTestId('selection-count')).toContainText('2');
+		await expect(row(page, 'one.new@example.com').getByRole('checkbox')).toBeChecked();
+		await expect(row(page, 'two.new@example.com').getByRole('checkbox')).toBeChecked();
+		await expect(page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true })).toBeEnabled();
+	});
+
+	test('a mailbox without a source says so, and starts once a file is chosen', async ({ page }) => {
+		await ready(page);
+		await expect(row(page, 'dave@example.com')).toContainText('No source yet');
+		const settings = await openMailbox(page, 'dave@example.com');
+		const panel = page.getByTestId('job-panel');
+		await expect(panel.getByTestId('account-start')).toBeDisabled();
+		await expect(panel.getByTestId('start-hint')).toHaveText('Choose where the mail comes from first');
+
+		await settings.getByRole('combobox', { name: /^PST file for/ }).selectOption({ index: 1 });
+		await expect(panel.getByTestId('account-start')).toBeEnabled();
+		await panel.getByTestId('account-start').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Ready to start: 1');
+		await dialog.getByTestId('import-confirm').click();
+		await expect(page.getByTestId('toast').filter({ hasText: 'Jobs queued: 1' })).toBeVisible();
+	});
+
+	test('the selection bar edits, deletes and runs jobs for the selection', async ({ page }) => {
+		await mock(page.request, 'reset', { hold: true });
+		await ready(page);
+		const bar = page.getByTestId('selection-bar');
+		await row(page, 'alice@example.com').getByRole('checkbox').check();
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+		await expect(bar.getByTestId('bulk-edit')).toBeEnabled();
+		await expect(bar.getByTestId('bulk-delete')).toBeEnabled();
+		// No job yet: nothing to pause, resume, stop or retry.
+		await expect(bar.getByRole('button', { name: 'Pause' })).toHaveCount(0);
+		await expect(bar.getByRole('button', { name: 'Stop' })).toHaveCount(0);
+
+		await bar.getByRole('button', { name: 'Start', exact: true }).click();
+		await page.getByTestId('import-confirm').click();
+		await expect(page.getByTestId('toast').first()).toContainText('2');
+		await row(page, 'alice@example.com').getByRole('checkbox').check();
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+
+		// Both jobs are queued: they can be paused or stopped, and only a paused one resumed.
+		await expect(bar.getByTestId('bulk-pause')).toBeVisible();
+		await expect(bar.getByTestId('bulk-stop')).toBeVisible();
+		await expect(bar.getByTestId('bulk-resume')).toHaveCount(0);
+		await bar.getByTestId('bulk-pause').click();
+		await expect(page.getByTestId('toast').filter({ hasText: '2 jobs updated' })).toBeVisible();
+		await expect(bar.getByTestId('bulk-resume')).toBeVisible();
+		await expect(bar.getByTestId('bulk-pause')).toHaveCount(0);
+
+		// Stopping asks first.
+		await bar.getByTestId('bulk-stop').click();
+		const confirm = page.getByRole('dialog');
+		await expect(confirm).toContainText('Stop the selected jobs');
+		await confirm.getByRole('button', { name: 'Stop', exact: true }).click();
+		await expect(confirm).toHaveCount(0);
+		await expect(bar.getByTestId('bulk-retry-errors')).toBeVisible();
+		await expect(bar.getByTestId('bulk-stop')).toHaveCount(0);
+
+		// Deleting asks first too, and says how many.
+		await bar.getByTestId('bulk-delete').click();
+		const del = page.getByRole('dialog');
+		await expect(del).toContainText('Delete the 2 selected mailboxes?');
+		await del.getByRole('button', { name: 'Delete 2' }).click();
+		await expect(page.getByTestId('toast').filter({ hasText: '2 mailboxes deleted' })).toBeVisible();
+		await expect(rows(page)).toHaveCount(4);
+		await expect(page.getByTestId('selection-bar')).toHaveCount(0);
+	});
+
+	/** alice and bob can start, dave has no source, and alice's last connection test was refused. */
+	async function openMixedImport(page: import('./helpers').Page) {
+		await ready(page);
+		const alice = await (await page.request.get('/api/accounts/1')).json();
+		await mock(page.request, 'event', { kind: 'account', data: { ...alice, status: 'auth_failed' } });
+		await expect(row(page, 'alice@example.com')).toContainText('Login refused');
+		for (const email of ['alice@example.com', 'bob@example.com', 'dave@example.com']) await row(page, email).getByRole('checkbox').check();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Start the migration');
+		return dialog;
+	}
+
+	test('the start says what will not start: no source, and a connection refused at the last test', async ({ page }) => {
+		const dialog = await openMixedImport(page);
+		await expect(dialog).toContainText('Ready to start: 1');
+		await expect(dialog).toContainText('No source set, will not start: 1');
+		await expect(dialog.getByTestId('import-pst-list')).toContainText('dave@example.com');
+		await expect(dialog).toContainText('Connection refused at the last test, will not start: 1');
+		await expect(dialog.getByTestId('import-refused-list')).toContainText('alice@example.com');
+		// The batch name and the mode are not behind a disclosure any more.
+		await expect(dialog.getByTestId('import-batch')).toBeVisible();
+		await expect(dialog.getByTestId('import-options')).toHaveCount(0);
+
+		// Keep only the ready ones: the other mailboxes leave the selection and the list.
+		await dialog.getByTestId('import-keep-ready').click();
+		await expect(dialog).not.toContainText('will not start');
+		await dialog.getByTestId('import-confirm').click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		expect((await mock(page.request, 'state')).runCalls).toEqual([[2]]);
+		await expect(page.getByTestId('selection-count')).toHaveCount(0);
+	});
+
+	test('a refused connection can be started anyway, from a checkbox', async ({ page }) => {
+		const dialog = await openMixedImport(page);
+		const include = dialog.getByTestId('import-refused-include');
+		await expect(include).not.toBeChecked();
+		await expect(dialog).toContainText('Ready to start: 1');
+		await include.check();
+		await expect(dialog).toContainText('Ready to start: 2');
+		// Two mailboxes make a batch by default, named after the day.
+		await expect(dialog.getByTestId('import-batch')).toHaveValue(/^Migration of \d{2}\/\d{2}$/);
+		await dialog.getByTestId('import-confirm').click();
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		const state = await mock(page.request, 'state');
+		expect([...state.runCalls[0]].sort()).toEqual([1, 2]);
+	});
+
+	test('editing several mailboxes at once changes only what is filled in', async ({ page }) => {
+		await ready(page);
+		await row(page, 'alice@example.com').getByRole('checkbox').check();
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+		await page.getByTestId('bulk-edit').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog).toContainText('Edit 2 mailboxes');
+		// Nothing is filled in: nothing to apply.
+		await expect(dialog.getByRole('button', { name: 'Apply to 2' })).toBeDisabled();
+		await dialog.getByLabel('Calendar').selectOption('off');
+		await dialog.getByRole('button', { name: 'Apply to 2' }).click();
+		await expect(page.getByTestId('toast').filter({ hasText: '2 mailboxes changed' })).toBeVisible();
+		await expect(dialog).toHaveCount(0);
+		const { accounts } = await mock(page.request, 'state');
+		const calendar = (id: number) => accounts.find((a: { id: number }) => a.id === id).options.calendar;
+		expect([calendar(1), calendar(2), calendar(3)]).toEqual([false, false, true]);
 	});
 
 	test('a mailbox without a job has its own panel, with its URL', async ({ page }) => {
@@ -297,7 +455,7 @@ test.describe('migrations', () => {
 		await expect.poll(async () => (await mock(page.request, 'state')).accounts.find((a: { id: number }) => a.id === 1).options.calendar).toBe(false);
 
 		await page.reload();
-		await expect(page.getByTestId('job-panel').getByRole('combobox')).toBeVisible();
+		await expect(page.getByTestId('job-panel').getByRole('combobox', { name: 'PST file for alice@example.com' })).toBeVisible();
 		await page.keyboard.press('Escape');
 		await expect(page.getByTestId('job-panel')).toHaveCount(0);
 		await expect(page).toHaveURL(/q=alice$/);
@@ -331,6 +489,8 @@ test.describe('migrations', () => {
 		await mock(page.request, 'reset', { accounts: 0 });
 		await page.reload();
 		await expect(page.getByTestId('empty-state')).toContainText('No mailboxes yet');
+		// The card carries its own "New migration" button, next to the one of the header.
+		await expect(page.getByTestId('empty-state').getByRole('button', { name: 'New migration', exact: true })).toBeVisible();
 
 		await page.route('**/api/accounts', (route) => route.fulfill({ status: 500, json: { detail: 'database is locked' } }));
 		await page.reload();

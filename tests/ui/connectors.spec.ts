@@ -6,8 +6,8 @@ const state = (page: import('./helpers').Page) => mock(page.request, 'state');
 
 async function openRoute(page: import('./helpers').Page, email: string) {
 	await row(page, email).getByRole('button', { name: `More actions for ${email}` }).click();
-	await page.getByRole('menuitem', { name: 'Source and target' }).click();
-	await expect(page.getByRole('dialog')).toContainText(`Source and target of ${email}`);
+	await page.getByRole('menuitem', { name: 'Source and destination' }).click();
+	await expect(page.getByRole('dialog')).toContainText(`Source and destination of ${email}`);
 	return page.getByRole('dialog');
 }
 
@@ -66,7 +66,7 @@ test.describe('connectors', () => {
 		expect(probe).toMatchObject({ kind: 'imap', body: { role: 'source', account_id: 1, config: { host: 'mail.old.example.com', port: 993, security: 'ssl', username: 'alice' }, secrets: { password: 'pw' } } });
 
 		await page.getByTestId('route-save').click();
-		await expect(page.getByTestId('toast').first()).toContainText('Source and target saved');
+		await expect(page.getByTestId('toast').first()).toContainText('Source and destination saved');
 		await expect(row(page, 'alice@example.com')).toContainText('IMAP to');
 		const alice = await openMailbox(page, 'alice@example.com');
 		await expect(alice.getByTestId('source-summary')).toContainText('Source: IMAP');
@@ -143,7 +143,7 @@ test.describe('connectors', () => {
 		await expect(dialog.getByTestId('route-target-result')).toContainText('Connected');
 		await page.getByTestId('route-save').click();
 		const settings = await openMailbox(page, 'alice@example.com');
-		await expect(settings.getByTestId('target-summary')).toHaveText('Target: IMAP');
+		await expect(settings.getByTestId('target-summary')).toHaveText('Destination: IMAP');
 		// The PST stays the source.
 		await expect(settings.getByRole('combobox', { name: /^PST file for/ })).toBeVisible();
 		expect((await state(page)).routeCalls.map((c: { role: string }) => c.role)).toEqual(['target']);
@@ -180,7 +180,7 @@ test.describe('connectors', () => {
 
 		// A running import blocks the change; the server says so.
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await expect(row(page, 'alice@example.com').locator('[data-job-link]')).toBeVisible();
 		dialog = await openRoute(page, 'alice@example.com');
@@ -200,7 +200,7 @@ test.describe('connectors', () => {
 		await dialog.getByTestId('route-source').locator('[data-field="api_key"]').fill('k');
 		await page.getByTestId('route-save').click();
 		await row(page, 'frank@example.org').getByRole('checkbox').check();
-		await page.getByTestId('selection-bar').getByRole('button', { name: 'Import' }).click();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 		await expect.poll(async () => (await state(page)).runCalls).toEqual([[6]]);
 	});
