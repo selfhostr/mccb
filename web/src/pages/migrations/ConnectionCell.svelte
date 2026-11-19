@@ -65,7 +65,7 @@
 		<span class="text-xs text-ink-3">{m.migrations_test_destination()}</span>
 		{#if look}
 			<span data-testid="test-state">
-				<Plate tone={look.tone} icon={look.icon} label={look.label} />
+				<Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} />
 			</span>
 		{:else if result}
 			<button type="button" class="flex min-h-10 flex-wrap items-center gap-x-2 rounded-plate text-left" aria-label={m.migrations_row_test_details({ email })} data-testid="test-result" {onclick}>

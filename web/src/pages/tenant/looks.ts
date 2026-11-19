@@ -18,19 +18,19 @@ import type { StatusLook } from '../../lib/status.ts';
 export function matchLook(state: MatchState, server: string): StatusLook {
 	switch (state) {
 		case 'ready':
-			return { tone: 'info', icon: CircleArrowRight, label: m.tenant_state_ready() };
+			return { tone: 'info', icon: CircleArrowRight, label: m.tenant_state_ready(), busy: false };
 		case 'linked':
-			return { tone: 'signal', icon: Link, label: m.tenant_state_linked() };
+			return { tone: 'signal', icon: Link, label: m.tenant_state_linked(), busy: false };
 		case 'no_target':
-			return { tone: 'advisory', icon: UserX, label: m.tenant_state_no_target({ server }) };
+			return { tone: 'advisory', icon: UserX, label: m.tenant_state_no_target({ server }), busy: false };
 		case 'no_source':
-			return { tone: 'ghost', icon: MailX, label: m.tenant_state_no_source() };
+			return { tone: 'ghost', icon: MailX, label: m.tenant_state_no_source(), busy: false };
 		case 'other_source':
-			return { tone: 'ghost', icon: Split, label: m.tenant_state_other_source() };
+			return { tone: 'ghost', icon: Split, label: m.tenant_state_other_source(), busy: false };
 		case 'conflict':
-			return { tone: 'warning', icon: TriangleAlert, label: m.tenant_state_conflict() };
+			return { tone: 'warning', icon: TriangleAlert, label: m.tenant_state_conflict(), busy: false };
 		default:
-			return { tone: 'ghost', icon: CircleQuestionMark, label: String(state) };
+			return { tone: 'ghost', icon: CircleQuestionMark, label: String(state), busy: false };
 	}
 }
 

@@ -48,12 +48,12 @@
 
 	/** The verdict next to the name: verified, failed, never checked, or checking now. */
 	function verdict(server: Server) {
-		if (testing.has(server.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running() };
+		if (testing.has(server.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running(), busy: true };
 		const result = results.get(server.id) ?? server.last_test_result;
-		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.settings_server_check_never() };
+		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.settings_server_check_never(), busy: false };
 		return passed(result)
-			? { tone: 'signal' as const, icon: CircleCheck, label: m.settings_server_check_ok() }
-			: { tone: 'warning' as const, icon: TriangleAlert, label: m.settings_server_check_failed() };
+			? { tone: 'signal' as const, icon: CircleCheck, label: m.settings_server_check_ok(), busy: false }
+			: { tone: 'warning' as const, icon: TriangleAlert, label: m.settings_server_check_failed(), busy: false };
 	}
 
 	export async function test(server: Server, quiet = false) {
@@ -106,7 +106,7 @@
 </script>
 
 {#if data.servers.length}
-	<ul class="m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="server-list">
+	<ul class="stagger m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="server-list">
 		{#each data.servers as server (server.id)}
 			{@const stored = server.last_test_result}
 			{@const result = results.get(server.id) ?? (stored && !passed(stored) ? stored : undefined)}
@@ -118,7 +118,7 @@
 					<div class="min-w-0 flex-1 basis-56">
 						<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 							<span>{server.name}</span>
-							<span data-testid="server-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
+							<span data-testid="server-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></span>
 						</p>
 						<p class="m-0 font-mono text-xs text-ink-2">
 							{prefs.host(server.imap_host)}:{server.imap_port}

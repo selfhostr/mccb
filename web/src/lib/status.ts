@@ -27,89 +27,91 @@ export interface StatusLook {
 	tone: Tone;
 	icon: typeof CircleCheck;
 	label: string;
+	/** Work in progress: the plate's icon breathes. */
+	busy: boolean;
 }
 
 export function jobLook(status: JobStatus): StatusLook {
 	switch (status) {
 		case 'queued':
-			return { tone: 'ghost', icon: Clock, label: m.status_job_queued() };
+			return { tone: 'ghost', icon: Clock, label: m.status_job_queued(), busy: false };
 		case 'running':
-			return { tone: 'info', icon: Play, label: m.status_job_running() };
+			return { tone: 'info', icon: Play, label: m.status_job_running(), busy: true };
 		case 'paused':
-			return { tone: 'advisory', icon: Pause, label: m.status_job_paused() };
+			return { tone: 'advisory', icon: Pause, label: m.status_job_paused(), busy: false };
 		case 'stopping':
-			return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
+			return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping(), busy: true };
 		case 'stopped':
-			return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
+			return { tone: 'ghost', icon: Ban, label: m.status_job_stopped(), busy: false };
 		case 'done':
-			return { tone: 'signal', icon: CircleCheck, label: m.status_job_done() };
+			return { tone: 'signal', icon: CircleCheck, label: m.status_job_done(), busy: false };
 		case 'done_with_errors':
-			return { tone: 'advisory', icon: CircleAlert, label: m.status_job_done_errors() };
+			return { tone: 'advisory', icon: CircleAlert, label: m.status_job_done_errors(), busy: false };
 		case 'failed':
-			return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed() };
+			return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed(), busy: false };
 		default:
-			return { tone: 'ghost', icon: CircleDashed, label: String(status) };
+			return { tone: 'ghost', icon: CircleDashed, label: String(status), busy: false };
 	}
 }
 
 /** A job paused by the allowed hours is waiting, not stopped and not failed. */
 export function jobLookOf(job: Pick<Job, 'status' | 'pause_reason'>): StatusLook {
-	if (job.status === 'paused' && job.pause_reason === 'window') return { tone: 'info', icon: Clock, label: m.status_job_waiting_hours() };
+	if (job.status === 'paused' && job.pause_reason === 'window') return { tone: 'info', icon: Clock, label: m.status_job_waiting_hours(), busy: false };
 	return jobLook(job.status);
 }
 
 /** A running connection test, in words. */
 export function testLook(phase: TestPhase): StatusLook {
-	return phase === 'running' ? { tone: 'info', icon: FlaskConical, label: m.migrations_test_running() } : { tone: 'info', icon: Clock, label: m.migrations_test_waiting() };
+	return phase === 'running' ? { tone: 'info', icon: FlaskConical, label: m.migrations_test_running(), busy: true } : { tone: 'info', icon: Clock, label: m.migrations_test_waiting(), busy: true };
 }
 
 /** A mailbox without a job: what stands between it and an import. */
 export function accountLook(status: AccountStatus, hasSource: boolean): StatusLook {
-	if (status === 'auth_failed') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_row_login_refused() };
-	if (status === 'error') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_test_status_failed() };
-	if (!hasSource) return { tone: 'ghost', icon: FileX, label: m.migrations_filter_no_pst() };
-	if (status === 'new') return { tone: 'ghost', icon: CircleDashed, label: m.migrations_test_never() };
-	return { tone: 'ghost', icon: Circle, label: m.migrations_row_ready() };
+	if (status === 'auth_failed') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_row_login_refused(), busy: false };
+	if (status === 'error') return { tone: 'warning', icon: TriangleAlert, label: m.migrations_test_status_failed(), busy: false };
+	if (!hasSource) return { tone: 'ghost', icon: FileX, label: m.migrations_filter_no_pst(), busy: false };
+	if (status === 'new') return { tone: 'ghost', icon: CircleDashed, label: m.migrations_test_never(), busy: false };
+	return { tone: 'ghost', icon: Circle, label: m.migrations_row_ready(), busy: false };
 }
 
 export function pstLook(status: Pst['status']): StatusLook {
 	switch (status) {
 		case 'uploading':
-			return { tone: 'advisory', icon: Upload, label: m.status_pst_uploading() };
+			return { tone: 'advisory', icon: Upload, label: m.status_pst_uploading(), busy: true };
 		case 'validating':
-			return { tone: 'info', icon: ScanSearch, label: m.status_pst_validating() };
+			return { tone: 'info', icon: ScanSearch, label: m.status_pst_validating(), busy: true };
 		case 'valid':
-			return { tone: 'signal', icon: CircleCheck, label: m.status_pst_valid() };
+			return { tone: 'signal', icon: CircleCheck, label: m.status_pst_valid(), busy: false };
 		case 'invalid':
-			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_invalid() };
+			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_invalid(), busy: false };
 		case 'fetching':
-			return { tone: 'info', icon: Download, label: m.status_pst_fetching() };
+			return { tone: 'info', icon: Download, label: m.status_pst_fetching(), busy: true };
 		case 'cancelling':
-			return { tone: 'advisory', icon: Hourglass, label: m.status_pst_cancelling() };
+			return { tone: 'advisory', icon: Hourglass, label: m.status_pst_cancelling(), busy: true };
 		case 'fetch_failed':
-			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_fetch_failed() };
+			return { tone: 'warning', icon: TriangleAlert, label: m.status_pst_fetch_failed(), busy: false };
 		default:
-			return { tone: 'ghost', icon: CircleDashed, label: String(status) };
+			return { tone: 'ghost', icon: CircleDashed, label: String(status), busy: false };
 	}
 }
 
 export function uploadLook(status: UploadStatus): StatusLook {
 	switch (status) {
 		case 'needs_file':
-			return { tone: 'advisory', icon: CircleSlash, label: m.status_upload_needs_file() };
+			return { tone: 'advisory', icon: CircleSlash, label: m.status_upload_needs_file(), busy: false };
 		case 'queued':
-			return { tone: 'ghost', icon: Clock, label: m.status_upload_queued() };
+			return { tone: 'ghost', icon: Clock, label: m.status_upload_queued(), busy: false };
 		case 'starting':
 		case 'uploading':
-			return { tone: 'info', icon: Upload, label: m.status_upload_uploading() };
+			return { tone: 'info', icon: Upload, label: m.status_upload_uploading(), busy: true };
 		case 'completing':
-			return { tone: 'info', icon: Hourglass, label: m.status_upload_completing() };
+			return { tone: 'info', icon: Hourglass, label: m.status_upload_completing(), busy: true };
 		case 'paused':
-			return { tone: 'advisory', icon: Pause, label: m.status_upload_paused() };
+			return { tone: 'advisory', icon: Pause, label: m.status_upload_paused(), busy: false };
 		case 'error':
-			return { tone: 'warning', icon: TriangleAlert, label: m.status_upload_error() };
+			return { tone: 'warning', icon: TriangleAlert, label: m.status_upload_error(), busy: false };
 		default:
-			return { tone: 'signal', icon: CircleCheck, label: m.status_upload_done() };
+			return { tone: 'signal', icon: CircleCheck, label: m.status_upload_done(), busy: false };
 	}
 }
 
@@ -117,38 +119,38 @@ export function uploadLook(status: UploadStatus): StatusLook {
 export function repairLook(box: Pick<RepairBox, 'active_run' | 'last_scan'>): StatusLook {
 	const run = box.active_run;
 	if (run) {
-		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.repair_state_queued() };
-		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
-		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.repair_state_scanning() };
-		if (run.mode === 'repair') return { tone: 'info', icon: Wrench, label: m.repair_state_repairing() };
-		return { tone: 'info', icon: Undo2, label: m.repair_state_restoring() };
+		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.repair_state_queued(), busy: false };
+		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping(), busy: true };
+		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.repair_state_scanning(), busy: true };
+		if (run.mode === 'repair') return { tone: 'info', icon: Wrench, label: m.repair_state_repairing(), busy: true };
+		return { tone: 'info', icon: Undo2, label: m.repair_state_restoring(), busy: true };
 	}
 	const last = box.last_scan;
-	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.repair_state_never() };
-	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed() };
-	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
-	if (last.mode === 'restore') return { tone: 'ghost', icon: Undo2, label: m.repair_state_restored() };
+	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.repair_state_never(), busy: false };
+	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed(), busy: false };
+	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped(), busy: false };
+	if (last.mode === 'restore') return { tone: 'ghost', icon: Undo2, label: m.repair_state_restored(), busy: false };
 	if (last.mode === 'repair') {
-		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.repair_state_repaired_errors() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_repaired() };
+		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.repair_state_repaired_errors(), busy: false } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_repaired(), busy: false };
 	}
-	return last.progress.affected ? { tone: 'advisory', icon: TriangleAlert, label: m.repair_state_damaged() } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_intact() };
+	return last.progress.affected ? { tone: 'advisory', icon: TriangleAlert, label: m.repair_state_damaged(), busy: false } : { tone: 'signal', icon: CircleCheck, label: m.repair_state_intact(), busy: false };
 }
 
 /** A mailbox of the duplicates tab: what runs now, else what its last run found or did. */
 export function dedupLook(box: Pick<DedupBox, 'active_run' | 'last_run' | 'last_scan'>): StatusLook {
 	const run = box.active_run;
 	if (run) {
-		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.dedup_state_queued() };
-		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping() };
-		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.dedup_state_scanning() };
-		return { tone: 'info', icon: CopyX, label: m.dedup_state_removing() };
+		if (run.status === 'queued') return { tone: 'ghost', icon: Clock, label: m.dedup_state_queued(), busy: false };
+		if (run.status === 'stopping') return { tone: 'advisory', icon: Hourglass, label: m.status_job_stopping(), busy: true };
+		if (run.mode === 'scan') return { tone: 'info', icon: ScanSearch, label: m.dedup_state_scanning(), busy: true };
+		return { tone: 'info', icon: CopyX, label: m.dedup_state_removing(), busy: true };
 	}
 	const last = box.last_run ?? box.last_scan;
-	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.dedup_state_never() };
-	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed() };
-	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped() };
+	if (!last) return { tone: 'ghost', icon: CircleDashed, label: m.dedup_state_never(), busy: false };
+	if (last.status === 'failed') return { tone: 'warning', icon: TriangleAlert, label: m.status_job_failed(), busy: false };
+	if (last.status === 'stopped') return { tone: 'ghost', icon: Ban, label: m.status_job_stopped(), busy: false };
 	if (last.mode === 'dedup') {
-		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.dedup_state_removed_errors() } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_removed() };
+		return last.status === 'done_with_errors' ? { tone: 'advisory', icon: CircleAlert, label: m.dedup_state_removed_errors(), busy: false } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_removed(), busy: false };
 	}
-	return last.progress.duplicates ? { tone: 'advisory', icon: TriangleAlert, label: m.dedup_state_found() } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_none() };
+	return last.progress.duplicates ? { tone: 'advisory', icon: TriangleAlert, label: m.dedup_state_found(), busy: false } : { tone: 'signal', icon: CircleCheck, label: m.dedup_state_none(), busy: false };
 }

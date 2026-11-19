@@ -16,7 +16,7 @@
 </script>
 
 <div class="flex flex-col gap-2" data-testid="maintenance-tabs">
-	<Tabs {tabs} value={router.route.page} label={m.shell_nav_maintenance()} onchange={(id) => router.go(`/${id}`)} />
+	<Tabs {tabs} value={router.route.page} panel={`${router.route.page}-panel`} label={m.shell_nav_maintenance()} onchange={(id) => router.go(`/${id}`)} />
 	<ol class="m-0 flex list-none flex-wrap items-center gap-x-1 gap-y-0 p-0 text-xs text-ink-3" aria-label={m.maintenance_flow_label()} data-testid="maintenance-flow">
 		{#each steps as step, i (i)}
 			<li class="inline-flex items-center gap-1">

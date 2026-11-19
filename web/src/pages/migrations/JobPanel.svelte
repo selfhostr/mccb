@@ -120,7 +120,7 @@
 		</h2>
 		{#if job && look}
 			<p class="m-0 mt-1 flex flex-wrap items-center gap-2 text-ink-2">
-				<Plate tone={look.tone} icon={look.icon} label={look.label} />
+				<Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} />
 				{#if job.phase && isActive(job)}<span>{PHASE_LABEL[job.phase] ?? job.phase}</span>{/if}
 			</p>
 		{/if}
@@ -158,10 +158,13 @@
 			</div>
 
 			{#if job.error}
-				<ErrorNotice title={m.jobs_panel_failed()} message={prefs.text(job.error)} />
-				{#if failed && account}
-					<div><Button icon={KeyRound} onclick={() => (editing = true)} data-testid="job-fix-password">{m.jobs_panel_fix_password()}</Button></div>
-				{/if}
+				<ErrorNotice title={m.jobs_panel_failed()} message={prefs.text(job.error)}>
+					{#snippet actions()}
+						{#if failed && account}
+							<Button icon={KeyRound} onclick={() => (editing = true)} data-testid="job-fix-password">{m.jobs_panel_fix_password()}</Button>
+						{/if}
+					{/snippet}
+				</ErrorNotice>
 			{/if}
 
 			{#if job.status !== 'done' && job.status !== 'done_with_errors'}
@@ -218,14 +221,15 @@
 					{ id: 'report', label: m.jobs_tab_report() }
 				]}
 				onchange={(next) => router.setParams({ tab: next === 'log' ? null : next })}
-			/>
-			{#if tab === 'log'}
-				<JobLog jobId={id} active={isActive(job)} />
-			{:else if tab === 'errors'}
-				<JobErrors jobId={id} refreshKey={errorCount} />
-			{:else}
-				<JobReport jobId={id} status={job.status} />
-			{/if}
+			>
+				{#if tab === 'log'}
+					<JobLog jobId={id} active={isActive(job)} />
+				{:else if tab === 'errors'}
+					<JobErrors jobId={id} refreshKey={errorCount} />
+				{:else}
+					<JobReport jobId={id} status={job.status} />
+				{/if}
+			</Tabs>
 		</div>
 	{/if}
 </div>

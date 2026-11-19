@@ -57,7 +57,7 @@
 </div>
 <span class="file-kind text-xs text-ink-2">{kindOf(item.filename)}</span>
 <span class="file-size text-xs text-ink-2">{fmtBytes(item.size)}</span>
-<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} /></div>
+<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></div>
 <div class="file-bar flex items-center gap-3">
 	{#if item.status === 'needs_file'}
 		<Button icon={FolderOpen} onclick={() => picker?.click()}>{m.files_queue_select_file()}</Button>

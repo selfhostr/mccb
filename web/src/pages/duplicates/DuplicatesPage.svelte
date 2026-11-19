@@ -218,7 +218,7 @@
 	}
 </script>
 
-<div class="flex flex-col gap-5" data-testid="dedup-page">
+<div id="duplicates-panel" class="flex flex-col gap-5" data-testid="dedup-page">
 	<PageHeader title={m.shell_nav_maintenance()}>
 		{#snippet actions()}
 			{#if data.servers.length && boxes.length}
@@ -282,7 +282,7 @@
 					<span class="text-sm text-ink-2">{m.dedup_select_all()}</span>
 				</label>
 			</div>
-			<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="dedup-list">
+			<ul class="stagger m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="dedup-list">
 				{#each boxes as box (box.key)}
 					{@const look = dedupLook(box)}
 					{@const c = connLook(box)}
@@ -308,7 +308,7 @@
 						{#if !box.usable}
 							<a class="text-sm" href="/migrations" data-testid="dedup-no-password">{m.dedup_row_no_password_link()}</a>
 						{/if}
-						<span data-testid="dedup-state"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
+						<span data-testid="dedup-state"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></span>
 						{#if box.active_run}
 							<span class="w-32 shrink-0"><Progress value={percent(box)} label={m.dedup_row_progress_label({ email })} /></span>
 						{:else if next === 'remove'}

@@ -39,7 +39,7 @@
 	import Plate from '../../lib/ui/Plate.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import Toggle from '../../lib/ui/Toggle.svelte';
-	import { roving, tabStop, tileClass } from '../files/tiles.ts';
+	import { roving, tabStop, tileClass } from '../../lib/ui/tiles.ts';
 
 	interface Props {
 		defaultServer?: number | null;

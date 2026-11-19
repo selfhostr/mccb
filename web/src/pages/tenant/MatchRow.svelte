@@ -60,20 +60,20 @@
 		if (!account) return null;
 		if (phase) return testLook(phase);
 		const c = connectionOf(account);
-		if (c === 'ok') return { tone: 'signal', icon: CircleCheck, label: m.migrations_test_status_ok() };
-		if (c === 'untested') return { tone: 'ghost', icon: CircleDashed, label: m.migrations_test_never() };
-		return { tone: 'warning', icon: CircleX, label: account.status === 'auth_failed' ? m.migrations_row_login_refused() : m.migrations_test_status_failed() };
+		if (c === 'ok') return { tone: 'signal', icon: CircleCheck, label: m.migrations_test_status_ok(), busy: false };
+		if (c === 'untested') return { tone: 'ghost', icon: CircleDashed, label: m.migrations_test_never(), busy: false };
+		return { tone: 'warning', icon: CircleX, label: account.status === 'auth_failed' ? m.migrations_row_login_refused() : m.migrations_test_status_failed(), busy: false };
 	});
 
 	const plates = $derived.by((): StatusLook[] => {
 		const out: StatusLook[] = [];
 		if (!box) return out;
-		if (box.kind === 'shared') out.push({ tone: 'ghost', icon: Users, label: m.tenant_plate_shared() });
-		if (box.kind === 'room') out.push({ tone: 'ghost', icon: DoorOpen, label: m.tenant_plate_room() });
-		if (box.kind === 'equipment') out.push({ tone: 'ghost', icon: Wrench, label: m.tenant_plate_equipment() });
-		if (!box.enabled) out.push({ tone: 'advisory', icon: UserRoundX, label: m.tenant_plate_disabled() });
-		if (row.matched_by === 'alias' && row.matched_address) out.push({ tone: 'info', icon: AtSign, label: m.tenant_plate_via_alias({ address: prefs.email(row.matched_address) }) });
-		if (row.matched_by === 'upn' && row.matched_address) out.push({ tone: 'info', icon: AtSign, label: m.tenant_plate_via_upn({ address: prefs.email(row.matched_address) }) });
+		if (box.kind === 'shared') out.push({ tone: 'ghost', icon: Users, label: m.tenant_plate_shared(), busy: false });
+		if (box.kind === 'room') out.push({ tone: 'ghost', icon: DoorOpen, label: m.tenant_plate_room(), busy: false });
+		if (box.kind === 'equipment') out.push({ tone: 'ghost', icon: Wrench, label: m.tenant_plate_equipment(), busy: false });
+		if (!box.enabled) out.push({ tone: 'advisory', icon: UserRoundX, label: m.tenant_plate_disabled(), busy: false });
+		if (row.matched_by === 'alias' && row.matched_address) out.push({ tone: 'info', icon: AtSign, label: m.tenant_plate_via_alias({ address: prefs.email(row.matched_address) }), busy: false });
+		if (row.matched_by === 'upn' && row.matched_address) out.push({ tone: 'info', icon: AtSign, label: m.tenant_plate_via_upn({ address: prefs.email(row.matched_address) }), busy: false });
 		return out;
 	});
 </script>
@@ -101,7 +101,7 @@
 			<p class="m-0 truncate font-mono text-xs text-ink-2">{prefs.email(box.mail)}</p>
 			{#if plates.length}
 				<p class="m-0 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-					{#each plates as p, i (i)}<Plate tone={p.tone} icon={p.icon} label={p.label} />{/each}
+					{#each plates as p, i (i)}<Plate tone={p.tone} icon={p.icon} label={p.label} busy={p.busy} />{/each}
 				</p>
 			{/if}
 		{:else}
@@ -113,7 +113,7 @@
 	<div class="col-start-2 flex min-w-0 items-center gap-1.5 md:col-start-auto" data-testid="tenant-state">
 		<span class="text-ink-3 md:hidden" aria-hidden="true"><ArrowDown size={14} /></span>
 		<span class="hidden text-ink-3 md:inline-flex" aria-hidden="true"><ArrowRight size={14} /></span>
-		<Plate tone={look.tone} icon={look.icon} label={look.label} title={look.label} />
+		<Plate tone={look.tone} icon={look.icon} label={look.label} title={look.label} busy={look.busy} />
 	</div>
 
 	<!-- Server side -->
@@ -122,7 +122,7 @@
 			<p class="m-0 truncate font-mono text-xs text-ink md:text-sm">{prefs.email(account.email)}</p>
 			<p class="m-0 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
 				{#if manual}<span data-testid="tenant-manual"><Plate tone="info" icon={Hand} label={m.tenant_plate_manual()} /></span>{/if}
-				{#if check}<span data-testid="tenant-check"><Plate tone={check.tone} icon={check.icon} label={check.label} /></span>{/if}
+				{#if check}<span data-testid="tenant-check"><Plate tone={check.tone} icon={check.icon} label={check.label} busy={check.busy} /></span>{/if}
 				{#if row.state === 'other_source'}
 					<a class="text-xs" href={`/?account=${account.id}`}>{m.tenant_row_see_source()}</a>
 				{/if}
@@ -155,7 +155,7 @@
 		{#if box && account}<Coverage coverage={row.coverage} />{/if}
 		{#if jobLink && (row.state === 'linked' || job)}
 			<a class="no-underline hover:underline" href={`/jobs/${jobLink.id}`} data-testid="tenant-job">
-				<Plate tone={jobLink.look.tone} icon={jobLink.look.icon} label={jobLink.look.label} />
+				<Plate tone={jobLink.look.tone} icon={jobLink.look.icon} label={jobLink.look.label} busy={jobLink.look.busy} />
 			</a>
 		{/if}
 	</div>

@@ -52,10 +52,10 @@
 	const testing = new SvelteSet<number>();
 
 	function verdict(c: SourceConnection) {
-		if (testing.has(c.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running() };
+		if (testing.has(c.id)) return { tone: 'info' as const, icon: FlaskConical, label: m.migrations_test_running(), busy: true };
 		const result = results.get(c.id) ?? c.last_test_result;
-		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.sources_verdict_never() };
-		return result.ok ? { tone: 'signal' as const, icon: CircleCheck, label: m.sources_verdict_ok() } : { tone: 'warning' as const, icon: TriangleAlert, label: m.sources_verdict_failed() };
+		if (!result) return { tone: 'ghost' as const, icon: CircleDashed, label: m.sources_verdict_never(), busy: false };
+		return result.ok ? { tone: 'signal' as const, icon: CircleCheck, label: m.sources_verdict_ok(), busy: false } : { tone: 'warning' as const, icon: TriangleAlert, label: m.sources_verdict_failed() };
 	}
 
 	async function test(c: SourceConnection) {
@@ -84,7 +84,7 @@
 </script>
 
 {#if sources.list.length}
-	<ul class="m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="source-list">
+	<ul class="stagger m-0 flex list-none flex-col divide-y divide-line border-t border-line p-0 first:border-t-0" data-testid="source-list">
 		{#each sources.list as c (c.id)}
 			{@const tenant = directory(c)}
 			{@const look = verdict(c)}
@@ -96,7 +96,7 @@
 						<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 							<span>{c.name}</span>
 							<span data-testid="source-verdict">
-								{#if tenant}<Plate tone={look.tone} icon={look.icon} label={look.label} />{:else}<Plate tone="ghost" icon={Clock} label={m.sources_verdict_deferred()} />{/if}
+								{#if tenant}<Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} />{:else}<Plate tone="ghost" icon={Clock} label={m.sources_verdict_deferred()} />{/if}
 							</span>
 						</p>
 						<p class="m-0 font-mono text-xs break-all text-ink-2">{connectionAddress(c.config)}</p>

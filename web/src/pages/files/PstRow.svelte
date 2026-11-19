@@ -78,10 +78,10 @@
 </script>
 
 <li class={`file-row ${selected ? 'bg-ghost' : ''}`} data-pst={pst.filename}>
-	<div class="file-name flex items-start gap-1">
-		<label class="check -my-2 -ms-3 shrink-0">
-			<input type="checkbox" checked={selected} disabled={fetching} aria-label={m.files_list_select({ name })} onchange={(e) => onselect(e.currentTarget.checked)} data-testid="pst-select" />
-		</label>
+	<label class="check file-sel">
+		<input type="checkbox" checked={selected} disabled={fetching} aria-label={m.files_list_select({ name })} onchange={(e) => onselect(e.currentTarget.checked)} data-testid="pst-select" />
+	</label>
+	<div class="file-name">
 		<div class="min-w-0 flex-1">
 			<p class="m-0 truncate font-medium" title={name}>{name}</p>
 			{#if totals || pst.created_at || from}
@@ -119,7 +119,7 @@
 	</div>
 	<span class="file-kind text-xs text-ink-2" title={kind} data-testid="pst-format">{kind}</span>
 	<span class="file-size text-xs text-ink-2">{fmtBytes(pst.size)}</span>
-	<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} /></div>
+	<div class="file-status"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></div>
 	<div class="file-bar flex items-center gap-3">
 		{#if fetching}
 			<span class="min-w-0 flex-1"><Progress value={percent ?? 0} label={name} /></span>

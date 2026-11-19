@@ -463,9 +463,13 @@
 		position: relative;
 	}
 	.file-row {
-		grid-template: 'name kind size status bar menu' auto / minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
+		grid-template: 'sel name kind size status bar menu' auto / 40px minmax(0, 3fr) 64px 88px minmax(0, 140px) minmax(120px, 2fr) 40px;
 		column-gap: 16px;
-		padding: 8px 8px 8px 16px;
+		padding: 8px;
+	}
+	/* The checkbox of a file; the upload queue leaves it empty. */
+	.file-sel {
+		grid-area: sel;
 	}
 	.file-name {
 		grid-area: name;
@@ -503,9 +507,9 @@
 		}
 		.file-row {
 			grid-template:
-				'name name name menu' auto
-				'kind size status menu' auto
-				'bar bar bar bar' auto / auto auto minmax(0, 1fr) 40px;
+				'sel name name name menu' auto
+				'. kind size status menu' auto
+				'. bar bar bar bar' auto / 40px auto auto minmax(0, 1fr) 40px;
 			column-gap: 12px;
 			row-gap: 4px;
 		}

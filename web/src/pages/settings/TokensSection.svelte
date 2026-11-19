@@ -111,7 +111,7 @@
 					{:else if !tokens.length}
 						<p class="m-0 text-ink-3">{m.settings_tokens_none()}</p>
 					{:else}
-						<ul class="m-0 flex list-none flex-col divide-y divide-line rounded-card border border-line-strong p-0" data-testid="token-list">
+						<ul class="stagger m-0 flex list-none flex-col divide-y divide-line rounded-card border border-line-strong p-0" data-testid="token-list">
 							{#each tokens as token (token.id)}
 								<li class="flex min-h-12 items-center gap-2 py-1.5 pr-2 pl-4" data-token={token.name}>
 									<div class="min-w-0 flex-1">

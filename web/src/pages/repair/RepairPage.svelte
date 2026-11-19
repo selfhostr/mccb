@@ -151,7 +151,7 @@
 	}
 </script>
 
-<div class="flex flex-col gap-5" data-testid="repair-page">
+<div id="repair-panel" class="flex flex-col gap-5" data-testid="repair-page">
 	<PageHeader title={m.shell_nav_maintenance()}>
 		{#snippet actions()}
 			{#if data.servers.length && boxes.length}
@@ -196,7 +196,7 @@
 					<span class="text-sm text-ink-2">{m.repair_select_all()}</span>
 				</label>
 			</div>
-			<ul class="m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="repair-list">
+			<ul class="stagger m-0 flex list-none flex-col divide-y divide-line p-0" data-testid="repair-list">
 				{#each boxes as box (box.id)}
 					{@const look = repairLook(box)}
 					{@const c = connLook(box)}
@@ -219,7 +219,7 @@
 								<span class="flex max-w-full gap-2 text-xs text-ink-2" data-testid="repair-line"><span class="truncate">{serverName(box.server_id)}</span>{#if resultLine(box)}<span class="truncate text-ink-3">{resultLine(box)}</span>{/if}</span>
 							</span>
 						</button>
-						<span data-testid="repair-state"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>
+						<span data-testid="repair-state"><Plate tone={look.tone} icon={look.icon} label={look.label} busy={look.busy} /></span>
 						{#if box.active_run}
 							<span class="w-32 shrink-0"><Progress value={percent(box)} label={m.repair_row_progress_label({ email })} /></span>
 						{:else if ready}
