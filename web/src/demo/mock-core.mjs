@@ -328,7 +328,7 @@ const countOf = (counts) => MIRROR_KINDS.reduce((n, k) => n + (counts?.[k] ?? 0)
 const fullCounts = (counts) => Object.fromEntries(MIRROR_KINDS.map((k) => [k, counts?.[k] ?? 0]));
 
 /** What a mirror run would do to one mailbox, with the same blocks as the API. Nothing is written. */
-function mirrorPlanOf(account, { maxPercent, allowLarge }) {
+function mirrorPlanOf(account, { maxPercent, minCount, allowLarge, allowEmpty }) {
 	const scenario = { ...MIRROR_DEFAULT, ...(state.mirrorScenarios.get(account.id) ?? {}) };
 	const last = [...state.jobs.values()].filter((j) => j.account_id === account.id).pop();
 	const blocked = [];
@@ -336,19 +336,26 @@ function mirrorPlanOf(account, { maxPercent, allowLarge }) {
 	if (!account.options.mirror) block('mirror_off');
 	if (!last) block('no_prior_run');
 	if (scenario.block) block(scenario.block);
-	const deletes = countOf(scenario.delete);
-	if (deletes > 0 && (deletes / Math.max(1, scenario.holds)) * 100 > maxPercent && !allowLarge) block('too_many_deletes', `${deletes} of ${scenario.holds} items (${Math.round((deletes / scenario.holds) * 100)}%) would be deleted, the limit is ${maxPercent}%`);
+	// Folders empty at the source (scenario.emptyFolders: [{ kind, folder, count }]): blocked, as the server does, until their key is in allow_empty_folders (or allow_large_delete); then their items are deleted.
+	const toDelete = { ...(scenario.delete ?? {}) };
+	for (const { kind = 'mail', folder, count } of scenario.emptyFolders ?? []) {
+		if (allowLarge || allowEmpty.includes(folder)) toDelete[kind] = (toDelete[kind] ?? 0) + count;
+		else blocked.push({ code: 'source_empty', kind, folder, message: `${kind} folder '${folder}': the source lists nothing while ${count} item(s) were migrated; if it was emptied on purpose, run again with allow_empty_folders: ["${folder}"]` });
+	}
+	const deletes = countOf(toDelete);
+	// As the server: the percentage only applies above min_delete_count deletions; the block says which percentage would let them through.
+	if (deletes > minCount && (deletes / Math.max(1, scenario.holds)) * 100 > maxPercent && !allowLarge) blocked.push({ code: 'too_many_deletes', kind: 'mail', needed_percent: Math.ceil((deletes * 100) / Math.max(1, scenario.holds)), message: `${deletes} of ${scenario.holds} items (${Math.round((deletes / scenario.holds) * 100)}%) would be deleted, the limit is ${maxPercent}%` });
 	const lines = scenario.sample ?? 25;
 	const actions = [['delete', 'delete'], ['update', 'update'], ['add', 'add']];
 	const sample = [];
 	for (const [action, key] of actions) {
 		for (const kind of MIRROR_KINDS) {
-			for (let i = 0; i < (scenario[key]?.[kind] ?? 0) && sample.length < lines; i++) {
+			for (let i = 0; i < ((key === 'delete' ? toDelete : scenario[key])?.[kind] ?? 0) && sample.length < lines; i++) {
 				sample.push({ kind, action, folder: kind === 'mail' ? 'Inbox' : kind === 'calendar' ? 'Calendar' : kind === 'contacts' ? 'Contacts' : 'Tasks', subject: `${action === 'delete' ? 'Removed at source' : action === 'update' ? 'Changed at source' : 'New at source'} #${i + 1}`, date: '2026-03-14T09:30:00Z' });
 			}
 		}
 	}
-	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(scenario.delete), blocked, sample, notes: scenario.notes ?? [] };
+	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(toDelete), blocked, sample, notes: scenario.notes ?? [] };
 }
 
 function accountView(a) {
@@ -607,7 +614,9 @@ export async function control(path, body) {
 		// What the next mirror comparisons find, per mailbox id: { add, update, delete } by kind, `holds` (what the
 		// destination holds, the base of the safety limit), `block` (a code that stops the mailbox whatever the rest),
 		// `sample` (the number of lines), `fail` (the comparison answers an error), `notes` ([{ code, message }] shown by the
-		// comparison and kept in the report of the run).
+		// comparison and kept in the report of the run), `emptyFolders` ([{ kind, folder, count }]: folders empty at the source,
+		// blocked as `source_empty` with their key until the request has it in `allow_empty_folders`; then `count` deletions are added).
+		// `min_delete_count` of the request is the number of deletions under which the percentage never blocks.
 		state.mirrorScenarios = new Map(Object.entries(body.scenarios ?? {}).map(([id, scenario]) => [Number(id), scenario]));
 		return send(200, { ok: true });
 	}
@@ -982,7 +991,7 @@ export async function handle(req) {
 	if (path === '/runs' && m === 'POST' && json().mode === 'mirror') {
 		const body = json();
 		const ids = body.account_ids ?? [];
-		const options = { maxPercent: body.max_delete_percent ?? 20, allowLarge: body.allow_large_delete === true };
+		const options = { maxPercent: body.max_delete_percent ?? 20, minCount: body.min_delete_count ?? 10, allowLarge: body.allow_large_delete === true, allowEmpty: body.allow_empty_folders ?? [] };
 		const failing = ids.find((id) => state.mirrorScenarios.get(id)?.fail);
 		if (failing) return fail(502, state.mirrorScenarios.get(failing).fail);
 		// As the server: an unknown mailbox is a blocked one (no_prior_run), not an error.
@@ -1001,11 +1010,11 @@ export async function handle(req) {
 			// The report of the server: the options, what stopped the run, then the counters keyed by kind.
 			const skipped = fullCounts(scenario.skipped);
 			const errors = fullCounts(scenario.errors);
-			const outcome = { options: { max_delete_percent: options.maxPercent, allow_large_delete: options.allowLarge }, blocked: [], notes: scenario.notes ?? [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
+			const outcome = { options: { max_delete_percent: options.maxPercent, min_delete_count: options.minCount, allow_large_delete: options.allowLarge, allow_empty_folders: options.allowEmpty }, blocked: [], notes: scenario.notes ?? [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
 			state.mirrorOutcomes.set(job.id, outcome);
 			job.mirror = outcome;
 			// The destination now matches the source.
-			state.mirrorScenarios.set(plan.account_id, { ...scenario, add: {}, update: {}, delete: {}, skipped: undefined });
+			state.mirrorScenarios.set(plan.account_id, { ...scenario, add: {}, update: {}, delete: {}, emptyFolders: undefined, skipped: undefined });
 			publish('job', job);
 			return job;
 		});

@@ -1,4 +1,4 @@
-import type { Job, MirrorAccountPlan, MirrorCounts, MirrorKind, MirrorNote, MirrorReport, MirrorSample } from '../api/types.ts';
+import type { Job, MirrorAccountPlan, MirrorBlock, MirrorCounts, MirrorKind, MirrorNote, MirrorReport, MirrorSample } from '../api/types.ts';
 
 /** Mirror mode: a rerun makes the destination identical to the source. The source is never written. */
 export const MIRROR_KINDS: MirrorKind[] = ['mail', 'calendar', 'contacts', 'tasks'];
@@ -6,6 +6,10 @@ export const MIRROR_KINDS: MirrorKind[] = ['mail', 'calendar', 'contacts', 'task
 export const MIRROR_SAMPLE_LIMIT = 20;
 /** The safety threshold of the server: the most a run may delete, in percent of what the destination holds. */
 export const DEFAULT_MAX_DELETE_PERCENT = 20;
+/** Below this many deletions of a kind, the percentage of the threshold does not apply (the default of the server). */
+export const DEFAULT_MIN_DELETE_COUNT = 10;
+/** The most the field accepts: far above anything a mailbox holds, and a safe integer. */
+export const MAX_MIN_DELETE_COUNT = 1_000_000;
 
 /** Every count of one object, all kinds together. Absent or negative counts weigh nothing. */
 export function sumCounts(counts: MirrorCounts | undefined): number {
@@ -93,10 +97,11 @@ export const BLOCK_CODES = ['mirror_off', 'source_unlistable', 'too_many_deletes
 export type BlockCode = (typeof BLOCK_CODES)[number];
 
 /**
- * `fix` is the button the dialog can offer on its own: `enable` turns the mirror on for the mailbox,
- * `threshold` opens the safety limit. The others need something done elsewhere and are only told.
+ * `fix` is the action the dialog can offer on its own: `enable` turns the mirror on for the mailbox,
+ * `threshold` opens the safety limit, `allow_empty` accepts an empty folder (when the block names it, see `emptyFolderOf`).
+ * The others need something done elsewhere and are only told.
  */
-export type BlockFix = 'enable' | 'threshold' | null;
+export type BlockFix = 'enable' | 'threshold' | 'allow_empty' | null;
 
 export interface BlockInfo {
 	/** A code of the list above; false for one this version does not know (its API message is shown as is). */
@@ -106,7 +111,8 @@ export interface BlockInfo {
 
 export function blockInfo(code: string): BlockInfo {
 	const known = (BLOCK_CODES as readonly string[]).includes(code);
-	return { known, fix: code === 'mirror_off' ? 'enable' : code === 'too_many_deletes' ? 'threshold' : null };
+	const fix: BlockFix = code === 'mirror_off' ? 'enable' : code === 'too_many_deletes' ? 'threshold' : code === 'source_empty' ? 'allow_empty' : null;
+	return { known, fix };
 }
 
 /** The distinct blocking codes of the preview, in the order of the list above, unknown ones last. */
@@ -126,8 +132,64 @@ export const blockedBy = (accounts: readonly MirrorAccountPlan[], code: string):
 /** Only a `too_many_deletes` block can be lifted from the dialog, so only then is the large-deletion box offered. */
 export const offersLargeDelete = (accounts: readonly MirrorAccountPlan[]): boolean => accounts.some((a) => a.blocked?.some((b) => b.code === 'too_many_deletes'));
 
+/** A folder that is empty at the source while the destination holds what was migrated from it: its deletions are held until it is accepted. */
+export interface EmptyFolder {
+	/** The key to pass in `allow_empty_folders`. */
+	key: string;
+	kind: MirrorKind | null;
+	/** How many items the destination would lose; null when the message of the API does not say. */
+	count: number | null;
+}
+
+/** The server words it "... the source lists nothing while 42 item(s) were migrated ..."; a newer wording gives no number, and the sentence goes without. */
+export function emptyFolderCount(message: string | null | undefined): number | null {
+	const found = /while (\d+) item/.exec(message ?? '');
+	return found ? Number(found[1]) : null;
+}
+
+/** The folder a `source_empty` block names, or null for any other block (or one that names no folder: it cannot be accepted one by one). */
+export function emptyFolderOf(block: Pick<MirrorBlock, 'code' | 'folder' | 'kind' | 'message'>): EmptyFolder | null {
+	if (block.code !== 'source_empty' || typeof block.folder !== 'string' || !block.folder) return null;
+	const kind = (MIRROR_KINDS as readonly string[]).includes(block.kind ?? '') ? (block.kind as MirrorKind) : null;
+	return { key: block.folder, kind, count: emptyFolderCount(block.message) };
+}
+
+/**
+ * The empty folders to show after a comparison: those the answer blocks, and those already accepted (their block is gone
+ * since they were, but they stay listed so that the choice can be taken back). A folder neither blocked nor accepted is forgotten.
+ */
+export function mergeEmptyFolders(previous: ReadonlyMap<string, EmptyFolder>, accounts: readonly MirrorAccountPlan[], allowed: ReadonlySet<string>): Map<string, EmptyFolder> {
+	const next = new Map<string, EmptyFolder>();
+	for (const account of accounts) {
+		for (const block of account.blocked ?? []) {
+			const folder = emptyFolderOf(block);
+			if (folder && !next.has(folder.key)) next.set(folder.key, folder);
+		}
+	}
+	for (const key of allowed) {
+		const old = previous.get(key);
+		if (old && !next.has(key)) next.set(key, old);
+	}
+	return next;
+}
+
+/** The folder keys accepted empty, with `key` added or removed: a new set, in the order they were accepted. */
+export function toggleEmptyFolder(allowed: ReadonlySet<string>, key: string, on: boolean): Set<string> {
+	const next = new Set(allowed);
+	if (on) next.add(key);
+	else next.delete(key);
+	return next;
+}
+
+/** The percentage that would let a refused deletion through, as a whole number from 1 to 100; null when the block does not say (or says nonsense). */
+export function neededPercent(block: Pick<MirrorBlock, 'code' | 'needed_percent'>): number | null {
+	const n = block.needed_percent;
+	if (block.code !== 'too_many_deletes' || typeof n !== 'number' || !Number.isFinite(n)) return null;
+	return Math.min(100, Math.max(1, Math.ceil(n)));
+}
+
 /** What a mirror run does that is worth knowing, without stopping it. The API message of each note is kept as the detail. */
-export const NOTE_CODES = ['soft_delete', 'hard_delete', 'no_copy_kept', 'shared_resource'] as const;
+export const NOTE_CODES = ['soft_delete', 'hard_delete', 'no_copy_kept', 'shared_resource', 'target_modified'] as const;
 export type NoteCode = (typeof NOTE_CODES)[number];
 
 /** `warning` is shown before Apply as something to read (a deletion that cannot be undone, or less safe than usual); `note` is plain information. */
@@ -182,6 +244,17 @@ export function clampPercent(value: number | string): number {
 	if (!Number.isFinite(n)) return DEFAULT_MAX_DELETE_PERCENT;
 	return Math.min(100, Math.max(1, Math.round(n)));
 }
+
+/** The minimal number of deletions typed by hand, brought to a whole number from 0; the default when it is not a number. */
+export function clampCount(value: number | string): number {
+	const text = typeof value === 'number' ? String(value) : value.trim().replace(',', '.');
+	const n = text === '' ? NaN : Number(text);
+	if (!Number.isFinite(n)) return DEFAULT_MIN_DELETE_COUNT;
+	return Math.min(MAX_MIN_DELETE_COUNT, Math.max(0, Math.round(n)));
+}
+
+/** The jobs a mirror run created. A job given back as it is (`existing`, one that was already active) is not one of them. */
+export const startedJobs = (jobs: readonly Job[]): Job[] => jobs.filter((job) => !job.existing);
 
 export interface MirrorReportRow {
 	kind: MirrorKind;
