@@ -70,8 +70,9 @@ def test_destroyed_mail_leaves_the_listing_and_the_cursor_survives_it(srv):
     first = src.changed_since(inbox, None)
     srv.destroy_email("e3")
     assert "ee3" not in [i.key for i in src.mirror_listing(inbox).items]
-    more = src.changed_since(inbox, first.cursor)       # `destroyed` does not break the incremental read
-    assert not more.reset and more.items == []
+    more = src.changed_since(inbox, first.cursor)       # `destroyed` is reported as removed keys, nothing else
+    assert not more.reset and more.items == [] and more.removed == ["ee3"]
+    assert src.changed_since(inbox, more.cursor).removed == []
 
 
 def test_listing_that_shifts_under_paging_is_read_again(srv):
@@ -336,3 +337,30 @@ def test_a_card_mccb_did_not_write_is_never_touched(srv):
     with pytest.raises(ConnectorError):
         t.delete(folder, other)
     assert srv.cards[other] == before and srv.set_args == []
+
+
+def test_delete_checks_the_expected_import_id(srv):
+    srv.add_trash()
+    t = target(srv)
+    iid, eid = put(t, "1")
+    with pytest.raises(ConnectorError) as e:
+        t.delete("Inbox", eid, f"<{NS}-other>")                                  # the mail does not carry this id any more
+    assert e.value.kind == ConnectorError.REJECTED and srv.emails[eid]["mailboxIds"] == {"mb-inbox": True}
+    assert srv.set_args == []
+    assert t.delete("Inbox", eid, iid) == DELETE_TRASH
+    assert srv.emails[eid]["mailboxIds"] == {"mb-trash": True}
+    # delete_many (default of the interface) goes through delete() one by one
+    _i2, e2 = put(t, "2")
+    _i3, e3 = put(t, "3")
+    assert t.delete_many("Inbox", [e2, e3]) == {e2: DELETE_TRASH, e3: DELETE_TRASH}
+
+
+def test_card_delete_with_the_resource_name_needs_no_inventory(srv):
+    t, folder = book_target(srv)
+    cid = t.put(folder, card_item())
+    other = srv.add_card({"uid": "urn:uuid:not-ours", "name": {"full": "Bob"}}, [t._book("Contacts")])
+    fresh = target(srv)
+    with pytest.raises(ConnectorError) as e:
+        fresh.delete(folder, other, "deadbeef.vcf")                              # uid is not the one derived from that name
+    assert e.value.kind == ConnectorError.REJECTED and other in srv.cards
+    assert fresh.delete(folder, cid, "deadbeef.vcf") == DELETE_HARD and cid not in srv.cards

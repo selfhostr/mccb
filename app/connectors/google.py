@@ -712,13 +712,16 @@ class GoogleSource(Source):
             for p in people:
                 yield self._person_item(p)
 
-    def _list_people(self, sync_token: str | None) -> tuple[list[dict], str | None]:
+    def _list_people(self, sync_token: str | None, removed: list[str] | None = None) -> tuple[list[dict], str | None]:
         out, token, sync = [], None, None
         while True:
             params = {"personFields": PERSON_FIELDS, "pageSize": 1000, "requestSyncToken": "true",
                       **({"syncToken": sync_token} if sync_token else {}), **({"pageToken": token} if token else {})}
             r = self._api().get(f"{PEOPLE_API}/people/me/connections", params, "contacts")
             out += [p for p in r.get("connections") or [] if not (p.get("metadata") or {}).get("deleted")]
+            if removed is not None:
+                removed += [key_of("p", p["resourceName"].split("/")[-1]) for p in r.get("connections") or []
+                            if (p.get("metadata") or {}).get("deleted") and p.get("resourceName")]
             token, sync = r.get("nextPageToken"), r.get("nextSyncToken") or sync
             if not token:
                 return out, sync
@@ -727,8 +730,8 @@ class GoogleSource(Source):
         return SourceItem(key=key_of("p", p["resourceName"].split("/")[-1]), ref=p, version=p.get("etag") or None)
 
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
-        """Contacts and calendars with the API sync tokens, mail by UID. Deletions are not reported (`Changes` has no field
-        for them: the mirror uses mirror_listing() and exists()). A token Google no longer accepts gives a full listing."""
+        """Contacts and calendars with the API sync tokens, mail by UID. Deletions (cancelled events, deleted contacts) go
+        in `removed`, informative only: the mirror deletes on a complete mirror_listing() and exists(). A token Google no longer accepts gives a full listing."""
         kind, ident = folder.ref
         try:
             state = json.loads(cursor) if cursor else None
@@ -738,8 +741,10 @@ class GoogleSource(Source):
             return self._mail_changes(folder, state)
         try:
             if kind == "people" and state and state.get("sync"):
-                people, sync = self._list_people(state["sync"])
-                return Changes([self._person_item(p) for p in people], json.dumps({"sync": sync}), reset=False)
+                gone: list[str] = []
+                people, sync = self._list_people(state["sync"], gone)
+                return Changes([self._person_item(p) for p in people], json.dumps({"sync": sync}), reset=False,
+                               removed=gone)
             if kind == "cal" and state and state.get("sync"):
                 events, sync = self._list_events(ident, {"syncToken": state["sync"]})
                 uids = sorted({e.get("iCalUID") for e in events if e.get("status") != "cancelled" and e.get("iCalUID")})
@@ -747,7 +752,10 @@ class GoogleSource(Source):
                 for uid in uids:
                     evs, _s = self._list_events(ident, {"iCalUID": uid})
                     items += [self._event_item(ident, g) for g in group_events(evs)]
-                return Changes(items, json.dumps({"sync": sync}), reset=False)
+                live = set(uids)
+                gone = [key_of(f"c{_slug(ident)}-", e["id"]) for e in events if e.get("status") == "cancelled"
+                        and not e.get("recurringEventId") and e.get("iCalUID") not in live]
+                return Changes(items, json.dumps({"sync": sync}), reset=False, removed=gone)
         except ConnectorError as e:
             if not _gone(e):
                 raise
@@ -807,7 +815,7 @@ class GoogleSource(Source):
                 return Listing([self._mail_item(r) for r in self._groups.get(key, [])], True)
         return Listing([self._mail_item(r) for r in self._groups.get(key, [])], False, problem=problem)
 
-    def exists(self, folder: SourceFolder, keys: list[str]) -> dict[str, bool]:
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
         """Direct read of the items the listing no longer has, before the mirror deletes their copy: {key: False} only
         when Google answers that the message / event / contact is not there (or is a cancelled event, a deleted contact).
         Anything else, and keys that cannot be turned back into an id, give True. Errors are raised."""

@@ -16,10 +16,13 @@ class MirrorGoogle(GoogleFake):
         super().__init__()
         self.methods: list[str] = []
         self.fail_get = 0
+        self.sync_extra: list[dict] = []   # tombstones the calendar sync answer carries besides ev-new
 
     def handle(self, req):
         if req.path != "/token":
             self.methods.append(req.method)
+        if req.path.endswith("/events") and req.query.get("syncToken") and self.token_ok(req):
+            return 200, {}, {"items": self.sync_extra, "nextSyncToken": "cs2"}
         ev = re.match(r"^/calendar/v3/calendars/([^/]+)/events/([^/]+)$", req.path)
         pe = re.match(r"^/v1/people/(c\d+)$", req.path)
         if ev or pe:
@@ -239,3 +242,20 @@ def test_the_source_never_writes(gg, mail):
         src.changed_since(f, None)
     assert set(gg.methods) == {"GET"}                    # Calendar and People: reads only (and read-only scopes)
     assert all("readonly" in s for s in google.SCOPES.values() if "calendar" in s or "contacts" in s)
+
+
+def test_incremental_reports_removed_keys(gg):
+    gg.people = people()
+    src = opened(sync_calendar=False)
+    f = src.folders()[0]
+    first = src.changed_since(f, None)
+    assert first.removed == []
+    assert src.changed_since(f, first.cursor).removed == ["pc9"]          # the fake sync answer has a deleted person
+    gg.events["primary"] = events()
+    gg.sync_extra = [{"id": "ev8", "iCalUID": "ev8@google.com", "status": "cancelled"},
+                     {"id": "ev9_x", "iCalUID": "ev9@google.com", "recurringEventId": "ev9", "status": "cancelled"}]
+    csrc = opened(sync_contacts=False)
+    cal = csrc.folders()[0]
+    cur = csrc.changed_since(cal, None).cursor
+    ch = csrc.changed_since(cal, cur)
+    assert ch.removed == [google.key_of(f"c{google._slug('primary')}-", "ev8")] and ch.items == []   # an exception is not a removal

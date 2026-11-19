@@ -431,8 +431,8 @@ class JmapSource(Source):
     # -- incremental
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
         """Mail and cards created or updated since the state in `cursor` (Email/changes, ContactCard/changes).
-        Destroyed objects are not reported (`Changes` has no field for them: the mirror uses mirror_listing() and
-        exists() instead). A state the server cannot calculate from gives a full listing."""
+        Destroyed objects are reported in `removed` (keys), informative only: the mirror deletes on a complete
+        mirror_listing() and exists(). A state the server cannot calculate from gives a full listing."""
         self._need_folders()
         kind, ident = folder.ref
         tn, account, using = (("Email", self.mail_account, [CORE, CAP_MAIL]) if kind == "mail"
@@ -444,11 +444,13 @@ class JmapSource(Source):
             state = None
         if state:
             ids: list[str] = []
+            destroyed: list[str] = []
             try:
                 while True:
                     ch = c.api([(f"{tn}/changes", {"accountId": account, "sinceState": state, "maxChanges": 500}, "c")],
                                using)["c"][1]
                     ids += list(ch.get("created") or []) + list(ch.get("updated") or [])
+                    destroyed += list(ch.get("destroyed") or [])
                     state = ch.get("newState") or state
                     if not ch.get("hasMoreChanges"):
                         break
@@ -468,7 +470,9 @@ class JmapSource(Source):
                                 items.append(self._mail_item(rec))
                         elif self._card_owner(rec) == ident:
                             items.append(self._card_item(rec))
-                return Changes(items, json.dumps({"state": state}), reset=False)
+                prefix = "e" if tn == "Email" else "c"
+                return Changes(items, json.dumps({"state": state}), reset=False,
+                               removed=[key_of(prefix, i) for i in destroyed])
         # first listing, or a state the server forgot: read the state first, so that nothing falls between the two
         st = c.api([(f"{tn}/get", {"accountId": account, "ids": []}, "s")], using)["s"][1].get("state")
         return Changes(list(self.iter_items(folder)), json.dumps({"state": st}) if st else None, reset=True)
@@ -543,7 +547,7 @@ class JmapSource(Source):
                 return Listing(items, True)
         return Listing(items, False, problem=problem)
 
-    def exists(self, folder: SourceFolder, keys: list[str]) -> dict[str, bool]:
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
         """Direct read by id of items the listing no longer has: {key: False} only when the server itself answers
         `notFound` for the id. Anything else (found, moved to another mailbox, key that cannot be turned back into
         an id) is True: the caller deletes nothing for it. Errors are raised."""
@@ -950,7 +954,7 @@ class JmapSession(TargetSession):
             return DELETE_SOFT
         return DELETE_TRASH if self._trash_box() else DELETE_SOFT
 
-    def _our_mail(self, folder: str, ref: str) -> tuple[str, dict, str | None] | None:
+    def _our_mail(self, folder: str, ref: str, expected: str | None = None) -> tuple[str, dict, str | None] | None:
         """(mailbox id, record, Email state) when `ref` is a mail written by mccb (it carries our header) and still sits
         in `folder`; None when it is gone, or was moved elsewhere by someone (then it is left alone)."""
         box = self._folder_box(folder)
@@ -965,17 +969,20 @@ class JmapSession(TargetSession):
         rec = lst[0]
         if not (rec.get("mailboxIds") or {}).get(box):
             return None
-        if not any(str(v).strip() for v in rec.get(prop) or []):
+        vals = [str(v).strip() for v in rec.get(prop) or [] if str(v).strip()]
+        if not vals:
             raise ConnectorError(f"mail {ref} does not carry {IMPORT_HEADER}: not written by this tool, left alone",
                                  ConnectorError.REJECTED)
+        if expected and expected not in vals:
+            raise ConnectorError(f"mail {ref} carries {vals}, not {expected}: left alone", ConnectorError.REJECTED)
         return box, rec, r.get("state")
 
-    def _set_mail(self, folder: str, ref: str, patch_of) -> bool:
+    def _set_mail(self, folder: str, ref: str, patch_of, expected: str | None = None) -> bool:
         """Email/set update with ifInState: the check of `_our_mail` and the write see the same state, otherwise they are
         redone (up to 3 times). False when the mail is gone or not in the folder any more."""
         acc = self._mail()
         for _ in range(3):
-            found = self._our_mail(folder, ref)
+            found = self._our_mail(folder, ref, expected)
             if found is None:
                 return False
             box, rec, state = found
@@ -1037,10 +1044,13 @@ class JmapSession(TargetSession):
             raise ConnectorError(f"contact refused: {err.get('type')} {err.get('description') or ''}".strip(), kind)
         return True
 
-    def delete(self, folder: str, ref: str) -> str:
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        """`expected_import_id`: the import id of the mail, or the resource name of the card, it must still carry."""
         mode = self.delete_mode(folder)
         if folder.startswith(BOOK_PREFIX):
-            found = self._our_card(folder, ref)
+            uid = ("urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, "mccb:" + expected_import_id))
+                   if expected_import_id else None)
+            found = self._our_card(folder, ref, uid)
             if found is not None:
                 self._set_card(ref, found[1], destroy=[ref])
             return mode
@@ -1052,7 +1062,7 @@ class JmapSession(TargetSession):
                 p[f"mailboxIds/{box}"] = None
                 p[f"mailboxIds/{trash}"] = True
             return p
-        self._set_mail(folder, ref, patch)
+        self._set_mail(folder, ref, patch, expected_import_id)
         return mode
 
     def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
