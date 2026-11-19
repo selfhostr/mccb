@@ -63,9 +63,10 @@
 					{ key: 'active', text: m.migrations_import_active({ count: plan.active.length }), list: plan.active }
 				].filter((p) => p.list.length)
 	);
-	/** Informational: those that start anyway, grouped by the server whose DAV is off. */
+	/** Informational: those that start anyway, grouped by the server whose DAV is off; gone once it is turned on. */
 	const noDav = $derived(
 		data.servers
+			.filter((server) => !server.dav_enabled)
 			.map((server) => ({ server, accounts: plan.noDav.filter((a) => a.server_id === server.id && ids.includes(a.id)) }))
 			.filter((g) => g.accounts.length)
 	);
