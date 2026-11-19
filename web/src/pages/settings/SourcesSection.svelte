@@ -5,7 +5,9 @@
 	 */
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
+	import Clock from '@lucide/svelte/icons/clock';
 	import CloudOff from '@lucide/svelte/icons/cloud-off';
+	import Copy from '@lucide/svelte/icons/copy';
 	import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import Pencil from '@lucide/svelte/icons/pencil';
@@ -22,6 +24,7 @@
 	import { router } from '../../lib/router.svelte.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { sources } from '../../lib/stores/sources.svelte.ts';
+	import Button from '../../lib/ui/Button.svelte';
 	import Confirm from '../../lib/ui/Confirm.svelte';
 	import Dialog from '../../lib/ui/Dialog.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
@@ -36,6 +39,7 @@
 	void sources.load();
 
 	let editing = $state.raw<SourceConnection | null>(null);
+	let duplicating = $state.raw<SourceConnection | null>(null);
 	const directory = (c: SourceConnection) => isDirectory(connectors.list, c.kind);
 
 	/** After a save: a tenant is tested at once, the other kinds are checked with each mailbox. */
@@ -91,7 +95,9 @@
 					<div class="min-w-0 flex-1 basis-56">
 						<p class="m-0 flex flex-wrap items-center gap-2 font-medium">
 							<span>{c.name}</span>
-							{#if tenant}<span data-testid="source-verdict"><Plate tone={look.tone} icon={look.icon} label={look.label} /></span>{/if}
+							<span data-testid="source-verdict">
+								{#if tenant}<Plate tone={look.tone} icon={look.icon} label={look.label} />{:else}<Plate tone="ghost" icon={Clock} label={m.sources_verdict_deferred()} />{/if}
+							</span>
 						</p>
 						<p class="m-0 font-mono text-xs break-all text-ink-2">{connectionAddress(c.config)}</p>
 						<p class="m-0 flex flex-wrap gap-x-3 text-xs text-ink-3">
@@ -101,11 +107,12 @@
 					</div>
 					<div class="flex shrink-0 items-center">
 						{#if tenant}<IconButton icon={FlaskConical} label={m.sources_test({ name: c.name })} loading={testing.has(c.id)} onclick={() => test(c)} />{/if}
+						<Button variant="ghost" icon={Pencil} aria-label={m.sources_dialog_edit({ name: c.name })} onclick={() => (editing = c)} data-testid="source-edit">{m.sources_edit()}</Button>
 						<Menu
 							label={m.sources_more({ name: c.name })}
 							icon={EllipsisVertical}
 							items={[
-								{ label: m.sources_edit(), icon: Pencil, onselect: () => (editing = c) },
+								{ label: m.settings_server_duplicate(), icon: Copy, onselect: () => (duplicating = c) },
 								...(tenant ? [{ label: m.sources_migrate(), icon: Shuffle, onselect: () => router.go(`/tenants/${c.id}/migrate`) }] : []),
 								...(c.provisioned ? [{ label: m.provision_remove_menu(), icon: CloudOff, onselect: () => (unprovisioning = c) }] : []),
 								{ label: m.sources_delete(), icon: Trash2, danger: true, onselect: () => (removing = c) }
@@ -122,6 +129,9 @@
 {#if editing}
 	<SourceDialog connection={editing} onclose={() => (editing = null)} onsaved={check} />
 {/if}
+{#if duplicating}
+	<SourceDialog duplicate={duplicating} onclose={() => (duplicating = null)} onsaved={check} />
+{/if}
 {#if unprovisioning}
 	{@const target = unprovisioning}
 	<Dialog title={m.provision_remove_title({ name: target.name })} onclose={() => (unprovisioning = null)}>
@@ -131,5 +141,23 @@
 {/if}
 {#if removing}
 	{@const target = removing}
-	<Confirm title={directory(target) ? m.sources_delete_title() : m.settings_server_delete_title()} text={m.sources_delete_text({ name: target.name })} confirm={m.sources_delete()} danger onconfirm={() => remove(target)} onclose={() => (removing = null)} />
+	{@const tenant = directory(target)}
+	{#if target.accounts > 0}
+		<Dialog title={tenant ? m.sources_delete_title() : m.settings_server_delete_title()} onclose={() => (removing = null)} center>
+			<p class="m-0">{tenant ? m.sources_delete_blocked({ count: target.accounts }) : m.servers_delete_blocked({ count: target.accounts })}</p>
+			{#snippet actions()}
+				<Button variant="ghost" onclick={() => (removing = null)}>{m.common_cancel()}</Button>
+				<Button variant="danger" disabled data-testid="source-delete-blocked">{m.sources_delete()}</Button>
+			{/snippet}
+		</Dialog>
+	{:else}
+		<Confirm
+			title={tenant ? m.sources_delete_title() : m.settings_server_delete_title()}
+			text={tenant ? m.sources_delete_text({ name: target.name }) : m.servers_delete_text({ name: target.name })}
+			confirm={m.sources_delete()}
+			danger
+			onconfirm={() => remove(target)}
+			onclose={() => (removing = null)}
+		/>
+	{/if}
 {/if}

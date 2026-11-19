@@ -33,12 +33,22 @@
 		/** Or a connection of this kind. */
 		kind?: string;
 		preset?: Preset;
+		/** What the server can be used as: where mail comes from, where it goes, or both. */
+		role: 'source' | 'target' | 'both';
+	}
+
+	const ROLE_LABELS = { source: () => m.servers_role_source(), target: () => m.servers_role_target(), both: () => m.servers_role_both() };
+	/** From the catalogue of connectors: a kind that can be read and written is both. */
+	function roleOf(kind: string): Choice['role'] {
+		const spec = connectors.list.find((k) => k.kind === kind);
+		if (!spec) return 'both';
+		return spec.source && spec.target ? 'both' : spec.source ? 'source' : spec.target ? 'target' : 'both';
 	}
 
 	const provider = (id: string) => PROVIDERS.find((p) => p.id === id)!;
-	const imap = (id: string, hint: string, name?: string): Choice => ({ id, name: name ?? provider(id).name, hint, icon: provider(id).icon, mark: provider(id).mark, provider: provider(id) });
+	const imap = (id: string, hint: string, name?: string): Choice => ({ id, name: name ?? provider(id).name, hint, icon: provider(id).icon, mark: provider(id).mark, provider: provider(id), role: 'both' });
 	const MARKS: Record<string, string> = { m365: 'M', outlook: 'O', workspace: 'G' };
-	const connection = (id: string, kind: string, name: string, hint: string, preset: Preset = {}): Choice => ({ id, name, hint, icon: kindIcon(kind), mark: MARKS[id], kind, preset: { title: name, ...preset } });
+	const connection = (id: string, kind: string, name: string, hint: string, preset: Preset = {}): Choice => ({ id, name, hint, icon: kindIcon(kind), mark: MARKS[id], kind, preset: { title: name, ...preset }, role: roleOf(kind) });
 
 	const OUTLOOK = {
 		host: 'outlook.office365.com',
@@ -53,6 +63,15 @@
 	const known = (c: Choice) => !c.kind || connectors.list.some((k) => k.kind === c.kind);
 	const GROUPS = $derived(
 		[
+			{
+				id: 'own',
+				title: m.servers_pick_own(),
+				choices: [
+					imap('imap', m.servers_type_imap_hint(), m.servers_type_imap_common()),
+					connection('exchange', 'exchange_ews', m.servers_type_exchange(), m.servers_type_exchange_hint(), { note: m.servers_note_exchange() }),
+					connection('jmap', 'jmap', m.servers_type_jmap(), m.servers_type_jmap_hint(), { note: m.servers_note_jmap() })
+				]
+			},
 			{
 				id: 'services',
 				title: m.servers_pick_services(),
@@ -69,15 +88,6 @@
 					imap('icloud', m.servers_type_dav_hint()),
 					imap('fastmail', m.servers_type_dav_hint()),
 					imap('infomaniak', m.servers_type_infomaniak_hint())
-				]
-			},
-			{
-				id: 'own',
-				title: m.servers_pick_own(),
-				choices: [
-					imap('imap', m.servers_type_imap_hint(), m.servers_type_imap()),
-					connection('exchange', 'exchange_ews', m.servers_type_exchange(), m.servers_type_exchange_hint(), { note: m.servers_note_exchange() }),
-					connection('jmap', 'jmap', m.servers_type_jmap(), m.servers_type_jmap_hint(), { note: m.servers_note_jmap() })
 				]
 			}
 		].map((g) => ({ ...g, choices: g.choices.filter(known) }))
@@ -107,10 +117,11 @@
 									onclick={() => (picked = choice)}
 								>
 									<KindIcon icon={choice.icon} mark={choice.mark} />
-									<span class="min-w-0">
+									<span class="min-w-0 flex-1">
 										<span class="block font-medium">{choice.name}</span>
 										<span class="block text-xs text-ink-2">{choice.hint}</span>
 									</span>
+									<span class="shrink-0 rounded-plate border border-line px-1.5 text-xs text-ink-2" data-testid="server-kind-role">{ROLE_LABELS[choice.role]()}</span>
 								</button>
 							</li>
 						{/each}

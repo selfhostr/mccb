@@ -30,6 +30,8 @@
 
 	interface Props {
 		connection?: SourceConnection | null;
+		/** Adding from a copy: the settings of this connection under another name, with no secret. */
+		duplicate?: SourceConnection | null;
 		/** Adding: the connector kind. Editing: the kind of the connection. */
 		kind?: string;
 		preset?: ServerPreset;
@@ -37,14 +39,14 @@
 		onback?: () => void;
 		onsaved?: (saved: SourceConnection) => void;
 	}
-	let { connection = null, kind = 'm365_graph', preset, onclose, onback, onsaved }: Props = $props();
+	let { connection = null, duplicate = null, kind = 'm365_graph', preset, onclose, onback, onsaved }: Props = $props();
 
-	const KIND = untrack(() => connection?.kind ?? kind);
+	const KIND = untrack(() => connection?.kind ?? duplicate?.kind ?? kind);
 	const spec = $derived(connectors.list.find((c) => c.kind === KIND));
 	const full = $derived(spec?.source ?? null);
 	// A tenant lists its mailboxes and is tested here; the other kinds only hold shared settings.
 	const directory = $derived(spec?.directory === true);
-	const canProvision = $derived(!connection && directory && spec?.provision === true);
+	const canProvision = $derived(!connection && !duplicate && directory && spec?.provision === true);
 	// The labels and helps of the connection fields are served in English: the dialog says them in the language of the UI.
 	const TEXTS: Record<string, () => { label: string; help?: string }> = {
 		tenant_id: () => ({ label: m.provision_field_tenant_id(), help: m.provision_field_tenant_id_help() }),
@@ -66,8 +68,8 @@
 		if (!canProvision) manualOpen = true;
 	});
 
-	let name = $state(untrack(() => connection?.name ?? preset?.name ?? ''));
-	let notes = $state(untrack(() => connection?.notes ?? ''));
+	let name = $state(untrack(() => connection?.name ?? (duplicate ? m.settings_server_copy_name({ name: duplicate.name }) : (preset?.name ?? ''))));
+	let notes = $state(untrack(() => (connection ?? duplicate)?.notes ?? ''));
 	let drafts = $state<SecretDrafts>({});
 	let ready = $state(false);
 	// The catalogue may arrive after the dialog opens: the form is built once it is there.
@@ -75,7 +77,7 @@
 	$effect(() => {
 		if (!full || ready) return;
 		untrack(() => {
-			values = initialValues(full, connection?.config ?? preset?.config);
+			values = initialValues(full, (connection ?? duplicate)?.config ?? preset?.config);
 			drafts = initialSecrets(full);
 			ready = true;
 		});
@@ -140,7 +142,7 @@
 </script>
 
 <Dialog
-	title={flowing ? m.provision_title() : connection ? m.sources_dialog_edit({ name: connection.name }) : directory ? m.sources_dialog_add() : m.servers_kind_title({ name: preset?.title ?? spec?.label ?? KIND })}
+	title={flowing ? m.provision_title() : connection ? m.sources_dialog_edit({ name: connection.name }) : duplicate ? m.settings_server_duplicate_title({ name: duplicate.name }) : directory ? m.sources_dialog_add() : m.servers_kind_title({ name: preset?.title ?? spec?.label ?? KIND })}
 	{onclose}
 	wide
 >

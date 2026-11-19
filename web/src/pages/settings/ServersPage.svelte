@@ -8,7 +8,7 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import { sources } from '../../lib/stores/sources.svelte.ts';
-	import IconButton from '../../lib/ui/IconButton.svelte';
+	import Button from '../../lib/ui/Button.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import PageHeader from '../../lib/ui/PageHeader.svelte';
 	import Panel from '../../lib/ui/Panel.svelte';
@@ -25,7 +25,7 @@
 
 <PageHeader title={m.settings_servers_title()}>
 	{#snippet actions()}
-		<IconButton variant="primary" icon={Plus} label={m.settings_servers_add()} onclick={() => (adding = true)} data-testid="server-add" />
+		<Button variant="primary" icon={Plus} onclick={() => (adding = true)} data-testid="server-add">{m.settings_servers_add()}</Button>
 	{/snippet}
 </PageHeader>
 
@@ -36,7 +36,9 @@
 			<SourcesSection bind:this={connections} />
 		</Panel>
 	{:else}
-		<EmptyState icon={ServerIcon} title={m.settings_servers_empty_title()} />
+		<EmptyState icon={ServerIcon} title={m.settings_servers_empty_title()} description={m.settings_servers_empty_text()}>
+			{#snippet action()}<Button variant="primary" icon={Plus} onclick={() => (adding = true)}>{m.settings_servers_add()}</Button>{/snippet}
+		</EmptyState>
 	{/if}
 </div>
 
