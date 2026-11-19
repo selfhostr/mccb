@@ -32,7 +32,7 @@
 	const uid = $props.id();
 	const why = $derived(disabled && reason ? reason : undefined);
 	const classes = $derived(
-		`inline-flex min-h-10 min-w-10 select-none items-center justify-center gap-2 rounded-btn px-4 text-sm font-semibold whitespace-nowrap no-underline transition-[opacity,background-color,border-color,color] duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${VARIANTS[variant]} ${className}`
+		`inline-flex min-h-10 min-w-10 select-none items-center justify-center gap-2 press rounded-btn px-4 text-sm font-semibold whitespace-nowrap no-underline transition-[opacity,background-color,border-color,color,transform] duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${VARIANTS[variant]} ${className}`
 	);
 </script>
 

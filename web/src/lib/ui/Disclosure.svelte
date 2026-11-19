@@ -20,10 +20,10 @@
 </script>
 
 <details class={`group ${className}`} bind:open {...rest}>
-	<summary class="flex min-h-10 cursor-pointer list-none items-center gap-2 font-medium text-ink-2 hover:text-ink [&::-webkit-details-marker]:hidden">
-		<ChevronRight size={16} class="shrink-0 group-open:rotate-90 rtl:rotate-180 rtl:group-open:rotate-90" />
+	<summary class="flex min-h-10 cursor-pointer list-none items-center gap-2 font-medium text-ink-2 transition-colors duration-200 hover:text-ink [&::-webkit-details-marker]:hidden">
+		<ChevronRight size={16} class="shrink-0 transition-transform duration-[var(--dur-2)] ease-[var(--ease)] group-open:rotate-90 rtl:rotate-180 rtl:group-open:rotate-90" />
 		<span>{title}</span>
 		{#if summary}<span class="text-xs font-normal text-ink-3">{summary}</span>{/if}
 	</summary>
-	<div class="pb-2 pl-6">{@render children()}</div>
+	<div class="appear pb-2 pl-6">{@render children()}</div>
 </details>

@@ -42,16 +42,17 @@
 	const wide = new MediaQuery('min-width: 64rem');
 
 	// What each page holds, said next to its link: what needs you, and how many files.
-	const attention = $derived(summarize(data.accounts.values(), (id) => data.jobs.get(id)).attention);
+	const summary = $derived(summarize(data.accounts.values(), (id) => data.jobs.get(id)));
+	const attention = $derived(summary.attention);
 	const NAV = $derived([
-		{ page: 'migrations', href: '/', label: m.shell_nav_migrations(), icon: ArrowRightLeft, count: attention, alert: attention > 0 },
-		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: Files, count: data.psts.size, alert: false },
-		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length + sources.list.length, alert: false },
+		{ page: 'migrations', href: '/', label: m.shell_nav_migrations(), icon: ArrowRightLeft, count: attention, alert: attention > 0, busy: summary.running > 0 },
+		{ page: 'files', href: '/files', label: m.shell_nav_files(), icon: Files, count: data.psts.size, alert: false, busy: false },
+		{ page: 'servers', href: '/servers', label: m.settings_servers_title(), icon: Server, count: data.servers.length + sources.list.length, alert: false, busy: false },
 		// Repair and Duplicates are two tabs of one page.
-		{ page: 'repair', href: '/repair', label: m.shell_nav_maintenance(), icon: Wrench, count: 0, alert: false }
+		{ page: 'repair', href: '/repair', label: m.shell_nav_maintenance(), icon: Wrench, count: 0, alert: false, busy: false }
 	]);
 	// Settings sits apart, at the bottom of the column.
-	const SETTINGS = $derived({ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false });
+	const SETTINGS = $derived({ page: 'settings', href: '/settings', label: m.shell_nav_settings(), icon: Settings, count: 0, alert: false, busy: false });
 	type NavItem = typeof SETTINGS;
 
 	// The column can shrink to its icons; the choice is kept in this browser.
@@ -71,6 +72,15 @@
 	// Tenants and other saved connections count as servers.
 	void sources.load();
 
+	// For a moment after each navigation the page's first rows come in one after the other (app.css, .is-entering).
+	let entering = $state(true);
+	$effect(() => {
+		void router.route.page;
+		entering = true;
+		const t = setTimeout(() => (entering = false), 480);
+		return () => clearTimeout(t);
+	});
+
 	async function logout() {
 		try {
 			await post('/logout');
@@ -85,7 +95,7 @@
 {#snippet status()}
 	{#if sending.length}
 		<a class="inline-flex min-h-10 items-center gap-2 rounded-btn px-2 text-ink-2 no-underline transition-colors duration-200 hover:text-ink" href="/files" data-testid="upload-indicator">
-			<FolderUp size={14} />
+			<span class="busy inline-flex"><FolderUp size={14} /></span>
 			<span class="font-mono text-xs">{m.shell_uploading({ percent: sendingPercent })}</span>
 		</a>
 	{/if}
@@ -104,12 +114,17 @@
 		title={collapsed ? item.label : undefined}
 		aria-current={current ? 'page' : undefined}
 	>
+		<!-- The current page's mark grows in as it is reached; a slow dot says that work is running there. -->
+		{#if current}<span class="nav-mark absolute inset-y-2.5 left-0 w-0.5 rounded-full bg-ink" aria-hidden="true"></span>{/if}
 		<Icon size={18} />
 		<span class={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{item.label}</span>
+		{#if item.busy && !collapsed && !item.alert}<span class="live-dot" aria-hidden="true"></span>{/if}
 		{#if item.count && !collapsed}
 			<span class={`rounded-plate px-1.5 font-mono text-xs ${item.alert ? 'bg-warning-soft text-warning-ink' : 'text-ink-3'}`}>{item.count}</span>
 		{:else if item.alert}
 			<span class="absolute top-2 right-2 size-1.5 rounded-full bg-warning" aria-hidden="true"></span>
+		{:else if item.busy && collapsed}
+			<span class="live-dot absolute top-2 right-2" aria-hidden="true"></span>
 		{/if}
 	</a>
 {/snippet}
@@ -148,6 +163,7 @@
 						aria-current={isCurrent(item.page) ? 'page' : undefined}
 					>
 						{item.label}
+						{#if item.busy && !item.alert}<span class="live-dot ml-2" aria-hidden="true"></span>{/if}
 					</a>
 				{/each}
 			</nav>
@@ -158,7 +174,9 @@
 	</header>
 {/if}
 
-<main id="main" class="px-[var(--gutter)] pt-[var(--bar-h)] pb-28 lg:ml-[var(--side-w)] lg:px-8">
+<main id="main" class={`px-[var(--gutter)] pt-[var(--bar-h)] pb-28 lg:ml-[var(--side-w)] lg:px-8 ${entering ? 'is-entering' : ''}`}>
+	<!-- A new page fades in with a short rise (app.css .page-enter); a change inside a page does not. -->
+	{#key router.route.page}<div class="page-enter">
 	{#if router.route.page === 'migrations'}
 		<MigrationsPage />
 	{:else if router.route.page === 'files'}
@@ -174,6 +192,7 @@
 	{:else}
 		<SettingsPage />
 	{/if}
+	</div>{/key}
 </main>
 
 {#if Extra}<Extra part="footer" />{/if}

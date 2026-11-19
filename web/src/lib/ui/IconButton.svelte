@@ -27,7 +27,7 @@
 		outline: 'border border-line-strong bg-surface hover:border-ink-3'
 	};
 	const ink = $derived(variant === 'primary' ? '' : tone === 'danger' ? 'text-warning-ink' : variant === 'outline' ? 'text-ink' : 'text-ink-2 hover:text-ink');
-	const classes = $derived(`inline-flex size-10 shrink-0 items-center justify-center rounded-btn transition-[opacity,background-color,border-color,color] duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${LOOK[variant]} ${ink} ${className}`);
+	const classes = $derived(`inline-flex size-10 shrink-0 items-center justify-center press rounded-btn transition-[opacity,background-color,border-color,color,transform] duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${LOOK[variant]} ${ink} ${className}`);
 </script>
 
 {#if href && !disabled}
