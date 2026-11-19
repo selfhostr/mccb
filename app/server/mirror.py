@@ -131,12 +131,22 @@ def unstable(epoch: str | None) -> bool:
     return bool(epoch) and any(m in epoch for m in UNSTABLE_EPOCHS)
 
 
-def ident_of(phase: str, pst_key: str, row: dict) -> str:
-    """How the target knows one of our items: its import id (mail) or its resource name."""
+def idents_of(phase: str, pst_key: str, row: dict) -> list[str]:
+    """How the target may know one of our items, in the order tried against inventory(): a mail by its import id
+    (the one it still carries after a move); an event, contact or task by its resource name (DAV-like targets) and
+    by its import id (targets that mark items with it: EWS, Graph, JMAP), the resource name possibly coming from
+    the source and not from the import id."""
+    from .runner import import_id_of
     if phase == MAIL:
-        from .runner import import_id_of
-        return row.get("stamp") or import_id_of(pst_key, row["item_key"])
-    return row["hash"] or ""
+        return [row.get("stamp") or import_id_of(pst_key, row["item_key"])]
+    out = [row["hash"]] if row.get("hash") else []
+    iid = row.get("stamp") or import_id_of(pst_key, row["item_key"])
+    return out + [iid] if iid not in out else out
+
+
+def ident_of(phase: str, pst_key: str, row: dict) -> str:
+    """The first of idents_of(): the one used when nothing was matched on the target."""
+    return idents_of(phase, pst_key, row)[0]
 
 
 def wants(row: dict | None) -> bool:
@@ -173,6 +183,7 @@ class Action:
     refs: list[RemoteItem] = field(default_factory=list)
     add: list[str] = field(default_factory=list)
     remove: list[str] = field(default_factory=list)
+    ident: str = ""                  # the key of inventory() the item was found under (import id or resource name)
 
     @property
     def counted(self) -> bool:
@@ -424,7 +435,7 @@ def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, r
         for a in touching:
             by_target.setdefault(a.row["target"] or "", []).append(a)
         for target, group in by_target.items():
-            names = None if phase == MAIL else {a.row["hash"] for a in group if a.row["hash"]}
+            names = None if phase == MAIL else {i for a in group for i in idents_of(phase, pst_key, a.row)}
             try:
                 inv = retry_target(session, lambda: session.inventory(target, pst_key, names))
             except ConnectorError as e:
@@ -432,7 +443,12 @@ def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, r
                 log(f"Mirror: cannot list '{target}' on the target: {e}", "error")
                 return
             for a in group:
-                a.refs = list(inv.get(ident_of(phase, pst_key, a.row), []))
+                idents = idents_of(phase, pst_key, a.row)
+                a.ident = idents[0]
+                for ident in idents:
+                    if inv.get(ident):
+                        a.refs, a.ident = list(inv[ident]), ident
+                        break
                 if a.action == "record" and a.refs:
                     # written before versions were kept: compared with what the target holds
                     have, want = split_flags(canon_flags(a.refs[0].flags)), split_flags(canon_flags(a.item.flags))

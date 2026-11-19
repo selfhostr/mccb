@@ -729,7 +729,7 @@ class ConnectorJobRunner(JobRunner):
                         kept = True
                         self.log(f"Mirror delete {phase} key={key} ref={r.ref}: no copy could be kept, kept", "warning")
                         continue
-                    path = mm.backup_copy(self.job_id, phase, mm.ident_of(phase, self.pst_key, a.row) + r.ref, raw)
+                    path = mm.backup_copy(self.job_id, phase, a.ident + r.ref, raw)
                     self.log(f"Mirror delete {phase} key={key} ref={r.ref}: copy kept in {path}")
                 ready.setdefault(target, []).append((a, r.ref, mode))
             if kept:
@@ -739,7 +739,7 @@ class ConnectorJobRunner(JobRunner):
         for target, group in ready.items():
             for i in range(0, len(group), 100):
                 chunk = group[i:i + 100]
-                expected = {ref: mm.ident_of(phase, self.pst_key, a.row) for a, ref, _ in chunk}
+                expected = {ref: a.ident for a, ref, _ in chunk}
                 res, good = self._mirror_act(session, st, "delete", f"{len(chunk)} item(s) in '{target}'",
                                              lambda: session.delete_many(target, [ref for _, ref, _ in chunk], expected))
                 res = res or {}

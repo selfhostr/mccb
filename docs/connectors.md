@@ -89,7 +89,7 @@ A target declares what it can do, and the mirror only uses what is declared:
 
 | Capability | Method | Contract |
 |---|---|---|
-| `CAP_INVENTORY` | `inventory(folder, namespace, names)` | Read only. `{import id or resource name: [RemoteItem(ref, flags, version)]}` of OUR items in the folder: mails whose import id starts with `<namespace>-`, resources whose name is in `names`. Never pre-existing content. Required for any mirror write. |
+| `CAP_INVENTORY` | `inventory(folder, namespace, names)` | Read only. `{import id or resource name: [RemoteItem(ref, flags, version)]}` of OUR items in the folder: mails whose import id starts with `<namespace>-`, resources whose name is in `names`. An event, contact or task is looked up under its resource name, then under its import id: a target that marks items with their import id (EWS, Graph, JMAP) may key them by it and ignore `names`, which also holds those import ids. Never pre-existing content. Required for any mirror write. |
 | `CAP_DELETE` | `delete_mode(folder)`, `delete(folder, ref, expected_import_id)`, `delete_many(folder, refs, expected_import_ids)` | `DELETE_TRASH`: moved to the trash of the target. `DELETE_SOFT`: marked, still there (a mail flagged `\Deleted` and `$MccbMirrorDeleted`, never expunged). `DELETE_HARD`: gone, and the runner first keeps a copy through `read()` under `<data>/mirror-trash/`. Already gone is not an error. |
 | `CAP_UPDATE` | `update(folder, ref, item)` | Replaces the content of one of our events, contacts or tasks. |
 | `CAP_SET_FLAGS` | `set_flags(folder, ref, add, remove)` | Changes the flags of one of our mails. |

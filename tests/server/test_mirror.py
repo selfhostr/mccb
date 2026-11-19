@@ -469,3 +469,28 @@ def test_deletes_go_in_batches(client, box, monkeypatch):
     assert rep["mirror"]["mail"]["deleted"] == 2
     assert [(f, n) for f, n, _ in calls] == [("INBOX", 2)]
     assert all(v.startswith("<src-") for v in calls[0][2].values())
+
+
+def test_target_marking_by_import_id_with_source_resource_names(client, box):
+    """Contacts named by the source (c3.vcf, not derived from the import id) on a target that knows its items only
+    by import id (EWS, Graph, JMAP): found again, updated and deleted, never copied twice."""
+    from app.server import db
+    aid, src, dst = make(client)
+    dst.by_import_id = True
+    full(client, aid)
+    assert db.q1("SELECT hash FROM items WHERE kind='contact' LIMIT 1")["hash"].endswith(".vcf")
+
+    def copies(uid):
+        return [c for c in ours(dst, "Contacts") if f"UID:{uid}\r".encode() in c.raw]
+    src.get("c3").version = "2"
+    src.get("c3").body = "new phone"
+    src.remove("c4")
+    acc = preview(client, aid)
+    assert acc["to_update"]["contacts"] == 1 and acc["to_delete"]["contacts"] == 1, acc
+    job, rep = mirror(client, aid)
+    assert rep["mirror"]["contacts"] == {"added": 0, "updated": 1, "deleted": 1, "skipped_by_safety": 0, "errors": 0}
+    assert len(copies("c3")) == 1 and b"new phone" in copies("c3")[0].raw
+    assert copies("c4") == []
+    assert all(len(copies(f"c{i}")) == 1 for i in range(4))
+    acc = preview(client, aid)
+    assert acc["to_add"]["contacts"] == acc["to_update"]["contacts"] == acc["to_delete"]["contacts"] == 0

@@ -166,6 +166,9 @@ class Store:
         self.writes: list[tuple] = []
         self.trash = "Trash"
         self.inventory_errors: set[str] = set()
+        # True: events, contacts and tasks are marked by their import id like mail (EWS, Graph, JMAP), their
+        # resource name is ignored; False: known by their resource name (DAV)
+        self.by_import_id = False
 
     def native(self, folder: str, raw: bytes, ident: str = "") -> str:
         ref = str(next(self._ref))
@@ -205,7 +208,7 @@ class StoreSession(TargetSession):
     def put(self, folder, item):
         with self.s.lock:
             box = self.s.folders.setdefault(folder, {})
-            ident = item.import_id if item.kind == MAIL else item.name
+            ident = item.import_id if item.kind == MAIL or self.s.by_import_id else item.name
             if item.kind != MAIL:  # DAV-like: same name overwrites
                 for ref, c in list(box.items()):
                     if c.ident == ident:
@@ -216,7 +219,7 @@ class StoreSession(TargetSession):
             return ref
 
     def find(self, folder, item):
-        ident = item.import_id if item.kind == MAIL else item.name
+        ident = item.import_id if item.kind == MAIL or self.s.by_import_id else item.name
         with self.s.lock:
             return [c.ref for c in self.s.folders.get(folder, {}).values() if c.ident == ident]
 
