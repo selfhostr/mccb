@@ -219,30 +219,116 @@ def test_dav_update_and_delete_use_if_match(client):
 
 
 @needs_dav
-def test_dav_first_write_never_overwrites_a_resource_it_did_not_write(client):
-    """M2 (second review): the first PUT goes with If-None-Match: *; a resource already there under that name
-    (an invitation the target named by its UID) is not overwritten, unless it is exactly what mccb writes (a PUT
-    whose answer was lost)."""
-    from app.connectors.base import CALENDAR, ConnectorError, OutgoingItem
+def test_dav_write_over_an_existing_resource_is_kept_unverified(client):
+    """Third review: a normal write goes over a resource already there, as it always did (idempotent, no error).
+    The first PUT says If-None-Match: *, so mccb knows when it wrote over something it had not created: that write
+    is marked ("!" etag), and the mirror never deletes or updates it on that ground."""
+    from app.connectors.base import CALENDAR, OutgoingItem
     user = create_user(prefix="dnm")
     c = client_of(user)
     try:
         coll = c.ensure_collection("caldav", home(user) + "cal/", "VEVENT", "Cal")
-        c.put(coll, "x.ics", ics("x", "native invitation"), "caldav")
+        c.put(coll, "x.ics", ics("x", "already there"), "caldav")
     finally:
         c.close()
     s = dav_session(user)
     try:
-        with pytest.raises(ConnectorError) as err:
-            s.put(coll, OutgoingItem(CALENDAR, ics("x", "from the source").encode(), "<ns-x>", name="x.ics"))
-        assert err.value.kind == ConnectorError.REJECTED and "not written by mccb" in str(err.value)
-        assert "native invitation" in s.read(coll, "x.ics").decode()
-        raw = ics("y", "ours").encode()
-        assert s.put(coll, OutgoingItem(CALENDAR, raw, "<ns-y>", name="y.ics")) == "y.ics"
-        assert s.written_version(coll, "y.ics")
-        assert s.put(coll, OutgoingItem(CALENDAR, raw, "<ns-y>", name="y.ics")) == "y.ics"  # written by this session
+        assert s.put(coll, OutgoingItem(CALENDAR, ics("x", "from the source").encode(), "<ns-x>", name="x.ics")) == "x.ics"
+        assert "from the source" in s.read(coll, "x.ics").decode()
+        assert (s.written_version(coll, "x.ics") or "").startswith("!")
+        assert s.put(coll, OutgoingItem(CALENDAR, ics("y", "new").encode(), "<ns-y>", name="y.ics")) == "y.ics"
+        assert not (s.written_version(coll, "y.ics") or "!").startswith("!")
     finally:
         s.close()
+
+
+def rerun(client, aid):
+    job = run(client, client.post("/api/runs", json={"account_ids": [aid]}).json()[0]["id"])
+    assert job["status"] == "done", client.get(f"/api/jobs/{job['id']}/log").json()
+    return job
+
+
+@needs_dav
+@pytest.mark.parametrize("how", ["items_reset", "new_namespace", "interrupted", "target_saved_again"])
+def test_normal_migration_rewrites_what_it_wrote_as_before(client, env, dav, how):
+    """Third review, non-regression (behaviour of 7a68f42): a migration whose items rows are gone, under another
+    namespace, or interrupted, writes again over the resources it wrote before: no error, the newer content of the
+    source on the target."""
+    from app.server import db
+    accounts, src, dst, (cal, todo, book) = dav
+    aid = accounts["caldav"]
+    c = client_of(src)
+    try:
+        c.put(cal, "e1.ics", ics("e1", "Event 1 newer at the source"), "caldav")
+    finally:
+        c.close()
+    if how == "items_reset":
+        db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+    elif how == "new_namespace":
+        db.ex("UPDATE items SET pst_key=pst_key || '-old' WHERE account_id=?", (aid,))
+    elif how == "interrupted":
+        db.ex("UPDATE items SET status='pending' WHERE account_id=?", (aid,))
+    else:
+        srv = client.get(f"/api/accounts/{aid}").json()
+        assert srv
+        db.ex("DELETE FROM items WHERE account_id=?", (aid,))  # what saving another target does (web.py)
+    rerun(client, aid)
+    assert find(contents(dst, "caldav"), "Event 1 newer at the source")
+    if how == "new_namespace":  # rows of this mailbox under the old namespace prove these resources are its own
+        marks = {(r["target_etag"] or "")[:1] for r in db.q(
+            "SELECT target_etag FROM items WHERE account_id=? AND kind='event' AND status='ok' AND pst_key NOT LIKE "
+            "'%-old'", (aid,))}
+        assert "!" not in marks and "" not in marks, marks
+
+
+@needs_dav
+def test_mirror_never_touches_what_was_written_over_a_resource_already_there(client, env, dav):
+    """Third review M2: a row written over a resource that was already on the target (its owner unknown) is never
+    deleted nor updated by the mirror (note unverified_owner); a row of mccb's own write is."""
+    from app.server import db
+    accounts, src, dst, (cal, todo, book) = dav
+    aid = accounts["caldav"]
+    db.ex("DELETE FROM items WHERE account_id=?", (aid,))
+    rerun(client, aid)                                  # every event written again, over what was there
+    marks = {r["target_etag"][:1] for r in db.q("SELECT target_etag FROM items WHERE account_id=? AND kind='event' "
+                                                "AND status='ok'", (aid,))}
+    assert marks == {"!"}, marks
+    c = client_of(src)
+    try:
+        c._request("DELETE", cal + "e3.ics")
+    finally:
+        c.close()
+    acc = preview(client, aid)
+    assert "unverified_owner" in {n["code"] for n in acc["notes"]} and acc["to_delete"]["calendar"] == 0, acc
+    job, rep = mirror(client, aid)
+    assert find(contents(dst, "caldav"), "UID:e3") and rep["mirror"]["calendar"]["deleted"] == 0
+    assert rep["mirror"]["held"]["calendar"]["unverified_owner"] >= 1
+
+
+@needs_dav
+def test_mirror_adopts_legacy_rows_whose_content_matches(client, env, dav):
+    """Third review: rows without a kept etag (written before) are adopted by a mirror job when the target holds
+    exactly what the source has (same lines, in any order): the next pass may then delete them."""
+    from app.server import db
+    accounts, src, dst, (cal, todo, book) = dav
+    aid = accounts["caldav"]
+    db.ex("UPDATE items SET target_etag=NULL WHERE account_id=?", (aid,))
+    c = client_of(src)
+    try:
+        c._request("DELETE", cal + "e3.ics")
+    finally:
+        c.close()
+    job, rep = mirror(client, aid)                      # not verified yet: kept, the others are adopted
+    assert find(contents(dst, "caldav"), "UID:e3")
+    assert db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND kind='event' AND status='ok' AND "
+                 "target_etag IS NULL", (aid,))["n"] == 1   # e3 only: gone at the source, nothing to compare
+    c = client_of(src)
+    try:
+        c._request("DELETE", cal + "e4.ics")
+    finally:
+        c.close()
+    job, rep = mirror(client, aid)
+    assert not find(contents(dst, "caldav"), "UID:e4") and find(contents(dst, "caldav"), "UID:e3")
 
 
 @needs_dav
@@ -271,6 +357,7 @@ def test_dav_item_changed_on_the_target_is_left_alone(client, env, dav):
     tree = contents(dst, "caldav")
     assert find(tree, "Event 3 edited on the target") and find(tree, "Event 1 edited on the target")
     assert rep["mirror"]["calendar"]["deleted"] == 0 and rep["mirror"]["calendar"]["skipped_by_safety"] == 2
+    assert rep["mirror"]["held"]["calendar"]["target_modified"] == 2
 
 
 # ------------------------------------------------------------------ without a server (httpx.MockTransport)
@@ -364,6 +451,62 @@ def test_exists_without_a_recorded_name_answers_present():
     got = s.exists(f, ["k-unnamed", "k-gone"], {"k-gone": "gone.ics"})
     assert got == {"k-unnamed": True, "k-gone": False}
     assert [m for m, _u in asked] == ["GET"]
+
+
+def test_put_on_a_server_that_ignores_if_none_match():
+    """A server that ignores If-None-Match simply writes: no error."""
+    import httpx
+    from app.connectors.base import CALENDAR, OutgoingItem
+    from app.connectors.dav import DavSession
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.headers.get("if-none-match"), req.headers.get("if-match")))
+        return httpx.Response(204, headers={"ETag": '"e9"'})
+    s = DavSession("caldav", {"url": "http://dav.test/u/", "login": "u"}, {"password": "pw"})
+    s.client = mocked(handler)
+    assert s.put("http://dav.test/u/c/", OutgoingItem(CALENDAR, b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "<ns-x>",
+                                                       name="x.ics")) == "x.ics"
+    assert seen == [("PUT", "*", None)] and s.written_version("http://dav.test/u/c/", "x.ics") == '"e9"'
+
+
+def test_put_over_a_resource_named_by_its_uid():
+    """A server that names objects by their UID (MDaemon) answers 412 to If-None-Match when the object is there:
+    written over it with If-Match on the etag just read, as before (marked "!")."""
+    import httpx
+    from app.connectors.base import CALENDAR, OutgoingItem
+    from app.connectors.dav import DavSession
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.headers.get("if-none-match"), req.headers.get("if-match")))
+        if req.method == "PUT" and req.headers.get("if-none-match"):
+            return httpx.Response(412)
+        if req.method == "PROPFIND":
+            return httpx.Response(207, content=(MS_HEAD + res("x.ics", "old") + "</D:multistatus>").encode())
+        return httpx.Response(204, headers={"ETag": '"new"'})
+    s = DavSession("caldav", {"url": "http://dav.test/u/", "login": "u"}, {"password": "pw"})
+    s.client = mocked(handler)
+    assert s.put("http://dav.test/u/c/", OutgoingItem(CALENDAR, b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "<ns-x>",
+                                                       name="x.ics")) == "x.ics"
+    assert [m for m in seen if m[0] == "PUT"] == [("PUT", "*", None), ("PUT", None, '"old"')]
+    assert s.written_version("http://dav.test/u/c/", "x.ics") == '!"new"'
+
+
+def test_no_extra_propfind_outside_the_mirror():
+    """Third review m2: a server that gives no ETag to a PUT costs no PROPFIND in a normal migration."""
+    import httpx
+    from app.connectors.base import CALENDAR, OutgoingItem
+    from app.connectors.dav import DavSession
+    seen = []
+
+    def handler(req):
+        seen.append(req.method)
+        return httpx.Response(201)
+    s = DavSession("caldav", {"url": "http://dav.test/u/", "login": "u"}, {"password": "pw"})
+    s.client = mocked(handler)
+    s.put("http://dav.test/u/c/", OutgoingItem(CALENDAR, b"X", "<ns-x>", name="x.ics"))
+    assert seen == ["PUT"] and s.written_version("http://dav.test/u/c/", "x.ics") is None
 
 
 def test_dav_update_sends_if_match_and_a_412_is_temporary():

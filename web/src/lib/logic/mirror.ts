@@ -127,7 +127,7 @@ export const blockedBy = (accounts: readonly MirrorAccountPlan[], code: string):
 export const offersLargeDelete = (accounts: readonly MirrorAccountPlan[]): boolean => accounts.some((a) => a.blocked?.some((b) => b.code === 'too_many_deletes'));
 
 /** What a mirror run does that is worth knowing, without stopping it. The API message of each note is kept as the detail. */
-export const NOTE_CODES = ['soft_delete', 'hard_delete', 'no_copy_kept', 'shared_resource'] as const;
+export const NOTE_CODES = ['soft_delete', 'hard_delete', 'no_copy_kept', 'shared_resource', 'target_modified', 'unverified_owner'] as const;
 export type NoteCode = (typeof NOTE_CODES)[number];
 
 /** `warning` is shown before Apply as something to read (a deletion that cannot be undone, or less safe than usual); `note` is plain information. */

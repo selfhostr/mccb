@@ -1341,7 +1341,13 @@ class JobRunner:
                 self._ok_items += 1
                 self._ok_buf.append(("ok", r.item_id))
                 if r.version:
-                    db.ex("UPDATE items SET target_etag=? WHERE id=?", (r.version, r.item_id))
+                    v = r.version
+                    if v.startswith("!") and db.q1(
+                            "SELECT 1 FROM items o JOIN items i ON i.id=? WHERE o.account_id=i.account_id AND "
+                            "o.kind=i.kind AND o.target=i.target AND o.hash=i.hash AND o.id<>i.id AND "
+                            "o.status IN ('ok','deleted') LIMIT 1", (r.item_id,)):
+                        v = v[1:]  # written over a resource of a row of this mailbox (another namespace): ours
+                    db.ex("UPDATE items SET target_etag=? WHERE id=?", (v, r.item_id))
             elif r.kind == "cancel":
                 self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():

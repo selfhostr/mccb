@@ -16,7 +16,9 @@
 		soft_delete: { label: m.migrations_mirror_note_soft_delete(), hint: m.migrations_mirror_note_soft_delete_hint() },
 		hard_delete: { label: m.migrations_mirror_note_hard_delete(), hint: m.migrations_mirror_note_hard_delete_hint() },
 		no_copy_kept: { label: m.migrations_mirror_note_no_copy_kept(), hint: m.migrations_mirror_note_no_copy_kept_hint() },
-		shared_resource: { label: m.migrations_mirror_note_shared_resource(), hint: m.migrations_mirror_note_shared_resource_hint() }
+		shared_resource: { label: m.migrations_mirror_note_shared_resource(), hint: m.migrations_mirror_note_shared_resource_hint() },
+		target_modified: { label: m.migrations_mirror_note_target_modified(), hint: m.migrations_mirror_note_target_modified_hint() },
+		unverified_owner: { label: m.migrations_mirror_note_unverified_owner(), hint: m.migrations_mirror_note_unverified_owner_hint() }
 	});
 	const lines = $derived(noteLines(notes, LABELS));
 </script>

@@ -46,7 +46,7 @@ FATAL_UNKNOWN = {"code": UNKNOWN_ACCOUNT, "message": "unknown mailbox"}
 FATAL = {MIRROR_OFF, NO_PRIOR_RUN, TARGET_UNREACHABLE, UNKNOWN_ACCOUNT}  # nothing at all is done
 # notes (API contract): no block, what the pass will do that the user should know
 SOFT_DELETE, HARD_DELETE, NO_COPY_KEPT, SHARED_RESOURCE = "soft_delete", "hard_delete", "no_copy_kept", "shared_resource"
-TARGET_MODIFIED = "target_modified"
+TARGET_MODIFIED, UNVERIFIED_OWNER = "target_modified", "unverified_owner"
 GAVE_UP = "no longer at the source"  # items.error of a row given up: it holds no resource of anyone
 ACTIVE_STATUSES = ("queued", "running", "paused", "stopping")
 
@@ -222,6 +222,7 @@ class Analysis:
     gone_unfinished: list[dict] = field(default_factory=list)   # pending / inflight / error rows confirmed gone
     refused: set[tuple[str, str]] = field(default_factory=set)  # (phase, folder key) left alone
     notes: list[dict] = field(default_factory=list)             # what the pass will do that the user should know
+    held: dict[str, dict[str, int]] = field(default_factory=dict)  # phase -> {reason: deletions/updates held}
     # candidates, settled by _confirm_gone: unfinished rows no longer listed, moves (the add and the old row)
     unfinished: list[tuple[str, dict]] = field(default_factory=list)
     moves: list[tuple[str, Action, dict]] = field(default_factory=list)
@@ -232,6 +233,12 @@ class Analysis:
     def block(self, code: str, message: str, **extra) -> None:
         if not any(b["code"] == code and b["message"] == message for b in self.blocked):
             self.blocked.append({"code": code, "message": message, **extra})
+
+    def hold(self, phase: str, reason: str, n: int = 1) -> None:
+        if n:
+            by = self.held.setdefault(phase, {})
+            by[reason] = by.get(reason, 0) + n
+            self.skipped[phase] = self.skipped.get(phase, 0) + n
 
     def note(self, code: str, message: str) -> None:
         if not any(n["code"] == code and n["message"] == message for n in self.notes):
@@ -282,11 +289,14 @@ def preflight(acc) -> list[dict]:
 # ------------------------------------------------------------------ analysis (read only, shared by dry run and job)
 def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessions: dict[str, Any],
             capabilities: dict[str, frozenset], account_id: int, pst_key: str, policy: pol.Policy, opts: Options,
-            retry=None, retry_target=None, log=None, source_keys: set[str] | None = None) -> Analysis:
+            retry=None, retry_target=None, log=None, source_keys: set[str] | None = None,
+            owners: set[str] | None = None) -> Analysis:
     """What a mirror pass would do. `source` is a ReadOnlySource, `folders` the source folders to mirror (exclusions
     applied), `known_folders` the keys of every folder the source still has (excluded ones too, old keys too),
     `source_keys` the folder_key() of every folder the source has (None: those of `folders`), `sessions` {phase:
-    connected target session}. Reads only: the source, the items table and the inventory of the target."""
+    connected target session}, `owners` the phases whose target proves an item is mccb's by the etag of mccb's
+    write (DAV: Target.names_resources). Reads only: the source, the items table and the inventory of the
+    target."""
     from .runner import folder_key, legacy_folder_key
     retry = retry or (lambda fn: fn())
     retry_target = retry_target or (lambda session, fn: fn())
@@ -376,6 +386,10 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
                                                             add=sorted(new - old), remove=sorted(old - new)))
                     elif it.version is not None and r["version"] != it.version:
                         an.actions[phase].append(Action("update", phase, row=r, folder=f, item=it))
+                    elif phase in (owners or ()) and not r.get("target_etag"):
+                        # written before etags were kept: the job compares the target with the source, and keeps
+                        # the etag when they hold the same object (adopted); until then it is never touched
+                        an.actions[phase].append(Action("adopt", phase, row=r, folder=f, item=it))
             gone_f = []
             for r in rows.values():
                 if r["item_key"] in seen:
@@ -447,7 +461,7 @@ def analyze(source, folders: list[SourceFolder], known_folders: set[str], sessio
         an.drop_deletes()
     else:
         _confirm_gone(an, source, folders, retry, log, source_keys)
-    _inventory(an, sessions, capabilities, pst_key, retry_target, log)
+    _inventory(an, sessions, capabilities, pst_key, retry_target, log, owners or set())
     _shared_resources(an, log)
     _delete_notes(an, sessions, capabilities, log)
     return an
@@ -520,7 +534,8 @@ def _confirm_gone(an: Analysis, source, folders: list[SourceFolder], retry, log,
     an.unfinished = []
 
 
-def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, retry_target, log) -> None:
+def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, retry_target, log,
+               owners: set[str] = frozenset()) -> None:
     """Finds our items on the target for every action that touches one: the refs, the flags of mails written before
     versions were kept. An item no longer on the target is left alone (delete: just recorded), except an update:
     written again (added), whatever removed it from the target."""
@@ -572,7 +587,17 @@ def _inventory(an: Analysis, sessions: dict, capabilities: dict, pst_key: str, r
         # nothing to do on an item the target no longer has, except recording a deletion
         an.actions[phase] = [a for a in an.actions[phase]
                              if a.action in ("add", "delete") or a.refs or a.action == "record"]
-    _target_modified(an, log)
+    _target_modified(an, owners, log)
+
+
+def same_object(a: bytes, b: bytes) -> bool:
+    """Two iCalendar / vCard texts hold the same object: the same unfolded lines, in any order (servers reorder
+    properties), line endings aside."""
+    def lines(raw: bytes) -> list[str]:
+        text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+        text = text.replace("\n ", "").replace("\n\t", "")
+        return sorted(x.strip() for x in text.split("\n") if x.strip())
+    return lines(a) == lines(b)
 
 
 def _norm_etag(v: str | None) -> str:
@@ -580,27 +605,44 @@ def _norm_etag(v: str | None) -> str:
     return v[2:] if v.startswith("W/") else v
 
 
-def _target_modified(an: Analysis, log) -> None:
-    """An event, contact or task whose version on the target is no longer the one mccb wrote (items.target_etag,
-    DAV) was changed there since, by someone else: it is neither deleted nor overwritten (target_modified)."""
+def _target_modified(an: Analysis, owners: set[str], log) -> None:
+    """On a target that proves its items by their etag (`owners`, DAV), an event, contact or task is deleted or
+    updated only when the etag the inventory sees is the one of mccb's own write (items.target_etag):
+    - another etag: changed on the target since (target_modified);
+    - none kept, or kept with "!" (written over a resource that was already there, owner unknown), or no etag in
+      the inventory: mccb cannot show it is its own (unverified_owner).
+    Either way it is neither deleted nor overwritten, counted in skipped_by_safety and in `held`."""
     for phase, acts in an.actions.items():
         if phase == MAIL:
             continue
-        out, held = [], 0
+        out = []
+        modified = unverified = 0
         for a in acts:
             mine = (a.row or {}).get("target_etag")
             seen = a.refs[0].version if a.refs else None
-            if a.action in ("delete", "update") and mine and seen and _norm_etag(seen) != _norm_etag(mine):
-                held += 1
-                log(f"Mirror: {phase} key={a.row['item_key']} was changed on the target since mccb wrote it: not "
-                    f"{'deleted' if a.action == 'delete' else 'overwritten'}", "warning")
-                continue
+            verb = "deleted" if a.action == "delete" else "overwritten"
+            if a.action in ("delete", "update") and a.refs and phase in owners:
+                if not mine or mine.startswith("!") or not seen:
+                    unverified += 1
+                    log(f"Mirror: {phase} key={a.row['item_key']}: mccb cannot show the item on the target is the "
+                        f"one it wrote (no etag of its write): not {verb}", "warning")
+                    continue
+                if _norm_etag(seen) != _norm_etag(mine):
+                    modified += 1
+                    log(f"Mirror: {phase} key={a.row['item_key']} was changed on the target since mccb wrote it: not "
+                        f"{verb}", "warning")
+                    continue
             out.append(a)
-        if held:
-            an.actions[phase] = out
-            an.skipped[phase] = an.skipped.get(phase, 0) + held
-            an.note(TARGET_MODIFIED, f"{phase}: {held} item(s) were changed on the target since mccb wrote them: "
-                    "they are neither deleted nor overwritten")
+        an.actions[phase] = out
+        an.hold(phase, TARGET_MODIFIED, modified)
+        an.hold(phase, UNVERIFIED_OWNER, unverified)
+        if modified:
+            an.note(TARGET_MODIFIED, f"{phase}: {modified} item(s) were changed on the target since mccb wrote them "
+                    "(by someone, or by the server itself): they are neither deleted nor overwritten")
+        if unverified:
+            an.note(UNVERIFIED_OWNER, f"{phase}: {unverified} item(s) cannot be shown to be the ones mccb wrote (written "
+                    "before etags were kept, or over a resource that was already there): they are neither deleted "
+                    "nor overwritten")
 
 
 def _shared_resources(an: Analysis, log) -> None:
@@ -782,7 +824,9 @@ def preview_account(account_id: int, opts: Options) -> dict:
                 an.block(SOURCE_UNLISTABLE, f"the source could not be read: {e}")
             else:
                 caps = {p: targets[p].capabilities for p in phases}
-                an = analyze(src, folders, known, sessions, caps, account_id, pst_key, policy, opts, source_keys=keys)
+                owners = {p for p in phases if getattr(targets[p], "names_resources", False)}
+                an = analyze(src, folders, known, sessions, caps, account_id, pst_key, policy, opts, source_keys=keys,
+                             owners=owners)
     finally:
         if src is not None:
             src.close()
@@ -796,6 +840,7 @@ def preview_account(account_id: int, opts: Options) -> dict:
         out.update(summary(an))
         out["sample"] = sample(an)
         out["notes"] = an.notes
+        out["held"] = an.held
     out["ready"] = not out["blocked"]
     return out
 

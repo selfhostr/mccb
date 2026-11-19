@@ -137,6 +137,8 @@ class ConnectorJobRunner(JobRunner):
         self._mirror_entries: dict[tuple[str, str], list] = {}  # mirror: (kind, folder key) -> entries to add
         self._known_folders: set[str] = set()     # keys of every folder the source has, excluded ones too
         self._source_keys: set[str] = set()       # folder_key() of every folder the source has (no old keys)
+        self._deferred: list = []                 # items waiting for another write of their resource name
+        self._deferring = False
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -465,6 +467,16 @@ class ConnectorJobRunner(JobRunner):
                 self._tune_tick(pool)
                 self._migrate_item(self.folders[fi], kind, phase, key, it, plan, pool)
             self._wait_pool(pool)
+            if self._deferred:  # items waiting for the write of another item of the same resource name
+                waiting, self._deferred = self._deferred, []
+                self._deferring = True
+                try:
+                    for df, dkind, dphase, dkey, dit in waiting:
+                        self.check()
+                        self._migrate_item(df, dkind, dphase, dkey, dit, plan, pool)
+                    self._wait_pool(pool)
+                finally:
+                    self._deferring = False
             self._mark()
             self.check()
             # everything listed is now recorded: the next delta pass may start from these cursors
@@ -545,16 +557,23 @@ class ConnectorJobRunner(JobRunner):
             mark = name  # as on the PST path: the hash column of a DAV item is its resource name
             other = None
             if getattr(self.targets[phase], "names_resources", False):  # the name IS the item there (DAV)
-                other = db.q1("SELECT folder, hash FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? "
-                              "AND hash=? COLLATE NOCASE AND status IN ('ok','inflight') "
-                              "AND NOT (folder=? AND item_key=?) LIMIT 1",
+                other = db.q1("SELECT folder, hash, status, target_etag FROM items WHERE account_id=? AND pst_key=? AND kind=? "
+                              "AND target=? AND hash=? COLLATE NOCASE AND status IN ('ok','inflight') "
+                              "AND NOT (folder=? AND item_key=?) ORDER BY status='ok' DESC LIMIT 1",
                               (self.account_id, self.pst_key, kind, target, name, fkey, key))
+                if other is not None and other["status"] != "ok":
+                    if not self._deferring:
+                        # its write is still in progress: this one waits for it (after the pool is drained)
+                        self._deferred.append((f, kind, phase, key, it))
+                        return
+                    other = None  # that write did not succeed: this one is written itself
             if other is not None:
                 # the resource is already the copy of another item (same UID in two source folders): never written
                 # over; both rows carry it, the mirror deletes it only when both go (mirror.py, shared resources)
-                self.upsert_item(kind, key, fkey, "ok", target=target, subject=got.subject, hash=other["hash"],
-                                 size=len(raw), source_ref=it.alt_key, version=mm.version_of(phase, it),
-                                 src_ref=mm.ref_json(it.ref))
+                row_id = self.upsert_item(kind, key, fkey, "ok", target=target, subject=got.subject,
+                                          hash=other["hash"], size=len(raw), source_ref=it.alt_key,
+                                          version=mm.version_of(phase, it), src_ref=mm.ref_json(it.ref))
+                db.ex("UPDATE items SET target_etag=? WHERE id=?", (other["target_etag"], row_id))  # one resource
                 w = (f"shared_resource: '{got.subject}' ({fkey}) has the resource name '{name}' of an item of "
                      f"'{other['folder']}' in {target}: not written over it, one copy for both")
                 self.report["warnings"].append(w)
@@ -582,6 +601,9 @@ class ConnectorJobRunner(JobRunner):
         stats = {p: mm.counters() for p in phases}
         self.report["mirror"] = {"options": opts.view(), "blocked": [], **stats}
         sessions = {}
+        for p in phases:  # every write's etag is kept, even from a server whose PUT does not give it (DAV)
+            if hasattr(self.targets[p], "keep_versions"):
+                self.targets[p].keep_versions = True
         try:
             for p in phases:
                 s = self.targets[p].session()
@@ -595,8 +617,10 @@ class ConnectorJobRunner(JobRunner):
                             {p: self.targets[p].capabilities for p in phases}, self.account_id, self.pst_key,
                             self.policy, opts, retry=self._on_source,
                             retry_target=lambda s, fn: self._on_session(s, fn), log=self.log,
-                            source_keys=self._source_keys)
+                            source_keys=self._source_keys,
+                            owners={p for p in phases if getattr(self.targets[p], "names_resources", False)})
             self.report["mirror"]["blocked"] = an.blocked
+            self.report["mirror"]["held"] = an.held
             self.report["mirror"]["notes"] = an.notes
             if an.fatal:
                 raise JobFailed("mirror refused: " + "; ".join(f"{b['code']}: {b['message']}" for b in an.blocked))
@@ -642,6 +666,27 @@ class ConnectorJobRunner(JobRunner):
             if stats[p]["errors"]:
                 self.problems.append(f"mirror: {stats[p]['errors']} {p} action(s) failed")
             self.log(f"Mirror {p}: " + ", ".join(f"{k} {v}" for k, v in stats[p].items()))
+
+    def _mirror_adopt(self, phase: str, a, session) -> None:
+        """A row without the etag of mccb's write (migrated before they were kept): when the target holds the same
+        object as the source (same lines, in any order: servers reorder them), the etag the inventory saw is kept,
+        and the mirror may delete or update it from the next pass on. Different: left as it is, never touched."""
+        key, target = a.row["item_key"], a.row["target"]
+        import_id = import_id_of(self.pst_key, key)
+        try:
+            got = self._on_source(lambda: self.source.fetch(a.folder, a.item, import_id))
+            there = self._on_session(session, lambda: session.read(target, a.refs[0].ref)) if got else None
+        except ConnectorError as e:
+            self._item_log(f"Mirror adopt {phase} key={key}: cannot compare ({e}), kept unverified", "warning")
+            return
+        if got is None or there is None or a.refs[0].version is None:
+            return
+        if mm.same_object(got.raw, there):
+            db.ex("UPDATE items SET target_etag=? WHERE id=? AND target_etag IS NULL", (a.refs[0].version, a.row["id"]))
+            self.log(f"Mirror adopt {phase} key={key} ref={a.refs[0].ref}: same object on both sides, its etag kept")
+        else:
+            self.log(f"Mirror adopt {phase} key={key} ref={a.refs[0].ref}: the target holds another version, never "
+                     "touched by the mirror", "warning")
 
     def _mirror_act(self, session, st: dict, what: str, key: str, fn):
         """(result, ok) of one write on the target; a failure is counted and logged, the pass goes on."""
@@ -735,6 +780,8 @@ class ConnectorJobRunner(JobRunner):
             except ConnectorError as e:
                 if e.kind in (ConnectorError.AUTH, ConnectorError.QUOTA):
                     raise JobFailed(f"Target: {e}") from e
+                if e.retryable:  # a dead connection must not fail every update after this one
+                    session.close()
                 st["errors"] += 1
                 self._item_log(f"Mirror update {phase} key={key} ref={first} in '{target}': failed ({e})", "error")
                 continue
@@ -751,11 +798,18 @@ class ConnectorJobRunner(JobRunner):
                     self.log(f"Mirror update {phase} key={key}: older copies {','.join(extra)} in '{target}': "
                              + ("to the trash" if good and set(res or {}) >= set(extra) else "not all removed"),
                              "info" if good else "error")
+            etag = session.written_version(target, new or first)
             db.ex("UPDATE items SET version=?, subject=?, size=?, target_etag=?, job_id=?, updated_at=? WHERE id=?",
-                  (a.item.version, got.subject, len(got.raw), session.written_version(target, new or first),
-                   self.job_id, now(), a.row["id"]))
+                  (a.item.version, got.subject, len(got.raw), etag, self.job_id, now(), a.row["id"]))
+            if etag and getattr(self.targets[phase], "names_resources", False) and a.row.get("hash"):
+                # the other rows of this same resource (same UID in another folder) follow its new etag
+                db.ex("UPDATE items SET target_etag=? WHERE account_id=? AND kind=? AND target=? AND "
+                      "hash=? COLLATE NOCASE AND status='ok' AND id<>?",
+                      (etag, self.account_id, CARRIED[phase], target, a.row["hash"], a.row["id"]))
             st["updated"] += 1
             self.log(f"Mirror update {phase} key={key} ref={first} -> {new or first} in '{target}': ok")
+        for a in an.of(phase, "adopt"):  # written before etags were kept: adopted when both sides hold the same
+            self._mirror_adopt(phase, a, session)
         for a in an.of(phase, "release"):  # its resource is also the copy of another item still at the source
             self.set_item(a.row["id"], "deleted", "mirror: deleted at the source; its resource on the target is "
                           "shared with another item still at the source: kept")

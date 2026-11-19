@@ -168,6 +168,7 @@ class Copy:
     raw: bytes
     flags: list[str]
     ours: bool = True     # False: native content of the target
+    version: str = ""     # like a DAV etag: changes on every write
 
 
 class Store:
@@ -187,6 +188,8 @@ class Store:
         self.fail_trash = 0              # update(): so many next moves of the old copy to the trash fail
         self.casefold = False            # resource names compared without case (some DAV servers)
         self.updates = 0                 # update() calls
+        self.fail_put: set[str] = set()  # names (or import ids) whose next put() is refused for good
+        self.update_kills = 0            # so many next update() calls fail AND leave the session dead
 
     def native(self, folder: str, raw: bytes, ident: str = "") -> str:
         ref = str(next(self._ref))
@@ -211,6 +214,7 @@ class StoreSession(TargetSession):
 
     def connect(self):
         self._open = True
+        self.dead = False
 
     def close(self):
         self._open = False
@@ -227,14 +231,22 @@ class StoreSession(TargetSession):
         with self.s.lock:
             box = self.s.folders.setdefault(folder, {})
             ident = item.import_id if item.kind == MAIL or self.s.by_import_id else item.name
+            if ident in self.s.fail_put:
+                self.s.fail_put.discard(ident)
+                raise ConnectorError("invalid object", ConnectorError.REJECTED)
             if item.kind != MAIL and not self.s.by_import_id:  # DAV-like: same name overwrites
                 for ref, c in list(box.items()):
                     if self._same(c.ident, ident):
                         del box[ref]
             ref = str(next(self.s._ref))
-            box[ref] = Copy(ref, ident, item.raw, list(item.flags))
+            box[ref] = Copy(ref, ident, item.raw, list(item.flags), version=f"v{next(self.s._ref)}")
             self.s.writes.append(("put", folder, ident))
             return ref
+
+    def written_version(self, folder, ref):
+        with self.s.lock:
+            c = self.s.folders.get(folder, {}).get(ref)
+            return c.version if c is not None and c.ours else None
 
     def _same(self, a, b):
         return a.casefold() == b.casefold() if self.s.casefold else a == b
@@ -262,11 +274,11 @@ class StoreSession(TargetSession):
         with self.s.lock:
             for c in self.s.folders.get(folder, {}).values():
                 if c.ident.startswith(f"<{namespace}-"):
-                    out.setdefault(c.ident, []).append(RemoteItem(c.ref, list(c.flags)))
+                    out.setdefault(c.ident, []).append(RemoteItem(c.ref, list(c.flags), version=c.version or None))
                     continue
                 for n in names or ():
                     if self._same(c.ident, n):
-                        out.setdefault(n, []).append(RemoteItem(c.ref, list(c.flags)))
+                        out.setdefault(n, []).append(RemoteItem(c.ref, list(c.flags), version=c.version or None))
         return out
 
     def delete_mode(self, folder):
@@ -292,6 +304,12 @@ class StoreSession(TargetSession):
 
     def update(self, folder, ref, item):
         self.s.updates += 1
+        if getattr(self, "dead", False):
+            raise ConnectorError("connection lost", ConnectorError.TRANSIENT)
+        if self.s.update_kills:
+            self.s.update_kills -= 1
+            self.dead = True
+            raise ConnectorError("connection lost", ConnectorError.TRANSIENT)
         if self.s.update_replaces:  # a new copy first, then the old one to the trash
             with self.s.lock:
                 assert self.s.folders[folder][ref].ours
@@ -305,6 +323,7 @@ class StoreSession(TargetSession):
             c = self.s.folders[folder][ref]
             assert c.ours
             c.raw = item.raw
+            c.version = f"v{next(self.s._ref)}"
             self.s.writes.append(("update", folder, c.ident))
             return ref
 

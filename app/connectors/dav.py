@@ -34,6 +34,7 @@ class DavSession(TargetSession):
         self.client: DavClient | None = None
         self._etags: dict[tuple[str, str], str] = {}  # (collection, name) -> etag seen by the last inventory()
         self._written: dict[tuple[str, str], str] = {}  # (collection, name) -> etag of what this session wrote
+        self.keep_versions = False  # the mirror: an etag the PUT does not give back is read
 
     @property
     def connected(self) -> bool:
@@ -121,12 +122,15 @@ class DavSession(TargetSession):
             raise convert(e) from e
 
     def put(self, folder: str, item: OutgoingItem) -> str | None:
-        """A NEW resource only (If-None-Match: *): one already there under that name was not written by mccb (a
-        server that names an invitation by its UID) and is not overwritten, unless this session wrote it and it
-        still has the etag of that write (If-Match). The etag of the write is kept (written_version)."""
+        """Writes the resource, over one already there as mccb always did (a migration is idempotent: its items
+        rows may be gone, its namespace new, while the resources it wrote are still on the target). The first PUT
+        says If-None-Match: *, so that a write over an existing resource is known: it then goes with If-Match on
+        the etag just read, and is marked "!" in written_version(): its owner is not proven, and the mirror never
+        deletes nor updates it on that ground."""
         name = item.name or ""
         text = item.raw.decode("utf-8", "replace")
         c = self._c()
+        mark = ""
         try:
             c.put(folder, name, text, self.dav_kind, if_none_match=True)
         except DavError as e:
@@ -135,34 +139,35 @@ class DavSession(TargetSession):
             if e.status != 412:
                 raise convert(e) from e
             mine = self._written.get((folder, name))
-            refused = ConnectorError(f"{name}: a resource of this name is already on the target and was not "
-                                     "written by mccb: not overwritten", ConnectorError.REJECTED)
-            if not mine:
-                raise refused from e
-            try:  # written by this session: replaced only while it is still what was written
-                c.put(folder, name, text, self.dav_kind, if_match=mine)
+            mark = "" if mine and not mine.startswith("!") else "!"  # written by this very session: still ours
+            try:
+                old = c.etag_of(folder, name)
+                c.put(folder, name, text, self.dav_kind, if_match=old or None)
             except DavError as e2:
-                if e2.status == 412:
-                    raise refused from e2
+                if e2.status in (404, 409):
+                    raise ConnectorError(str(e2), ConnectorError.FOLDER_MISSING) from e2
                 raise convert(e2) from e2
-        self._remember(folder, name)
+        self._remember(folder, name, mark)
         return item.name
 
-    def _remember(self, folder: str, name: str) -> None:
+    def _remember(self, folder: str, name: str, mark: str = "") -> None:
+        """Keeps the etag of a write. Without one in the answer, it is read (PROPFIND) only for the mirror
+        (keep_versions): a normal migration does not pay a request more per item."""
         c = self._c()
         et = getattr(c, "last_etag", "") or ""
-        if not et:
+        if not et and self.keep_versions:
             try:
                 et = c.etag_of(folder, name)
             except DavError:
                 et = ""
-        if et:
-            self._written[(folder, name)] = et
+        if et or mark:
+            self._written[(folder, name)] = mark + et
         else:
             self._written.pop((folder, name), None)
 
     def written_version(self, folder: str, ref: str) -> str | None:
-        """The etag of what this session last wrote to `ref` (None: unknown)."""
+        """The etag of what this session last wrote to `ref`, "!" first when it was written over a resource that
+        was already there (None: unknown)."""
         return self._written.get((folder, ref))
 
     def find(self, folder: str, item: OutgoingItem) -> list[str]:
@@ -260,6 +265,7 @@ def uid_name(raw: bytes, ext: str) -> str | None:
 class DavTarget(Target):
     capabilities = frozenset({CAP_READBACK, CAP_INVENTORY, CAP_DELETE, CAP_UPDATE})
     names_resources = True  # an item IS its resource name: two items of one name are one resource
+    keep_versions = False   # set by a mirror job: every write's etag is read when the PUT does not give it
     dav_kind = "caldav"
     component = "VEVENT"
 
@@ -273,7 +279,9 @@ class DavTarget(Target):
         self.labels: dict[str, str] = {}
 
     def session(self) -> DavSession:
-        return DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
+        session = DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
+        session.keep_versions = self.keep_versions
+        return session
 
     def for_item(self, item: str) -> "DavTarget":
         """The target to use for this item kind (wiring.py): tasks need a calendar that accepts VTODO."""

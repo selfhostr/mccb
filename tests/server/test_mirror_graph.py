@@ -39,11 +39,20 @@ class MirrorGraph(fx.FakeGraph):
         self.purged: list[str] = []       # messages deleted out of Deleted Items (would be the end of them)
         self.batches: list[list[tuple[str, str]]] = []
         self.sub_throttle: list[int] = []  # Retry-After of the next sub-requests of a batch
+        self.replay_trashed = False       # True: a transactionId used before gives back that event, even trashed
         self.gate = None
         self.gate_free: list[int] = []    # free slots of `gate` seen while a batch runs
         self.journal: list[tuple[str, str, str]] = []  # (folder id, message id, "add" | "remove") for delta rounds
         self.after: list = []             # callables run after each request (concurrent changes)
         self.change = 0
+
+
+    def _create_event(self, cid: str, body: dict) -> httpx.Response:
+        if self.replay_trashed and body.get("transactionId"):
+            for k, e in self.trash:
+                if k == "event" and e.get("transactionId") == body["transactionId"]:
+                    return httpx.Response(201, json={"id": e["id"]})
+        return super()._create_event(cid, body)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.host.startswith("login."):
@@ -691,16 +700,36 @@ def test_update_writes_the_new_copy_before_trashing_the_old(tenant, monkeypatch)
     assert tenant.dst.messages[ids["mail"]]["parentFolderId"] != "mf-deleteditems"
 
 
-def test_update_of_a_series_twice_with_the_same_content_keeps_it(tenant):
-    """M1 (second review): Graph gives the existing event back for a transactionId already used. A second update
-    with the same content returns the series it just wrote: that one is never deleted."""
+def test_update_of_a_series_replayed_keeps_one_live_copy(tenant, monkeypatch):
+    """M1 (second review): Graph gives the existing event back for a transactionId already used. The same update
+    replayed (its trash step failed) returns the copy it wrote and only trashes the old one: one live copy."""
     s = target()
     rid = s.put("calendar:@default", item(CALENDAR, pim.event_to_ics(weekly()), "w1"))
     raw = pim.event_to_ics(weekly("Weekly 2"))
-    new = s.update("calendar:@default", rid, item(CALENDAR, raw, "w1"))
-    again = s.update("calendar:@default", new, item(CALENDAR, raw, "w1"))
+    real = s.delete
+
+    def refused_once(*a, **kw):
+        monkeypatch.setattr(s, "delete", real)
+        raise ConnectorError("Deleted Items busy", ConnectorError.TRANSIENT)
+    monkeypatch.setattr(s, "delete", refused_once)
+    with pytest.raises(ConnectorError):
+        s.update("calendar:@default", rid, item(CALENDAR, raw, "w1"))
+    new = [k for k, e in tenant.dst.events.items() if e.get("subject") == "Weekly 2"][0]
+    again = s.update("calendar:@default", rid, item(CALENDAR, raw, "w1"))  # replayed from the same old copy
     assert again == new and new in tenant.dst.events and tenant.dst.events[new]["subject"] == "Weekly 2"
-    assert [x["id"] for k, x in tenant.dst.trash if k == "event"] == [rid]
+    live = [e for e in tenant.dst.events.values() if e.get("subject", "").startswith("Weekly")]
+    assert len(live) == 1
+
+
+def test_update_back_and_forth_never_lands_in_the_trash(tenant):
+    """Third review m6: V1 -> V2 -> V1 -> V2. Even if Graph gave back an event already in Deleted Items for a
+    transactionId used before, each update has its own transactionId (it names the copy it replaces)."""
+    tenant.dst.replay_trashed = True
+    s = target()
+    ref = s.put("calendar:@default", item(CALENDAR, pim.event_to_ics(weekly("V1")), "w1"))
+    for subject in ("V2", "V1", "V2", "V1"):
+        ref = s.update("calendar:@default", ref, item(CALENDAR, pim.event_to_ics(weekly(subject)), "w1"))
+        assert ref in tenant.dst.events and tenant.dst.events[ref]["subject"] == subject, subject
 
 
 def test_update_contact_task_and_draft(tenant):

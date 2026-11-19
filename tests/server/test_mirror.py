@@ -984,3 +984,37 @@ def test_unknown_mailbox_has_its_own_code(client, box):
     assert codes(acc) == {"unknown_account"}
     body = client.post("/api/runs", json={"account_ids": [99999], "mode": "mirror", "dry_run": False}).json()
     assert codes(body["accounts"][0]) == {"unknown_account"}
+
+
+# ------------------------------------------------------------------ third review
+def test_shared_resource_waits_for_the_write_in_progress(client, box):
+    """m1: the same UID in two folders: the second is recorded as sharing the resource only once the first is
+    written; that write failing, the second is written itself, never "ok" for nothing on the target."""
+    from app.server import db
+    aid, src, dst = make(client)
+    src.add("Team", "u1", kind=CONTACTS, subject="Shared")
+    src.add("Contacts", "u1", kind=CONTACTS, subject="Shared")
+    dst.plan = {"Team": "Contacts"}
+    dst.fail_put.add("u1.vcf")                     # the first write of u1.vcf is refused for good
+    r = client.post("/api/runs", json={"account_ids": [aid]})
+    run(client, r.json()[0]["id"])
+    ok = db.q1("SELECT COUNT(*) n FROM items WHERE kind='contact' AND hash='u1.vcf' AND status='ok'")["n"]
+    assert ok >= 1 and copies_of(dst, "Contacts", "u1"), (ok, dst.writes)
+
+
+def test_update_failure_closes_the_dead_session(client, box):
+    """m4: an update that fails on a lost connection closes the session: the next update reconnects."""
+    aid, src, dst = make(client)
+    full(client, aid)
+    src.get("c2").version = "2"
+    src.get("c3").version = "2"
+    dst.update_kills = 1
+    job, rep = mirror(client, aid)
+    assert rep["mirror"]["contacts"]["errors"] == 1 and rep["mirror"]["contacts"]["updated"] == 1, rep["mirror"]
+
+
+def test_allow_empty_folders_entries_are_bounded(client, box):
+    """m5: one folder key is at most 1024 characters."""
+    aid, src, dst = make(client)
+    r = client.post("/api/runs", json={"account_ids": [aid], "mode": "mirror", "allow_empty_folders": ["x" * 1025]})
+    assert r.status_code == 422

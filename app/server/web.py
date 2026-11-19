@@ -8,7 +8,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.background import BackgroundTask
@@ -588,7 +588,7 @@ class RunIn(BaseModel):
     # max_delete_percent applies only above this many deletions of a kind (default: MIRROR_MIN_DELETE_COUNT, 10)
     min_delete_count: int | None = Field(None, ge=0)
     # folder keys (as named by a source_empty block) whose empty listing is accepted: their items are deleted
-    allow_empty_folders: list[str] = Field(default_factory=list, max_length=1000)
+    allow_empty_folders: list[Annotated[str, Field(max_length=1024)]] = Field(default_factory=list, max_length=1000)
 
 
 @app.post("/api/runs")

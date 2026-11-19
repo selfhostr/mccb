@@ -184,11 +184,15 @@ describe('notes', () => {
 		soft_delete: { label: 'Soft', hint: 'soft hint' },
 		hard_delete: { label: 'Hard', hint: 'hard hint' },
 		no_copy_kept: { label: 'No copy', hint: 'no copy hint' },
-		shared_resource: { label: 'Shared', hint: 'shared hint' }
+		shared_resource: { label: 'Shared', hint: 'shared hint' },
+		target_modified: { label: 'Changed', hint: 'changed hint' },
+		unverified_owner: { label: 'Unproven', hint: 'unproven hint' }
 	};
 
-	it('knows the four codes; a soft or a permanent deletion is a warning, the others plain notes', () => {
-		expect([...NOTE_CODES].sort()).toEqual(['hard_delete', 'no_copy_kept', 'shared_resource', 'soft_delete']);
+	it('knows the six codes; a soft or a permanent deletion is a warning, the others plain notes', () => {
+		expect([...NOTE_CODES].sort()).toEqual(['hard_delete', 'no_copy_kept', 'shared_resource', 'soft_delete', 'target_modified', 'unverified_owner']);
+		expect(noteTone('target_modified')).toBe('note');
+		expect(noteTone('unverified_owner')).toBe('note');
 		expect(noteTone('soft_delete')).toBe('warning');
 		expect(noteTone('hard_delete')).toBe('warning');
 		expect(noteTone('no_copy_kept')).toBe('note');

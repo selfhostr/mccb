@@ -1494,9 +1494,13 @@ class GraphSession(TargetSession):
             body.setdefault("categories", [])
             c.request("PATCH", c.url(path), json_body=body)
             return ref
-        # a series: its exceptions cannot be patched reliably, a new series replaces it (written first, as a mail)
+        # a series: its exceptions cannot be patched reliably, a new series replaces it (written first, as a mail).
+        # Its transactionId names the content AND the copy it replaces: the same update replayed gets the copy it
+        # wrote back (Graph answers so for a transactionId already used), never one of an earlier update that may
+        # be in Deleted Items by now (V1 -> V2 -> V1 -> V2)
         salt = hashlib.sha256(item.raw).hexdigest()[:16]
-        new = self._put_event(self._folder(folder), event, item.import_id, transaction=f"{item.import_id}:{salt}")
+        new = self._put_event(self._folder(folder), event, item.import_id,
+                              transaction=f"{item.import_id}:{salt}:{ref}")
         if new and new != ref:  # Graph gives the event of a transactionId already used back: that one stays
             self.delete(folder, ref)
         return new
