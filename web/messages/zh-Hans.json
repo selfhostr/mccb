@@ -1123,6 +1123,9 @@
 	"settings_help": "更多信息",
 	"shell_collapse": "收起菜单",
 	"shell_expand": "展开菜单",
+	"shell_docs": "Documentation",
+	"shell_github": "GitHub",
+	"shell_new_tab": "opens in a new tab",
 	"servers_cap_calendars": "日历 (CalDAV)",
 	"servers_cap_contacts": "联系人 (CardDAV)"
 }

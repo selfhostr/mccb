@@ -1123,6 +1123,9 @@
 	"settings_help": "More information",
 	"shell_collapse": "Collapse the menu",
 	"shell_expand": "Expand the menu",
+	"shell_docs": "Documentation",
+	"shell_github": "GitHub",
+	"shell_new_tab": "opens in a new tab",
 	"servers_cap_calendars": "Calendars (CalDAV)",
 	"servers_cap_contacts": "Contacts (CardDAV)"
 }
