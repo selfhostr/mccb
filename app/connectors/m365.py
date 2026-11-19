@@ -1447,9 +1447,10 @@ class GraphSession(TargetSession):
         return out
 
     def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
-        """Events and contacts: PATCH in place when it can be (a single event, a contact), else the old one to
-        Deleted Items and a new one. Tasks: PATCH. Mails (a draft changed at the source): MIME cannot be changed, the
-        old one goes to Deleted Items and the new one is imported."""
+        """Events and contacts: PATCH in place when it can be (a single event, a contact), else a new one is written
+        and then the old one goes to Deleted Items. Tasks: PATCH. Mails (a draft changed at the source): MIME cannot
+        be changed, the new one is imported, then the old one goes to Deleted Items. Always in that order: a write
+        that fails leaves the old copy where it was."""
         kind, _wk, _path = xb.parse_spec(folder)
         if kind == CALENDAR and self.target.send_invitations:
             raise ConnectorError(INVITATIONS_REFUSED, ConnectorError.REJECTED)
@@ -1458,9 +1459,10 @@ class GraphSession(TargetSession):
             raise ConnectorError(f"mirror: item {ref} is no longer on the target", ConnectorError.REJECTED)
         c = self._c()
         path = self._mirror_item_path(folder, kind, ref)
-        if kind == MAIL:
+        if kind == MAIL:  # the new copy first: a failed write leaves the old one where it was, never only trashed
+            new = self.put(folder, item)
             self.delete(folder, ref)
-            return self.put(folder, item)
+            return new
         if kind == CONTACTS:
             body = contact_json(pim.vcard_to_contact(item.raw), item.import_id)
             for key in CONTACT_SCALARS:
@@ -1491,10 +1493,11 @@ class GraphSession(TargetSession):
             body.setdefault("categories", [])
             c.request("PATCH", c.url(path), json_body=body)
             return ref
-        # a series: its exceptions cannot be patched reliably, a new series replaces it
-        self.delete(folder, ref)
+        # a series: its exceptions cannot be patched reliably, a new series replaces it (written first, as a mail)
         salt = hashlib.sha256(item.raw).hexdigest()[:16]
-        return self._put_event(self._folder(folder), event, item.import_id, transaction=f"{item.import_id}:{salt}")
+        new = self._put_event(self._folder(folder), event, item.import_id, transaction=f"{item.import_id}:{salt}")
+        self.delete(folder, ref)
+        return new
 
     def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
         """\\Seen and \\Flagged, and \\Answered / $Forwarded added (the last verb cannot be taken back)."""

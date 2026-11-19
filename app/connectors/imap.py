@@ -331,15 +331,17 @@ class ImapSource(Source):
         return m.group(1) if m else None
 
     def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
-        """UID SEARCH UID <uid> UNDELETED in the folder opened read-only, for keys of the current UIDVALIDITY. Any
-        other key (another UIDVALIDITY, no UID in it) cannot be checked: answered True (kept)."""
+        """UID SEARCH UID <uid> UNDELETED in the folder opened read-only, for keys of THIS folder (its folder hash)
+        and of the current UIDVALIDITY. Any other key (another folder, another UIDVALIDITY, no UID in it) cannot be
+        checked here: answered True (kept)."""
         out = {k: True for k in keys}
+        fh = folder_hash(list(folder.path))
         with _guard():
             uv = self._select(folder)
             wanted = {}
             for k in keys:
                 m = KEY_RE.match(k)
-                if m and uv and int(m.group(1)) == uv:
+                if m and uv and int(m.group(1)) == uv and k.split("-", 1)[0] == fh:
                     wanted[int(m.group(2))] = k
             for i in range(0, len(wanted), FETCH_CHUNK):
                 chunk = sorted(wanted)[i:i + FETCH_CHUNK]

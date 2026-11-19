@@ -320,7 +320,8 @@ const MIRROR_MESSAGES = {
 	source_empty: 'The source is empty and the destination is not',
 	no_prior_run: 'No migration has run for this mailbox',
 	uidvalidity_changed: 'The source folders changed identity since the last run',
-	target_unreachable: 'The destination did not answer'
+	target_unreachable: 'The destination did not answer',
+	job_active: 'A job of this mailbox is not over yet'
 };
 const countOf = (counts) => MIRROR_KINDS.reduce((n, k) => n + (counts?.[k] ?? 0), 0);
 const fullCounts = (counts) => Object.fromEntries(MIRROR_KINDS.map((k) => [k, counts?.[k] ?? 0]));

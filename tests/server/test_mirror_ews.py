@@ -618,10 +618,29 @@ def test_update_replaces_a_recurring_series(servers):
     el = dst.items[new]["el"]
     assert el.findtext(fx.t("Subject")) == "Weekly, new room" and dst.items[new]["attrs"]["SendMeetingInvitations"] == "SendToNone"
     assert f"occ-{new}-1" in dst.deleted_occurrences and f"occ-{new}-2" in dst.updated_occurrences  # exceptions again
+    # the new series is written while the old one (same UID) is still there: its occurrences are left alone
+    assert dst.deleted_occurrences.count(f"occ-{old}-1") == 1
     assert [r.ref for r in t.inventory("calendar:@default", "src-1")["<src-1-e>"]] == [new]
     with pytest.raises(ConnectorError) as err:  # not the copy of this item: left alone
         t.update("calendar:@default", new, out_item(CALENDAR, pim.event_to_ics(e), "<src-1-other>"))
     assert err.value.kind == ConnectorError.REJECTED and new in dst.items
+
+
+def test_update_writes_the_new_copy_before_trashing_the_old(servers, monkeypatch):
+    """M3: the new copy is written first; when that fails the old one stays where it is (not only in the trash)."""
+    _, dst = servers
+    t = session()
+    c = pim.Contact(uid="c", full_name="Ann")
+    rid = t.put("contacts:@default", out_item(CONTACTS, pim.contact_to_vcard(c), "<src-1-c>"))
+    t.inventory("contacts:@default", "src-1")
+
+    def refused(*a, **kw):
+        raise ConnectorError("CreateItem refused", ConnectorError.TRANSIENT)
+    monkeypatch.setattr(t, "_create", refused)  # every write of a new item
+    c.full_name = "Ann Lee"
+    with pytest.raises(ConnectorError):
+        t.update("contacts:@default", rid, out_item(CONTACTS, pim.contact_to_vcard(c), "<src-1-c>"))
+    assert rid in dst.items and dst.deletes == [] and f"trashed-{rid}" not in dst.items
 
 
 def test_update_of_an_item_already_gone_writes_it_again(servers):

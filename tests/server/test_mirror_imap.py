@@ -202,6 +202,38 @@ def test_imap_source_refusing_writes(client, env, route, monkeypatch):
     assert rep["mirror"]["mail"]["deleted"] == 1 and rep["mirror"]["mail"]["updated"] == 3
 
 
+def imap_source(addr):
+    from app.connectors.imap import ImapSource
+    s = ImapSource({"host": IMAP_HOST, "port": IMAP_PORT, "security": "none", "verify_tls": False, "login": addr},
+                   {"password": "pw"})
+    s.open()
+    return s
+
+
+def test_imap_exists_answers_present_for_keys_it_cannot_check(client, env):
+    """ImapSource.exists only says "gone" for a key of THIS folder (its folder hash) and of the current UIDVALIDITY:
+    any other key cannot be checked there and is answered present (kept)."""
+    from app.connectors.imap import folder_hash
+    addr = create_user(prefix="mex")
+    c = conn(addr)
+    try:
+        c.append("INBOX", msg("a@x", "a"), [], WHEN)
+    finally:
+        c.close()
+    s = imap_source(addr)
+    try:
+        inbox = [f for f in s.folders() if f.path == ["INBOX"]][0]
+        items = s.mirror_listing(inbox).items
+        uv = int(s.key_epoch(items[0].key))
+        fh = folder_hash(["INBOX"])
+        here, gone = items[0].key, f"{fh}-{uv}-999999"
+        other_uv, other_folder = f"{fh}-{uv + 1}-999999", f"{folder_hash(['Projects'])}-{uv}-999999"
+        got = s.exists(inbox, [here, gone, other_uv, other_folder])
+        assert got == {here: True, gone: False, other_uv: True, other_folder: True}
+    finally:
+        s.close()
+
+
 def test_imap_uidvalidity_changed(client, env, route):
     aid, src, dst = route
     c = conn(src)

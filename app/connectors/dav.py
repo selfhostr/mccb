@@ -7,7 +7,7 @@ import re
 import unicodedata
 from typing import Iterator
 
-from ..server.dav import DavClient, DavError
+from ..server.dav import DavClient, DavError, DavIncomplete
 from . import registry
 from .base import (CALENDAR, CAP_DELETE, CAP_FOLDERS, CAP_INVENTORY, CAP_MIRROR, CAP_READBACK, CAP_UPDATE, CONTACTS,
                    DELETE_HARD, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem, RemoteItem, Source,
@@ -152,7 +152,7 @@ class DavSession(TargetSession):
     # ---- mirror: only the resources named in `names` (ours), with If-Match on what the inventory saw
     def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
         try:
-            found = self._c().names_etags(folder)
+            found = self._c().names_etags(folder, strict=True)  # cut short: an error, not a smaller collection
         except DavError as e:
             if e.status == 404:
                 return {}
@@ -181,7 +181,16 @@ class DavSession(TargetSession):
         return DELETE_HARD
 
     def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
-        return self.put(folder, OutgoingItem(item.kind, item.raw, item.import_id, item.flags, item.internal_date, ref))
+        """PUT over our resource, with If-Match on the etag the inventory saw: changed on the target since (412),
+        it is not overwritten (a temporary error: the next pass sees it again)."""
+        etag = self._etags.get((folder, ref))
+        try:
+            self._c().put(folder, ref, item.raw.decode("utf-8", "replace"), self.dav_kind, if_match=etag or None)
+        except DavError as e:
+            if e.status in (404, 409):
+                raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
+            raise convert(e) from e
+        return ref  # the etag kept is now stale: another write without a new inventory gets 412, never overwrites
 
 
 def collection_slug(dav_kind: str, component: str, label: str) -> str:
@@ -304,20 +313,28 @@ class DavSource(Source):
             yield SourceItem(key=self._key(folder, name), ref=name, version=found[name] or None)
 
     # ---- mirror: PROPFIND and GET only
+    def _listed(self, folder: SourceFolder, found: dict[str, str]) -> list[SourceItem]:
+        return [SourceItem(key=self._key(folder, n), ref=n, version=found[n] or None) for n in sorted(found)]
+
     def mirror_listing(self, folder: SourceFolder) -> Listing:
-        return Listing(list(self.iter_items(folder)))
+        """The PROPFIND of the collection; complete unless the server says in it that it cut it short (507)."""
+        try:
+            found = self._c().names_etags(folder.ref, strict=True)
+        except DavIncomplete as e:
+            return Listing(self._listed(folder, e.partial or {}), complete=False, problem=str(e))
+        except DavError as e:
+            raise convert(e) from e
+        return Listing(self._listed(folder, found))
 
     def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
-        """GET of each resource whose name was recorded, else a fresh listing of the collection."""
-        out = {}
-        named = {k: r for k, r in (refs or {}).items() if isinstance(r, str) and k in keys}
+        """GET of each resource whose name was recorded. A key without a recorded name cannot be read by itself
+        (the key is a digest of the name) and another listing would only repeat the one that missed it: answered
+        present (kept), as EWS and Graph do."""
+        out = {k: True for k in keys}
+        named = {k: r for k, r in (refs or {}).items() if isinstance(r, str) and k in out}
         try:
             for k, name in named.items():
                 out[k] = self._c().get(folder.ref, name) is not None
-            rest = [k for k in keys if k not in out]
-            if rest:
-                listed = {self._key(folder, n) for n in self._c().names(folder.ref)}
-                out.update({k: k in listed for k in rest})
         except DavError as e:
             raise convert(e) from e
         return out

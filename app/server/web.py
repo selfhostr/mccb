@@ -80,6 +80,8 @@ async def auth_mw(request: Request, call_next):
             if not (header and await asyncio.to_thread(tokens.verify_header, header)):
                 return JSONResponse({"detail": "not authenticated"}, status_code=401)
             request.state.via = "token"
+            # the public part of the token (stored in clear, shown in the list of tokens): who asked, no secret
+            request.state.token_prefix = header.strip().partition(" ")[2].strip()[:tokens.PREFIX_LEN]
     return await call_next(request)
 
 
@@ -586,13 +588,21 @@ class RunIn(BaseModel):
 
 
 @app.post("/api/runs")
-def create_runs(body: RunIn):
+def create_runs(body: RunIn, request: Request):
     if body.mode == "mirror":
         from . import mirror
         opts = mirror.Options(body.max_delete_percent, body.allow_large_delete)
         if body.dry_run:
             return {"accounts": [mirror.preview_account(aid, opts) for aid in body.account_ids]}
-        return mirror.start(body.account_ids, opts, body.name, body.priority)
+        out = mirror.start(body.account_ids, opts, body.name, body.priority)
+        # audit trail of every real mirror request (it deletes on the targets): who, which mailboxes, which options
+        via = getattr(request.state, "via", "session")
+        who = f"token {getattr(request.state, 'token_prefix', '?')}" if via == "token" else "session"
+        log.warning("AUDIT mirror run requested: accounts=%s jobs=%s allow_large_delete=%s max_delete_percent=%s "
+                    "via=%s (%s) from=%s", list(body.account_ids), [j["id"] for j in out["jobs"]],
+                    opts.allow_large_delete, opts.max_delete_percent, via, who,
+                    request.client.host if request.client else "?")
+        return out
     jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})

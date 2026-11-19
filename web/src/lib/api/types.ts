@@ -320,7 +320,15 @@ export type MirrorAction = 'add' | 'update' | 'delete';
 export type MirrorCounts = Partial<Record<MirrorKind, number>>;
 
 export interface MirrorBlock {
-	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable. */
+	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable, job_active. */
+	code: string;
+	message: string;
+	/** job_active: the job still queued or running. */
+	job_id?: number;
+}
+
+/** Not a block: what the mirror run will do that is worth knowing (soft_delete, hard_delete, no_copy_kept, shared_resource). */
+export interface MirrorNote {
 	code: string;
 	message: string;
 }
@@ -343,6 +351,7 @@ export interface MirrorAccountPlan {
 	to_delete: MirrorCounts;
 	blocked: MirrorBlock[];
 	sample: MirrorSample[];
+	notes?: MirrorNote[];
 }
 
 /** The answer of POST /runs with mode mirror and dry_run true. */

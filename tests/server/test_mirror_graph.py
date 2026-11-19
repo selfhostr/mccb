@@ -673,6 +673,24 @@ def test_update_series_is_replaced(tenant):
     assert s.inventory("calendar:@default", "w") == {} and list(s.inventory("calendar:@default", NS)) == [f"<{NS}-w1>"]
 
 
+def test_update_writes_the_new_copy_before_trashing_the_old(tenant, monkeypatch):
+    """M3: a series or a draft is replaced by a new copy written FIRST; when that fails the old one is untouched."""
+    s = target()
+    ids = put_all(s, tenant.dst)
+    rid = s.put("calendar:@default", item(CALENDAR, pim.event_to_ics(weekly()), "w1"))
+
+    def refused(*a, **kw):
+        raise ConnectorError("POST refused", ConnectorError.TRANSIENT)
+    monkeypatch.setattr(s, "_put_event", refused)
+    monkeypatch.setattr(s, "put", refused)
+    with pytest.raises(ConnectorError):
+        s.update("calendar:@default", rid, item(CALENDAR, pim.event_to_ics(weekly("Weekly 2")), "w1"))
+    assert rid in tenant.dst.events and tenant.dst.trash == []
+    with pytest.raises(ConnectorError):
+        s.update("mail:@inbox", ids["mail"], item(MAIL, MIME.replace(b"body", b"edited"), "m1"))
+    assert tenant.dst.messages[ids["mail"]]["parentFolderId"] != "mf-deleteditems"
+
+
 def test_update_contact_task_and_draft(tenant):
     s = target()
     ids = put_all(s, tenant.dst)
