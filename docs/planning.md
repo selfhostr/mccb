@@ -97,6 +97,7 @@ A first pass copies the bulk while users keep working. A final resync picks up w
 - A source that cannot (the others) is listed in full, and the items already migrated are skipped. The result is the same, only slower.
 - The cursor of a folder moves only when everything listed is recorded. A job that stops half way starts again from the old cursor, and the items already done are skipped. Changing the target of a mailbox forgets its cursors, with its items.
 - A PST is a snapshot: a delta pass over the same PST finds nothing new. For mail that arrived after the export, send a new PST holding only the new items, or migrate those mailboxes from IMAP.
+- Read state. At the end of every pass to an IMAP target (first pass, rerun, delta, mirror), the mails mccb wrote are given the read, answered, starred and draft flags their source has and they lack. The flags of the source are those of the pass when it listed the folder, else read with one light `UID FETCH (UID FLAGS)` per folder (IMAP, delta pass), else those the mail was written with. This repairs a target that ignores the flags of `APPEND`, a copy found on the target after an interruption instead of being written again, and a mail read or starred at the source after its copy. Only mails carrying this migration's `X-PST-Import-Id` are touched, keywords are not, and outside the mirror a flag is never removed: a mail marked unread at the source stays read on the target. The log names each folder fixed; the report has `flags: {checked, fixed, not_kept}`, and a warning when the target did not keep them.
 
 Cutover, step by step:
 
@@ -107,7 +108,7 @@ Cutover, step by step:
 5. Run the final resync (`mode: "delta"`) for every mailbox, then compare again.
 6. Check the reports (`totals`, `oversized`, `filtered`), then retire the old mailboxes yourself. mccb never deletes anything at the source.
 
-A delta pass only adds. A mail deleted at the source stays on the target, and a contact changed at the source keeps its old version. When the users keep working on the old server for a while, use the mirror instead.
+A delta pass only adds. A mail deleted at the source stays on the target, a mail marked unread again at the source stays read on the target, and a contact changed at the source keeps its old version. When the users keep working on the old server for a while, use the mirror instead.
 
 ## Mirror
 

@@ -114,7 +114,7 @@ def parse_fetch(data) -> list[dict]:
             recs.append({"meta": meta, "literal": literal})
         else:
             recs[-1]["meta"] += b" " + meta
-    out = []
+    by_uid: dict[int, dict] = {}
     for r in recs:
         meta = r["meta"].decode("utf-8", "replace")
         uid = re.search(r"\bUID (\d+)", meta)
@@ -126,9 +126,22 @@ def parse_fetch(data) -> list[dict]:
         mid = None
         if isinstance(r["literal"], bytes):
             mid = " ".join(str(BytesHeaderParser().parsebytes(r["literal"]).get("Message-ID") or "").split()) or None
-        out.append({"uid": int(uid.group(1)), "flags": flags.group(1).split() if flags else [],
-                    "size": int(size.group(1)) if size else None,
-                    "date": parse_internaldate(date.group(1)) if date else None, "message_id": mid})
+        rec = {"uid": int(uid.group(1)), "flags": flags.group(1).split() if flags else None,
+               "size": int(size.group(1)) if size else None,
+               "date": parse_internaldate(date.group(1)) if date else None, "message_id": mid}
+        # a server may answer for one message in several FETCH responses (the FLAGS apart, an unsolicited update
+        # carrying the UID): one record, its attributes taken where they are, never a second copy without flags
+        old = by_uid.get(rec["uid"])
+        if old is None:
+            by_uid[rec["uid"]] = rec
+        else:
+            for k, v in rec.items():
+                if v is not None and (old[k] is None or k == "flags"):
+                    old[k] = v
+    out = list(by_uid.values())
+    for rec in out:
+        if rec["flags"] is None:
+            rec["flags"] = []
     return out
 
 
@@ -288,7 +301,8 @@ class ImapSource(Source):
             chunk = ",".join(str(u) for u in uids[i:i + FETCH_CHUNK])
             typ, data = c._m().uid("FETCH", chunk, LIST_ITEMS)
             recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
-        return [r for r in recs if "\\deleted" not in {f.lower() for f in r["flags"]}]
+        asked = set(uids)  # an unsolicited FETCH may name another message
+        return [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
 
     def _items(self, folder: SourceFolder, uv: int, recs: list[dict]) -> list[SourceItem]:
         keys = item_keys(folder.path, uv, recs)
@@ -300,6 +314,23 @@ class ImapSource(Source):
             uv = self._select(folder)
             items = self._items(folder, uv, self._records(self._uids(("ALL",))))
         yield from items
+
+    def flags_of(self, folder: SourceFolder) -> dict[str, list[str]]:
+        """{key: flags} of the whole folder for a pass that did not list it all (delta): UID FETCH (UID FLAGS) only,
+        no header, read only as everywhere here. A server without UIDVALIDITY needs the Message-ID for its keys."""
+        with _guard():
+            uv = self._select(folder)
+            uids = self._uids(("ALL",))
+            if not uv:
+                recs = self._records(uids)
+            else:
+                c, recs = self._c(), []
+                for i in range(0, len(uids), FETCH_CHUNK):
+                    typ, data = c._m().uid("FETCH", ",".join(str(u) for u in uids[i:i + FETCH_CHUNK]), "(UID FLAGS)")
+                    recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
+                asked = set(uids)
+                recs = [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
+        return {k: keep_flags(r["flags"]) for k, r in zip(item_keys(folder.path, uv, recs), recs)}
 
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
         """New messages since the cursor (UIDs are ascending). Flag changes and deletions are not reported."""
@@ -427,6 +458,15 @@ class ImapSession(TargetSession):
     def count_ours(self, folder: str, namespace: str, names: set[str] | None = None) -> int:
         with _guard():
             return self.conn.count_import_prefix(folder, IMPORT_HEADER, f"{namespace}-")
+
+    def add_missing_flags(self, folder: str, namespace: str, wanted: dict[str, list[str]]) -> tuple[int, int, int]:
+        with _guard():
+            try:
+                return self.conn.add_missing_flags(folder, IMPORT_HEADER, f"{namespace}-", wanted)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    return 0, 0, 0  # the folder is gone from the target: nothing of ours left in it
+                raise
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
         with _guard():

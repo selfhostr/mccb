@@ -16,11 +16,12 @@ from datetime import timezone
 from ..connectors import registry, wiring
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
                                CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, OutgoingItem, Target,
-                               stamp_import_id)
+                               TargetSession, stamp_import_id)
 from . import crash, db, foldermap, ordering
 from . import mirror as mm
 from . import policy as pol
 from .config import settings
+from .imap import flags_to_add
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
                      StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
 from .tuner import ErrorNote, classify_error
@@ -139,6 +140,7 @@ class ConnectorJobRunner(JobRunner):
         self._source_keys: set[str] = set()       # folder_key() of every folder the source has (no old keys)
         self._deferred: list = []                 # items waiting for another write of their resource name
         self._deferring = False
+        self._src_flags: dict[str, dict[str, list[str]]] = {}  # folder key -> {item key: flags} of a full listing
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -273,6 +275,8 @@ class ConnectorJobRunner(JobRunner):
             else:
                 for phase in phases:
                     self._run_phase(phase)
+            if MAIL in phases:
+                self._repair_flags()
             self.verify_targets(phases)
             if TASKS in phases:
                 self.report[TASKS] = dict(self.progress.get(TASKS) or {})
@@ -390,6 +394,8 @@ class ConnectorJobRunner(JobRunner):
         if not partial:
             self.totals[kind] += len(listing) - int(f.count or 0)
             f.count = len(listing)
+            if kind == MAIL:  # the flags of the whole folder, for the copies already on the target (_repair_flags)
+                self._src_flags[fkey] = {it.key: it.flags for it in listing if flags_to_add(it.flags, ())}
         seen = {it.key for it in listing}
         # rows of keys the source no longer lists: the same messages may be back under other keys (UIDVALIDITY)
         orphans: dict[str, list[dict]] = {}
@@ -887,6 +893,76 @@ class ConnectorJobRunner(JobRunner):
                 self.set_item(a.row["id"], "deleted", f"mirror: deleted at the source "
                               f"({session.delete_mode(a.row['target'])})")
                 st["deleted"] += 1
+
+    # ------------------------------------------------------------ flags
+    def _repair_flags(self) -> None:
+        """Every copy of ours on the target is given the read, answered and starred flags its source has and it
+        lacks: what the source has now when this pass read its flags (a full listing, else Source.flags_of), else
+        the flags it was written with. This settles a target that kept none of the flags of APPEND, a copy found on
+        the target instead of being written again, and a mail read or starred at the source since an earlier pass.
+        Nothing is ever removed here (the mirror does that), and only our own copies are touched (exact import id)."""
+        session = self.targets[MAIL].session()
+        if type(session).add_missing_flags is TargetSession.add_missing_flags:
+            return  # this target does not do it (its flags are those written): the source is not read for it
+        try:
+            wanted = self._flags_wanted()
+            totals = {"checked": 0, "fixed": 0, "not_kept": 0}
+            if wanted:
+                self.report["flags"] = totals
+            for name, want in wanted.items():
+                self.check()
+                self.current_folder = f"Flags {name}"
+                try:
+                    checked, fixed, lacking = self._on_session(
+                        session, lambda: session.add_missing_flags(name, self.pst_key, want))
+                except ConnectorError as e:
+                    msg = f"Flags of our mails in '{name}' not checked: {e}"
+                    self.log(msg, "error")
+                    self.problems.append(msg)
+                    continue
+                totals["checked"] += checked
+                totals["fixed"] += fixed
+                totals["not_kept"] += lacking
+                if fixed:
+                    self.log(f"Folder '{name}': flags of the source added to {fixed} of our {checked} mail(s) that "
+                             "lacked them (read, answered, starred)")
+                if lacking:
+                    w = (f"Folder '{name}': the target did not keep the flags set on {lacking} mail(s): their read "
+                         "state may differ from the source")
+                    self.log(w, "warning")
+                    self.report["warnings"].append(w)
+        finally:
+            session.close()
+            self.current_folder = None
+
+    def _flags_wanted(self) -> dict[str, dict[str, list[str]]]:
+        """{target folder: {bare import id: flags its copy must carry}} for the mails of the folders of this pass."""
+        folders = [f for f in self.folders if f.kind == MAIL]
+        current: dict[str, dict[str, list[str]] | None] = {}  # folder key -> flags at the source now, None: unknown
+        for f in folders:
+            fk = folder_key(f.path)
+            got = self._src_flags.get(fk)
+            if got is None and self.mode != "mirror":  # mirror: its analysis has just recorded them (version)
+                self.check()
+                try:
+                    got = self._on_source(lambda: self.source.flags_of(f))
+                except ConnectorError as e:
+                    self.log(f"Flags of '{fk}' unreadable at the source ({e}): those it was written with are used",
+                             "warning")
+            current[fk] = got
+        for f in folders:  # rows of earlier imports may carry the old key; a folder key always wins
+            current.setdefault(legacy_folder_key(f.path), current[folder_key(f.path)])
+        wanted: dict[str, dict[str, list[str]]] = {}
+        for r in db.q("SELECT item_key, folder, target, stamp, version FROM items WHERE account_id=? AND pst_key=? "
+                      "AND kind='mail' AND status='ok' AND target IS NOT NULL", (self.account_id, self.pst_key)):
+            if r["folder"] not in current:
+                continue  # a folder outside this pass
+            now = current[r["folder"]]
+            flags = flags_to_add(now.get(r["item_key"]) if now is not None else mm.split_flags(r["version"]), ())
+            if flags:
+                ident = r["stamp"] or import_id_of(self.pst_key, r["item_key"])
+                wanted.setdefault(r["target"], {})[ident.strip("<>")] = flags
+        return wanted
 
     # ------------------------------------------------------------ checks
     def _check_target(self, session, phase: str, fkeys: list[str], target: str) -> dict:
