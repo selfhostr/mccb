@@ -353,8 +353,8 @@ test.describe('mirror mode', () => {
 		const dialog = await openDialog(page, ALICE);
 		const note = dialog.getByTestId('mirror-note-target_modified');
 		await expect(note).toHaveAttribute('data-tone', 'note');
-		await expect(note).toContainText('Item changed at the destination');
-		await expect(note).toContainText('they are neither deleted nor updated');
+		await expect(note).toContainText('Changed at the destination');
+		await expect(note).toContainText('they are neither deleted nor overwritten');
 		await expect(note).toContainText('3 contacts were changed at the destination');
 		await expect(dialog.getByTestId('mirror-apply')).toBeEnabled();
 	});
