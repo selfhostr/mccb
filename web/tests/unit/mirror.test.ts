@@ -300,7 +300,7 @@ describe('notes', () => {
 	});
 
 	it('target_modified is a plain note with its label and hint, and does not open a mailbox', () => {
-		expect(describeNote({ code: 'target_modified', message: '2 contacts changed at the destination' }, labels)).toEqual({ code: 'target_modified', tone: 'note', label: 'Modified', hint: 'modified hint', detail: '2 contacts changed at the destination' });
+		expect(describeNote({ code: 'target_modified', message: '2 contacts changed at the destination' }, labels)).toEqual({ code: 'target_modified', tone: 'note', label: 'Changed', hint: 'changed hint', detail: '2 contacts changed at the destination' });
 		expect(hasWarningNote([{ code: 'target_modified', message: '' }])).toBe(false);
 	});
 
