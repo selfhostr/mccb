@@ -15,7 +15,7 @@ from datetime import timezone
 
 from ..connectors import registry, wiring
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
-                               CAP_UPDATE, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, OutgoingItem, Target,
+                               CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, OutgoingItem, Target,
                                stamp_import_id)
 from . import crash, db, foldermap, ordering
 from . import mirror as mm
@@ -221,6 +221,7 @@ class ConnectorJobRunner(JobRunner):
             self.source = wiring.source_of_account(self.acc, ctx)
         except ConnectorError as e:
             raise JobFailed(str(e)) from e
+        composite = self.source  # problems of its DAV part, read below (the mirror wrapper hides them)
         if self.mode == "mirror":
             self.source = mm.ReadOnlySource(self.source)  # nothing but reads can reach the source
         self.report["source"] = {"kind": self.source_kind, "namespace": self.pst_key}
@@ -234,6 +235,7 @@ class ConnectorJobRunner(JobRunner):
             except ConnectorError as e:
                 raise JobFailed(f"Source ({self.source_kind}): {e}") from e
             self._mark()
+            self._source_gaps(composite)
             for f in self.folders:
                 self._known_folders |= {folder_key(f.path), legacy_folder_key(f.path)}
                 self._source_keys.add(folder_key(f.path))
@@ -276,6 +278,26 @@ class ConnectorJobRunner(JobRunner):
                 self.report[TASKS] = dict(self.progress.get(TASKS) or {})
         finally:
             self.source.close()
+
+    def _source_gaps(self, source) -> None:
+        """Calendars or contacts wanted that this source does not bring: said, never skipped in silence. A DAV part
+        of the source that could not be read ends the job with errors; the mail goes on."""
+        for p in getattr(source, "problems", None) or []:
+            msg = f"Source: {p}: calendars, tasks and contacts not copied in this run"
+            self.log(msg, "error")
+            self.problems.append(msg)
+            self.report["warnings"].append(msg)
+        try:
+            gaps = wiring.source_gaps(self.acc)
+        except ConnectorError:
+            gaps = {}
+        gaps = {k: v for k, v in gaps.items() if k in self.targets}  # nowhere to go either: nothing lost here
+        for phase, why in gaps.items():
+            msg = f"{'Calendars' if phase == CALENDAR else 'Contacts'} wanted but {why}: not copied"
+            self.log(msg, "warning")
+            self.report["warnings"].append(msg)
+        if gaps:
+            self.report["source"]["missing"] = gaps
 
     # ------------------------------------------------------------ precheck
     def precheck_targets(self, phases: list[str]) -> None:

@@ -119,8 +119,20 @@ def account_view(r, with_job: bool = True) -> dict:
         "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"]),
                     "mirror": _mirror_of(r)},
         "mirror": _mirror_of(r),
+        **_source_reach(r),
         "job": job,
     }
+
+
+def _source_reach(r) -> dict:
+    """source_carries: {calendar, contacts: the source can bring them} (None: unknown, PST and files); source_dav:
+    for an IMAP source, the server it is on and why its CalDAV/CardDAV is not read (see wiring.source_server)."""
+    from ..connectors import wiring
+    from ..connectors.base import ConnectorError
+    try:
+        return {"source_carries": wiring.source_carries(r), "source_dav": wiring.source_dav_view(r)}
+    except (ConnectorError, KeyError, IndexError, TypeError, ValueError):
+        return {"source_carries": None, "source_dav": None}
 
 
 def get_account(aid: int) -> dict | None:
