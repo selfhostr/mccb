@@ -33,6 +33,8 @@ def env(tmp_path, monkeypatch):
     from tests.server import fake_engine
     fake_engine.CONFIG.save()  # current state visible to the worker subprocesses
     yield settings
+    from app.server import mailbox_size
+    mailbox_size.wait_idle()  # a size measured in the background belongs to this test's database
     db.reset()
 
 

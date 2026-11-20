@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "вычисление…",
+	"migrations_size_of_total": "Импортировано {imported} из {total}",
+	"migrations_size_of_total_partial": "Импортировано {imported} из {total} (размер известен для {known} из {count} ящиков)",
+	"migrations_size_source": "Размер ящика",
+	"migrations_size_imported": "Уже импортировано",
+	"migrations_size_approx": "Оценка по квоте учётной записи (учтены все папки)",
+	"migrations_size_measured": "Измерено",
+	"migrations_size_after_job": "Станет известен, когда миграция прочитает источник",
+	"migrations_size_refresh": "Измерить снова",
+	"migrations_size_probe": "Размер ящика: {size}",
+	"migrations_size_probe_later": "Размер будет измерен после сохранения ящика.",
+	"migrations_size_approx_file": "Оценка по размеру файла (включая календари, контакты и служебные данные файла), пока миграция его не прочитает"
 }

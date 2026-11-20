@@ -33,6 +33,7 @@
 	import JobErrors from './JobErrors.svelte';
 	import JobLog from './JobLog.svelte';
 	import JobReport from './JobReport.svelte';
+	import SizeFacts from './SizeFacts.svelte';
 
 	let { id, onclose, settings, onmirror }: { id: number; onclose: () => void; settings: Snippet<[number, boolean?]>; onmirror: (accountId: number) => void } = $props();
 
@@ -203,6 +204,7 @@
 				<div><dt class="text-ink-3">{m.jobs_stat_left()}</dt><dd class="m-0 font-mono">{job.status === 'running' ? fmtDuration(job.eta) : '-'}</dd></div>
 				<div><dt class="text-ink-3">{m.jobs_stat_started()}</dt><dd class="m-0"><RelTime value={job.started_at} /></dd></div>
 				<div><dt class="text-ink-3">{m.jobs_stat_finished()}</dt><dd class="m-0"><RelTime value={job.finished_at} /></dd></div>
+				<SizeFacts id={job.account_id} />
 				{#if job.tuning}
 					<div class="col-span-2"><dt class="text-ink-3">{m.jobs_stat_tuning()}</dt><dd class="m-0">{m.jobs_stat_tuning_value({ builders: job.tuning.builders, connections: job.tuning.connections })}</dd></div>
 				{/if}

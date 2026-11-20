@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "a calcular…",
+	"migrations_size_of_total": "{imported} importados de {total}",
+	"migrations_size_of_total_partial": "{imported} importados de {total} (tamanho conhecido de {known} de {count} caixas de correio)",
+	"migrations_size_source": "Tamanho da caixa de correio",
+	"migrations_size_imported": "Importado até agora",
+	"migrations_size_approx": "Estimativa a partir da quota da conta (todas as pastas contadas)",
+	"migrations_size_measured": "Medido",
+	"migrations_size_after_job": "Conhecido quando uma migração tiver lido a origem",
+	"migrations_size_refresh": "Medir novamente",
+	"migrations_size_probe": "Tamanho da caixa de correio: {size}",
+	"migrations_size_probe_later": "O tamanho é medido depois de guardar a caixa de correio.",
+	"migrations_size_approx_file": "Estimativa a partir do tamanho do ficheiro (calendários, contactos e estrutura do ficheiro incluídos), até uma migração o ler"
 }

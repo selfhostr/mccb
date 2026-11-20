@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "calculando…",
+	"migrations_size_of_total": "{imported} importados de {total}",
+	"migrations_size_of_total_partial": "{imported} importados de {total} (tamaño conocido de {known} de {count} buzones)",
+	"migrations_size_source": "Tamaño del buzón",
+	"migrations_size_imported": "Importado hasta ahora",
+	"migrations_size_approx": "Estimación a partir de la cuota de la cuenta (todas las carpetas contadas)",
+	"migrations_size_measured": "Medido",
+	"migrations_size_after_job": "Se conocerá cuando una migración haya leído el origen",
+	"migrations_size_refresh": "Medir de nuevo",
+	"migrations_size_probe": "Tamaño del buzón: {size}",
+	"migrations_size_probe_later": "Su tamaño se mide una vez guardado el buzón.",
+	"migrations_size_approx_file": "Estimación a partir del tamaño del archivo (calendarios, contactos y estructura del archivo incluidos), hasta que una migración lo lea"
 }

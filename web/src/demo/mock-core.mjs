@@ -358,11 +358,44 @@ function mirrorPlanOf(account, { maxPercent, minCount, allowLarge, allowEmpty })
 	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(toDelete), blocked, sample, notes: scenario.notes ?? [] };
 }
 
+/** Same contract as mailbox_size.view: a measure of the current source, else the file's size as an estimate. */
+const MEASURABLE = new Set(['imap', 'imap_oauth2']);
+const MAIL_AVG = 90_000;
+function sizeView(a, job) {
+	const kind = a.source?.kind ?? 'pst';
+	let size = { bytes: null, count: null, at: null, approx: false, basis: null };
+	if (a.size) size = { ...size, ...a.size };
+	else if ((kind === 'pst' || kind === 'files') && a.pst_id != null) {
+		const p = state.psts.get(a.pst_id);
+		if (p?.status === 'valid' && p.size) size = { ...size, bytes: p.size, approx: true, basis: 'file' };
+	}
+	return { ...size, computing: !!a.sizing, measurable: MEASURABLE.has(kind), imported: job?.bytes_ok ?? 0 };
+}
+
+/** Bytes of a mail of this account, for the imported count of its jobs. */
+function mailAvg(accountId) {
+	const p = state.psts.get(state.accounts.get(accountId)?.pst_id);
+	return p?.size && p.scan?.totals?.mail ? p.size / p.scan.totals.mail : MAIL_AVG;
+}
+
+/** Background measure of the source, as mailbox_size.start: "calculating" first, the value a moment later. */
+function measure(account) {
+	account.size = undefined;
+	account.sizing = true;
+	timers.add(
+		setTimeout(() => {
+			account.sizing = false;
+			account.size = { bytes: 1_850_000_000 + account.id * 37_000_000, count: 12_400 + account.id * 210, at: Date.now() / 1000 };
+			publish('account', accountView(account));
+		}, state.demo ? 1500 : state.jobTick)
+	);
+}
+
 function accountView(a) {
 	const job = [...state.jobs.values()].filter((j) => j.account_id === a.id).sort((x, y) => y.id - x.id)[0] ?? null;
-	const { srcSecrets, tgtSecrets, ...rest } = a;
+	const { srcSecrets, tgtSecrets, size: _size, sizing: _sizing, ...rest } = a;
 	const source = a.source ?? { kind: 'pst', config: { pst_id: a.pst_id }, has_secret: false };
-	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, ...sourceReach(a), job };
+	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, ...sourceReach(a), source_size: sizeView(a, job), job };
 }
 
 /** Same rules as wiring.source_carries and wiring.source_server: an IMAP source reads the CalDAV/CardDAV of the saved server of its host and port. */
@@ -433,7 +466,7 @@ function startJob(account) {
 	const progress = emptyProgress();
 	const totals = state.psts.get(account.pst_id)?.scan?.totals ?? { mail: 900, calendar: 120, contacts: 80 };
 	for (const k of Object.keys(progress)) progress[k].total = totals[k] ?? 0;
-	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null, priority: 0, batch_id: null, pause_reason: null };
+	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, bytes_ok: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null, priority: 0, batch_id: null, pause_reason: null };
 	state.jobs.set(id, job);
 	state.logs.set(id, []);
 	log(job, 'info', 'Job queued');
@@ -469,6 +502,7 @@ function run(job) {
 			job.phase = kind;
 			const p = job.progress[kind];
 			p.done = Math.min(p.total, p.done + Math.max(1, Math.ceil(p.total * (slow?.frac ?? 0.25))));
+			job.bytes_ok = Math.round(job.progress.mail.done * mailAvg(job.account_id));
 			job.current_folder = kind === 'mail' ? 'Inbox' : kind;
 			if (slow) {
 				// Items per second implied by the pace, with a little life in it.
@@ -771,7 +805,7 @@ export async function handle(req) {
 		const host = String(body.config?.host ?? body.config?.server ?? body.config?.mailbox ?? '');
 		if (host.startsWith('bad')) return send(200, { ok: false, error_kind: 'unreachable', msg: `cannot connect to ${host}` });
 		if (host.startsWith('wrong')) return send(200, { ok: false, error_kind: 'auth', msg: 'LOGIN failed for jane@example.com' });
-		return body.role === 'target' ? send(200, { ok: true, msg: 'connection successful', quota: null }) : send(200, { ok: true, msg: '3 folder(s) found', folders: [{ path: 'INBOX', kind: 'mail', special: 'inbox', count: 12 }] });
+		return body.role === 'target' ? send(200, { ok: true, msg: 'connection successful', quota: null }) : send(200, { ok: true, msg: '3 folder(s) found', folders: [{ path: 'INBOX', kind: 'mail', special: 'inbox', count: 12 }], ...(MEASURABLE.has(parts[1]) ? { size: { bytes: 1_240_000, count: 12, approx: false } } : {}) });
 	}
 
 	if (path === '/intake/settings') {
@@ -894,10 +928,18 @@ export async function handle(req) {
 					const [config, secrets] = checkEndpoint(body.kind, role, body.config, same ? account[key] : {}, body.secrets);
 					account[role] = { kind: body.kind, config, has_secret: false };
 					account[key] = secrets;
+					if (role === 'source' && MEASURABLE.has(body.kind)) measure(account);
 				} catch (error) {
 					return fail(422, error.message);
 				}
 			}
+			if (role === 'source' && !MEASURABLE.has(body.kind)) Object.assign(account, { size: undefined, sizing: false });
+			publish('account', accountView(account));
+			return send(200, accountView(account));
+		}
+		if (parts[2] === 'size' && m === 'POST') {
+			if (!MEASURABLE.has(account.source?.kind ?? 'pst')) return fail(422, 'the size of this source is known once a migration listed it');
+			measure(account);
 			publish('account', accountView(account));
 			return send(200, accountView(account));
 		}
@@ -1205,7 +1247,7 @@ function seedDemo() {
 		const t = state.psts.get(accountId).scan.totals;
 		const progress = emptyProgress();
 		for (const k of Object.keys(progress)) progress[k] = { done: Math.round(t[k] * (done[k] ?? 0)), total: t[k], errors: over.errors?.[k] ?? 0 };
-		const j = { id, account_id: accountId, status, phase: over.phase ?? 'verify', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: ago(over.started ?? 300), finished_at: null, error: null, mode: 'full', created_at: ago((over.started ?? 300) + 5), tuning, priority: 0, batch_id: 1, pause_reason: null };
+		const j = { id, account_id: accountId, status, phase: over.phase ?? 'verify', progress, current_folder: null, rate: null, rate_bytes: null, bytes_ok: Math.round(progress.mail.done * (state.psts.get(accountId).size / t.mail)), eta: null, started_at: ago(over.started ?? 300), finished_at: null, error: null, mode: 'full', created_at: ago((over.started ?? 300) + 5), tuning, priority: 0, batch_id: 1, pause_reason: null };
 		state.jobs.set(id, j);
 		state.logs.set(id, []);
 		const lines = [['info', 'Job queued'], ['info', 'Precheck: IMAP, CalDAV and CardDAV reachable, quota sufficient']];

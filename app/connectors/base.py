@@ -84,6 +84,15 @@ class SourceFolder:
 
 
 @dataclass
+class MailboxSize:
+    """Size of the mail of a source (Source.mailbox_size): bytes and number of messages. approx: an estimate (e.g. the
+    quota usage of the account, which counts every folder), shown as such."""
+    bytes: int
+    count: int | None = None
+    approx: bool = False
+
+
+@dataclass
 class SourceItem:
     """One line of a listing: no body, kept in memory for every item still to migrate."""
     key: str                      # stable across runs, unique within kind + account. ASCII, 200 chars at most
@@ -202,6 +211,12 @@ class Source(abc.ABC):
         """{key: flags} of every mail of the folder, cheaper than a listing, for a pass that did not list it all
         (delta): the flags its copies on the target should have. None: this source cannot tell (no flags, or no
         cheaper way than a listing). Never alters the source."""
+        return None
+
+    def mailbox_size(self, folders: list[SourceFolder], deadline: float) -> MailboxSize | None:
+        """Size of the mail folders among `folders` (from folders(), after open()), READ ONLY and without reading any
+        body. None: the source cannot tell cheaply, or `deadline` (time.monotonic()) passed. Never a guess shown as
+        exact: an estimate says approx=True."""
         return None
 
     def read_rules(self) -> list[dict]:

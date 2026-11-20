@@ -5,6 +5,7 @@ import hashlib
 import imaplib
 import json
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.parser import BytesHeaderParser
@@ -16,9 +17,12 @@ from . import oauth, registry
 from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
                    CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, DELETE_SOFT, DELETE_TRASH,
                    IMPORT_HEADER, MAIL, MIRROR_DELETED_FLAG, Changes, ConnectorError, FetchedItem, FolderPlan, Listing,
-                   OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
+                   MailboxSize, OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
 
 FETCH_CHUNK = 500  # UIDs per listing FETCH
+SIZE_CHUNK = 5000  # messages per FETCH (RFC822.SIZE FLAGS) of mailbox_size: the deadline is checked between them
+SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.I)
+STATUS_SIZE_RE = re.compile(r"\bSIZE\s+(\d+)", re.I)
 LIST_ITEMS = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
 # virtual folders showing messages that live elsewhere: copying them would duplicate the mailbox
 VIRTUAL_FLAGS = {"\\all", "\\flagged", "\\important"}
@@ -218,6 +222,10 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
     return out
 
 
+class _OverBudget(Exception):
+    """mailbox_size: the deadline passed."""
+
+
 # ------------------------------------------------------------------ source
 class ImapSource(Source):
     make_params = staticmethod(params_of)
@@ -308,6 +316,85 @@ class ImapSource(Source):
         keys = item_keys(folder.path, uv, recs)
         return [SourceItem(key=k, alt_key=alt_key_of(r), date=r["date"], size=r["size"], flags=keep_flags(r["flags"]),
                            ref=(uv, r["uid"])) for k, r in zip(keys, recs)]
+
+    def mailbox_size(self, folders: list[SourceFolder], deadline: float) -> MailboxSize | None:
+        """STATUS (MESSAGES SIZE) per folder when the server has STATUS=SIZE (RFC 8438), else the sum of RFC822.SIZE
+        (FETCH of sizes and flags only, folder opened with EXAMINE, \\Deleted messages left out as in the listing).
+        Past the deadline: the quota usage of the account (every folder, so approx), or None."""
+        c = self._c()
+        mail = [f for f in folders if f.kind == MAIL and not f.skip]
+        total = count = 0
+        try:
+            with _guard():
+                for f in mail:
+                    if time.monotonic() > deadline:
+                        raise _OverBudget
+                    got = self._status_size(f) if "STATUS=SIZE" in c.caps else None
+                    if got is not None:
+                        total, count = total + got[0], count + got[1]
+                        continue
+                    b, n = self._folder_bytes(f, deadline)
+                    total, count = total + b, count + n
+        except ConnectorError as e:
+            if not isinstance(e.__cause__, _OverBudget):
+                raise
+            return self._quota_size()
+        finally:
+            self._leave_selected()
+        return MailboxSize(total, count)
+
+    def _leave_selected(self) -> None:
+        """INBOX opened (read-only) last: some servers (GreenMail) keep a folder opened by a session that logged out
+        busy, and then fail to delete it."""
+        c = self.conn
+        if c is None or c.selected in (None, "INBOX"):
+            return
+        try:
+            c.select("INBOX", readonly=True)
+        except Exception:  # noqa: BLE001 - only a courtesy
+            pass
+
+    def _status_size(self, folder: SourceFolder) -> tuple[int, int] | None:
+        """(bytes, messages) by STATUS (MESSAGES SIZE), None when the server answers without them (then FETCH)."""
+        c = self._c()
+        try:
+            typ, data = c._m().status(quote(folder.ref), "(MESSAGES SIZE)")
+        except imaplib.IMAP4.abort:
+            raise
+        except imaplib.IMAP4.error:
+            return None
+        if typ != "OK":
+            return None
+        t = _text(data)
+        ms, mn = STATUS_SIZE_RE.search(t), re.search(r"MESSAGES\s+(\d+)", t, re.I)
+        return (int(ms.group(1)), int(mn.group(1))) if ms and mn else None
+
+    def _folder_bytes(self, folder: SourceFolder, deadline: float) -> tuple[int, int]:
+        c = self._c()
+        exists = c.select(folder.ref, readonly=True)
+        self._uv.pop(folder.ref, None)  # selected here: _select reads UIDVALIDITY again
+        total = n = 0
+        for lo in range(1, exists + 1, SIZE_CHUNK):
+            if time.monotonic() > deadline:
+                raise _OverBudget
+            hi = min(exists, lo + SIZE_CHUNK - 1)
+            typ, data = c._m().fetch(f"{lo}:{hi}", "(RFC822.SIZE FLAGS)")
+            for d in c._check(typ, data, "FETCH") or []:
+                line = d[0] if isinstance(d, tuple) else d
+                if not isinstance(line, bytes):
+                    continue
+                m = SIZE_RE.search(line)
+                if m and b"\\deleted" not in line.lower():
+                    total, n = total + int(m.group(1)), n + 1
+        return total, n
+
+    def _quota_size(self) -> MailboxSize | None:
+        try:
+            q = self._c().quota()
+        except Exception:  # noqa: BLE001 - an estimate only
+            return None
+        used = (q or {}).get("used")
+        return MailboxSize(int(used), None, approx=True) if used is not None else None
 
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
         with _guard():

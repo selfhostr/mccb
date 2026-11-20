@@ -41,6 +41,8 @@ def job_view(r) -> dict:
         # byte rate only alongside an item rate (rate is reset to NULL on pause/crash, rate_bytes may lag)
         "rate_bytes": (r["rate_bytes"] if "rate_bytes" in r.keys() else None) if r["rate"] is not None else None,
         "eta": r["eta"],
+        # bytes of mail imported from this source so far, every run counted (null: not counted yet)
+        "bytes_ok": r["bytes_ok"] if "bytes_ok" in r.keys() else None,
         "started_at": r["started_at"], "finished_at": r["finished_at"], "error": r["error"],
         "mode": r["mode"], "created_at": r["created_at"],
         # current pipeline sizes {mode: auto|manual, builders, connections, fallback} (None before the job starts)
@@ -105,7 +107,9 @@ def _mirror_of(r) -> bool:
     return bool(r["opt_mirror"]) if "opt_mirror" in r.keys() else False
 
 
-def account_view(r, with_job: bool = True) -> dict:
+def account_view(r, with_job: bool = True, imported: int | None = None) -> dict:
+    """`imported`: bytes of mail already imported when the caller has them (list: one GROUP BY for every account)."""
+    from . import mailbox_size
     job = None
     if with_job:
         jr = latest_job_row(r["id"])
@@ -120,8 +124,18 @@ def account_view(r, with_job: bool = True) -> dict:
                     "mirror": _mirror_of(r)},
         "mirror": _mirror_of(r),
         **_source_reach(r),
+        # mail at the source {bytes, count, at, approx, computing} (bytes null: unknown) and bytes imported from it
+        "source_size": mailbox_size.view(r, imported if imported is not None else _imported(r)),
         "job": job,
     }
+
+
+def _imported(r) -> int | None:
+    from . import mailbox_size
+    try:
+        return mailbox_size.imported_bytes(r)
+    except Exception:  # noqa: BLE001 - an unreadable source (connector gone): nothing to show
+        return None
 
 
 def _source_reach(r) -> dict:

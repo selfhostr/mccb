@@ -63,7 +63,27 @@ export interface Account {
 	source_carries?: { calendar: boolean; contacts: boolean } | null;
 	/** IMAP source: the saved server of its host and port, whose CalDAV/CardDAV is read with the source's login; problem: why it is not. */
 	source_dav?: { server_id: number | null; problem: SourceDavProblem | null } | null;
+	/** Mail at the source and bytes already imported from it. */
+	source_size?: SourceSize;
 	job: Job | null;
+}
+
+/** bytes/count null: unknown (never measured, or the source cannot tell before a job lists it). */
+export interface SourceSize {
+	bytes: number | null;
+	count: number | null;
+	/** When it was measured (epoch seconds). */
+	at: number | null;
+	/** An estimate: see `basis`. */
+	approx: boolean;
+	/** How the estimate was made: the quota usage of the account (every folder), or the size of the uploaded file. */
+	basis?: 'quota' | 'file' | null;
+	/** A measure is running in the background. */
+	computing: boolean;
+	/** It can be measured before a job (POST /accounts/{id}/size); false for a PST or uploaded files. */
+	measurable?: boolean;
+	/** Bytes of mail imported from this source, every run counted. */
+	imported: number | null;
 }
 
 export type SourceDavProblem = 'no_server' | 'ambiguous' | 'dav_off' | 'same_mailbox';
@@ -90,6 +110,8 @@ export interface Job {
 	current_folder: string | null;
 	rate: number | null;
 	rate_bytes: number | null;
+	/** Bytes of mail imported from this source so far, every run counted. null: not counted yet. */
+	bytes_ok?: number | null;
 	eta: number | null;
 	started_at: number | null;
 	finished_at: number | null;
@@ -249,6 +271,8 @@ export interface ConnectorProbe {
 	msg: string;
 	error_kind?: ConnectorErrorKind | (string & {});
 	folders?: { path: string[] | string; kind: string; special?: string | null; count: number }[];
+	/** Source test: the mail it holds, when it could be measured in a few seconds. */
+	size?: { bytes: number; count: number | null; approx: boolean } | null;
 	quota?: unknown;
 }
 

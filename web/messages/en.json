@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "calculating…",
+	"migrations_size_of_total": "{imported} imported of {total}",
+	"migrations_size_of_total_partial": "{imported} imported of {total} (size known for {known} of {count} mailboxes)",
+	"migrations_size_source": "Mailbox size",
+	"migrations_size_imported": "Imported so far",
+	"migrations_size_approx": "Estimate from the quota of the account (every folder counted)",
+	"migrations_size_measured": "Measured",
+	"migrations_size_after_job": "Known once a migration has listed the source",
+	"migrations_size_refresh": "Measure again",
+	"migrations_size_probe": "Mailbox size: {size}",
+	"migrations_size_probe_later": "Its size is measured once the mailbox is saved.",
+	"migrations_size_approx_file": "Estimate from the size of the file (calendars, contacts and file overhead included), until a migration lists it"
 }
