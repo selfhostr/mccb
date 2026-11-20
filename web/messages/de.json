@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "wird berechnet…",
+	"migrations_size_of_total": "{imported} von {total} importiert",
+	"migrations_size_of_total_partial": "{imported} von {total} importiert (Größe bekannt für {known} von {count} Postfächern)",
+	"migrations_size_source": "Postfachgröße",
+	"migrations_size_imported": "Bisher importiert",
+	"migrations_size_approx": "Schätzung aus dem Kontingent des Kontos (alle Ordner gezählt)",
+	"migrations_size_measured": "Gemessen",
+	"migrations_size_after_job": "Bekannt, sobald eine Migration die Quelle gelesen hat",
+	"migrations_size_refresh": "Erneut messen",
+	"migrations_size_probe": "Postfachgröße: {size}",
+	"migrations_size_probe_later": "Die Größe wird gemessen, sobald das Postfach gespeichert ist.",
+	"migrations_size_approx_file": "Schätzung aus der Dateigröße (Kalender, Kontakte und Dateistruktur inbegriffen), bis eine Migration sie liest"
 }

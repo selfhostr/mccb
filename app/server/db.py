@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS {name} (
 ITEMS_INDEXES = """
 CREATE INDEX IF NOT EXISTS items_status2 ON items(account_id, pst_key, kind, status);
 CREATE INDEX IF NOT EXISTS items_folder2 ON items(account_id, pst_key, kind, folder);
+CREATE INDEX IF NOT EXISTS items_bytes ON items(kind, status, account_id, pst_key, size);
 """
 ITEMS_COLS = ("id, account_id, pst_id, pst_key, kind, item_key, folder, target, status, error, warnings, subject, "
               "hash, size, job_id, updated_at")
@@ -370,7 +371,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "jobs", "mirror TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
+    _add_column(conn, "jobs", "bytes_ok INTEGER")  # bytes of mail imported for the source of the job, all runs
     _migrate_tuning(conn)
+    # size of the mail at the source (mailbox_size.py): bytes, messages, when, estimate (1) or exact (0), the source it
+    # was measured on (items.pst_key); pending: a computation started at that time (web process), NULL once it ended
+    for ddl in ("source_size_bytes INTEGER", "source_size_count INTEGER", "source_size_at REAL",
+                "source_size_approx INTEGER", "source_size_key TEXT", "source_size_pending REAL"):
+        _add_column(conn, "accounts", ddl)
     # server-side intake (drop folder, remote fetch): origin of a PST, fetch progress, encrypted fetch spec
     _add_column(conn, "psts", "source TEXT")             # 'upload' (NULL) | 'inbox' | 'fetch'
     _add_column(conn, "psts", "origin TEXT")             # display label (no secrets), e.g. host + file name

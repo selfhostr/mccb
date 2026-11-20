@@ -9,6 +9,7 @@
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
+	import SizeFacts from './SizeFacts.svelte';
 
 	let { id, onclose, settings }: { id: number; onclose: () => void; settings: Snippet<[number, boolean?]> } = $props();
 
@@ -30,6 +31,7 @@
 	<IconButton icon={X} label={m.jobs_panel_close()} onclick={onclose} data-testid="job-close" />
 </div>
 <div class="min-h-0 flex-1 overflow-y-auto p-4" data-testid="account-settings">
+	<dl class="m-0 mb-4 grid grid-cols-2 gap-x-4 gap-y-1 text-xs"><SizeFacts {id} /></dl>
 	{@render settings(id)}
 	{#if jobId != null}
 		<div class="mt-4"><Button href={rowHref(router.search, id, jobId)}>{m.migrations_row_open_details()}</Button></div>

@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "计算中…",
+	"migrations_size_of_total": "已导入 {imported}，共 {total}",
+	"migrations_size_of_total_partial": "已导入 {imported}，共 {total}（已知 {count} 个邮箱中 {known} 个的大小）",
+	"migrations_size_source": "邮箱大小",
+	"migrations_size_imported": "已导入",
+	"migrations_size_approx": "根据账户配额估算（计入所有文件夹）",
+	"migrations_size_measured": "测量时间",
+	"migrations_size_after_job": "迁移读取源后即可得知",
+	"migrations_size_refresh": "重新测量",
+	"migrations_size_probe": "邮箱大小：{size}",
+	"migrations_size_probe_later": "保存邮箱后将测量其大小。",
+	"migrations_size_approx_file": "根据文件大小估算（含日历、联系人和文件结构），待迁移读取后更新"
 }

@@ -1,4 +1,4 @@
-import type { Account, Job, Pst, TestResult } from '../api/types.ts';
+import type { Account, Job, Pst, SourceSize, TestResult } from '../api/types.ts';
 import { pct } from '../format.ts';
 import { hasCustomSource, hasOwnTarget } from './connector.ts';
 
@@ -156,4 +156,35 @@ export function importPlan(
 		else plan.ready.push(account);
 	}
 	return plan;
+}
+
+/** Bytes of mail imported from the source: the job's live count first, else what the account last said. */
+export function importedBytes(size: SourceSize | undefined | null, job: Pick<Job, 'bytes_ok'> | undefined | null): number | null {
+	return job?.bytes_ok ?? size?.imported ?? null;
+}
+
+export interface SizeTotals {
+	/** Imported and total over the mailboxes whose source size is known. */
+	imported: number;
+	total: number;
+	/** Mailboxes whose source size is known, out of `count`. */
+	known: number;
+	count: number;
+	/** Some of the sizes are estimates. */
+	approx: boolean;
+}
+
+/** Bytes across mailboxes. A mailbox whose size is unknown is left out of both sums (`known` < `count` says so). */
+export function sizeTotals(accounts: Iterable<Account>, jobOf: (id: number) => Pick<Job, 'bytes_ok'> | undefined): SizeTotals {
+	const out: SizeTotals = { imported: 0, total: 0, known: 0, count: 0, approx: false };
+	for (const account of accounts) {
+		out.count++;
+		const size = account.source_size;
+		if (size?.bytes == null) continue;
+		out.known++;
+		out.total += size.bytes;
+		out.approx ||= size.approx;
+		out.imported += importedBytes(size, jobOf(account.id)) ?? 0;
+	}
+	return out;
 }

@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "doublon",
 	"migrations_list_err_file": "Impossible de lire ce fichier",
 	"migrations_page_more": "Plus d'actions",
-	"migrations_csv_menu": "Exporter / mettre à jour par CSV"
+	"migrations_csv_menu": "Exporter / mettre à jour par CSV",
+	"migrations_size_computing": "calcul…",
+	"migrations_size_of_total": "{imported} importés sur {total}",
+	"migrations_size_of_total_partial": "{imported} importés sur {total} (taille connue pour {known} boîtes sur {count})",
+	"migrations_size_source": "Taille de la boîte",
+	"migrations_size_imported": "Déjà importé",
+	"migrations_size_approx": "Estimation d'après le quota du compte (tous les dossiers comptés)",
+	"migrations_size_measured": "Mesurée",
+	"migrations_size_after_job": "Connue dès qu'une migration a lu la source",
+	"migrations_size_refresh": "Mesurer à nouveau",
+	"migrations_size_probe": "Taille de la boîte : {size}",
+	"migrations_size_probe_later": "Sa taille est mesurée une fois la boîte enregistrée.",
+	"migrations_size_approx_file": "Estimation d'après la taille du fichier (calendriers, contacts et structure du fichier inclus), en attendant qu'une migration le lise"
 }

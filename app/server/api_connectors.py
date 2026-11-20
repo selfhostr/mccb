@@ -3,6 +3,7 @@ Secrets go in and never come out: views only carry has_secret."""
 from __future__ import annotations
 
 import dataclasses
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from ..connectors import m365_provision, registry, sieve, wiring
 from ..connectors.base import CAP_RULES, ConnectorError
-from . import db, planning, repo
+from . import db, mailbox_size, planning, repo
 from .security import decrypt
 
 router = APIRouter(prefix="/api")
@@ -101,7 +102,7 @@ def put_source(aid: int, body: EndpointIn):
     _idle(aid)
     if body.connection_id is not None:
         _link_source(r, body)
-        return repo.get_account(aid)
+        return _source_set(aid)
     kind = body.kind or wiring.PST
     if kind == wiring.PST:
         pst_id = (body.config or {}).get("pst_id", r["pst_id"])
@@ -115,6 +116,12 @@ def put_source(aid: int, body: EndpointIn):
         config, secrets = _validated(kind, "source", body.config, current, body.secrets)
         db.ex("UPDATE accounts SET source_kind=?, source_config=?, source_secret_enc=?, source_connection_id=NULL "
               "WHERE id=?", (kind, db.jdump(config), wiring.dump_secrets(secrets), aid))
+    return _source_set(aid)
+
+
+def _source_set(aid: int) -> dict:
+    """After a source change: measured in the background (a size measured on another source is not shown)."""
+    mailbox_size.start(aid)
     return repo.get_account(aid)
 
 
@@ -213,9 +220,14 @@ def test_connector(kind: str, body: ProbeIn):
         if body.role == "source":
             with registry.make_source(kind, config, secrets) as src:
                 folders = src.folders()
-            return {"ok": True, "msg": f"{len(folders)} folder(s) found",
-                    "folders": [{"path": f.path, "kind": f.kind, "special": f.special, "count": f.count}
-                                for f in folders[:1000]]}
+                # a few seconds at most: past them the size is measured after the mailbox is saved
+                size = _probe_size(src, folders) if mailbox_size.measurable(kind) else None
+            out = {"ok": True, "msg": f"{len(folders)} folder(s) found",
+                   "folders": [{"path": f.path, "kind": f.kind, "special": f.special, "count": f.count}
+                               for f in folders[:1000]]}
+            if mailbox_size.measurable(kind):  # null: measured after the save (longer than the test may take)
+                out["size"] = size
+            return out
         session = registry.make_target(kind, config, secrets).session()
         try:
             session.connect()
@@ -224,6 +236,17 @@ def test_connector(kind: str, body: ProbeIn):
             session.close()
     except ConnectorError as e:
         return {"ok": False, "error_kind": e.kind, "msg": str(e)}
+
+
+def _probe_size(src, folders) -> dict | None:
+    """{bytes, count, approx} of the mail, or None (unknown, or longer than mailbox_size.PROBE_BUDGET)."""
+    try:
+        size = src.mailbox_size(folders, time.monotonic() + mailbox_size.PROBE_BUDGET)
+    except ConnectorError:
+        return None
+    if size is None or size.approx:  # the quota estimate: the full measure after the save does better
+        return None
+    return {"bytes": size.bytes, "count": size.count, "approx": size.approx}
 
 
 @router.post("/accounts/{aid:int}/rules")

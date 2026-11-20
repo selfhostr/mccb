@@ -19,7 +19,13 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `POST /api/accounts/import-csv` (multipart file + server_id; columns `email;password[;login]`, `,` or `;`, optional header)
   → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
   Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
-  `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
+  `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},`
+  `source_size:{bytes|null,count|null,at|null,approx,basis:'quota'|'file'|null,computing,measurable,imported},job:{...}|null}`.
+  `source_size` is the mail at the current source (null: unknown, never 0): measured in the background when the source is
+  set (IMAP: `STATUS SIZE`, else the sum of `RFC822.SIZE`; read only), refreshed by each job's listing when the source gives
+  item sizes, an estimate (`approx`) from the quota or the uploaded file otherwise. `imported` = bytes of mail written to the
+  target for this source; a job carries the live value in `bytes_ok`. `POST /api/accounts/{id}/size` measures again
+  (422 when the source can only be measured by a job).
 - Repair (see [Repair a damaged mailbox](repair.md)), a list separate from the accounts:
   `GET/POST /api/repair/boxes {server_id,email,password,login?}`, `PUT/DELETE /api/repair/boxes/{id}` (409 while a repair or duplicates run is active),
   `POST /api/repair/boxes/{id}/test` → `{imap:{ok,msg,quota,uidplus}}`, `POST /api/repair/boxes/import-csv` (multipart file + server_id)

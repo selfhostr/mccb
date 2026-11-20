@@ -15,9 +15,10 @@ from datetime import timezone
 
 from ..connectors import registry, wiring
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
-                               CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, OutgoingItem, Target,
+                               CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, MailboxSize,
+                               OutgoingItem, Target,
                                stamp_import_id)
-from . import crash, db, foldermap, ordering
+from . import crash, db, foldermap, mailbox_size, ordering
 from . import mirror as mm
 from . import policy as pol
 from .config import settings
@@ -139,6 +140,7 @@ class ConnectorJobRunner(JobRunner):
         self._source_keys: set[str] = set()       # folder_key() of every folder the source has (no old keys)
         self._deferred: list = []                 # items waiting for another write of their resource name
         self._deferring = False
+        self._sizing: list[int] | None = None    # [bytes, messages] of the mail listing in progress (source size)
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -390,6 +392,12 @@ class ConnectorJobRunner(JobRunner):
         if not partial:
             self.totals[kind] += len(listing) - int(f.count or 0)
             f.count = len(listing)
+        if self._sizing is not None:  # size of the mail at the source, from this listing (see _run_phase)
+            if partial or any(it.size is None for it in listing):
+                self._sizing = None
+            else:
+                self._sizing[0] += sum(it.size for it in listing)
+                self._sizing[1] += len(listing)
         seen = {it.key for it in listing}
         # rows of keys the source no longer lists: the same messages may be back under other keys (UIDVALIDITY)
         orphans: dict[str, list[dict]] = {}
@@ -463,6 +471,8 @@ class ConnectorJobRunner(JobRunner):
             self._tune_t0 = None
             entries: list = []
             todo = [f for f in folders if self._folder_has_work(kind, f)]
+            # every mail folder listed in full: the size of the mail at the source comes for free
+            self._sizing = [0, 0] if phase == MAIL and len(todo) == len(folders) and self.mode != "mirror" else None
             for f in todo:
                 self.check()
                 fk = folder_key(f.path)
@@ -476,6 +486,9 @@ class ConnectorJobRunner(JobRunner):
                                          source_ref=it.alt_key)
                     continue
                 entries.extend(listed)
+            if self._sizing is not None:
+                mailbox_size.store(self.account_id, MailboxSize(self._sizing[0], self._sizing[1]), self.pst_key)
+                self._sizing = None
             entries.sort(key=lambda e: (e[0], e[1]))
             self._warn_quota(phase, entries)
             self.current_folder = None

@@ -532,6 +532,7 @@ class JobRunner:
         self._rate_first: tuple[float, int, int] | None = None
         self._rate_last: tuple[float, int, int] | None = None
         self._bytes_done = 0                     # bytes APPENDed by this run (rate_bytes)
+        self.bytes_ok: int | None = None         # bytes of mail imported for this source, all runs (jobs.bytes_ok)
         self._inflight_bytes: dict[int, int] = {}  # item_id -> size: built, submitted, not yet APPENDed
         self.build_procs = builders.default_processes()
         self.byte_budget = builders.byte_budget()
@@ -697,6 +698,10 @@ class JobRunner:
             c = {r["status"]: r["n"] for r in rows}
             self.progress[pk] = {"done": c.get("ok", 0) + c.get("skipped", 0) + c.get(pol.FILTERED, 0), "total": self.totals[kind],
                                  "errors": c.get("error", 0)}
+        # bytes of mail written to the target for this source, all runs (covering index items_bytes)
+        r = db.q1("SELECT SUM(size) s FROM items WHERE kind='mail' AND status='ok' AND account_id=? AND pst_key=?",
+                  (self.account_id, self.pst_key))
+        self.bytes_ok = int(r["s"] or 0)
 
     def flush(self, force: bool = False) -> None:
         now = time.time()
@@ -741,10 +746,10 @@ class JobRunner:
                 eta = rem_mail * avg / rate_bytes + (rem_other / rate if rate else 0)
         if eta is None:
             eta = (max(0, total - done) / rate) if rate is not None and rate > 0 else (0 if total and done >= total else None)
-        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, rate_bytes=?, eta=?, heartbeat=? WHERE id=?",
+        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, rate_bytes=?, eta=?, heartbeat=?, bytes_ok=? WHERE id=?",
               (db.jdump(self.progress), self.current_folder, round(rate, 2) if rate is not None else None,
                round(rate_bytes, 1) if rate_bytes is not None else None,
-               round(eta) if eta is not None else None, now, self.job_id))
+               round(eta) if eta is not None else None, now, self.bytes_ok, self.job_id))
 
     def item_rows(self, kind: str, fkey: str, path: list[str] | None = None) -> dict[str, dict]:
         """{item key: row} of a folder. Items already ok/skipped share DONE_ROW: a folder of a million mails then

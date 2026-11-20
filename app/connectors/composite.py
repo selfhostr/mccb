@@ -12,8 +12,8 @@ from __future__ import annotations
 import re
 from typing import Iterator
 
-from .base import (CALENDAR, CONTACTS, MAIL, TASKS, Changes, ConnectorError, FetchedItem, Listing, Source,
-                   SourceFolder, SourceItem)
+from .base import (CALENDAR, CONTACTS, MAIL, TASKS, Changes, ConnectorError, FetchedItem, Listing, MailboxSize,
+                   Source, SourceFolder, SourceItem)
 
 DAV_KEY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{32}$")  # see DavSource._key
 PART_OF_KIND = {CALENDAR: "caldav", TASKS: "caldav", CONTACTS: "carddav"}
@@ -78,6 +78,9 @@ class ImapDavSource(Source):
 
     def read_rules(self) -> list[dict]:
         return self.mail.read_rules()
+
+    def mailbox_size(self, folders: list[SourceFolder], deadline: float) -> MailboxSize | None:
+        return self.mail.mailbox_size([f for f in folders if f.kind == MAIL], deadline)
 
     def mirror_listing(self, folder: SourceFolder) -> Listing:
         return self._part(folder).mirror_listing(folder)

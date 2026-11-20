@@ -1227,5 +1227,17 @@
 	"migrations_list_err_duplicate": "duplicate",
 	"migrations_list_err_file": "This file cannot be read",
 	"migrations_page_more": "More actions",
-	"migrations_csv_menu": "Export / update by CSV"
+	"migrations_csv_menu": "Export / update by CSV",
+	"migrations_size_computing": "calcolo…",
+	"migrations_size_of_total": "{imported} importati su {total}",
+	"migrations_size_of_total_partial": "{imported} importati su {total} (dimensione nota per {known} caselle su {count})",
+	"migrations_size_source": "Dimensione della casella",
+	"migrations_size_imported": "Importato finora",
+	"migrations_size_approx": "Stima dalla quota dell'account (tutte le cartelle contate)",
+	"migrations_size_measured": "Misurata",
+	"migrations_size_after_job": "Nota quando una migrazione avrà letto l'origine",
+	"migrations_size_refresh": "Misura di nuovo",
+	"migrations_size_probe": "Dimensione della casella: {size}",
+	"migrations_size_probe_later": "La dimensione viene misurata una volta salvata la casella.",
+	"migrations_size_approx_file": "Stima dalla dimensione del file (calendari, contatti e struttura del file inclusi), finché una migrazione non lo legge"
 }

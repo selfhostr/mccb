@@ -143,18 +143,18 @@ test.describe('migrations', () => {
 	test('the sentence says how far it is, and the bar moves with it', async ({ page }) => {
 		await mock(page.request, 'reset', { hold: true });
 		await ready(page);
-		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done.');
+		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done. · 0 byte imported of ≈ 8.58 MB (size known for 3 of 6 mailboxes)');
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
 		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 
 		const progress = { mail: { done: 300, total: 900, errors: 0 }, calendar: { done: 0, total: 0, errors: 0 }, contacts: { done: 0, total: 0, errors: 0 } };
 		await mock(page.request, 'job', { id: 1, patch: { status: 'running', progress, rate: 10 } });
-		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done\. About 1\d* min left\.$/);
+		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done\. About 1\d* min left\. · .+ imported of ≈ 8\.58 MB/);
 		await expect(page.getByTestId('overall').getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6');
 
 		await mock(page.request, 'job', { id: 1, patch: { status: 'failed', error: 'connection lost' } });
-		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done, 1 needs you.');
+		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done, 1 needs you\. · /);
 	});
 
 	test('a filter says what stays selected and leaves it out', async ({ page }) => {

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from ..connectors.wiring import items_key_of_account, sync_files_source
-from . import crash, csvaccounts, csvimport, db, planning, preview, repo, runs, tokens, uploads
+from . import crash, csvaccounts, csvimport, db, mailbox_size, planning, preview, repo, runs, tokens, uploads
 from .api_connectors import router as connectors_router
 from .api_planning import router as planning_router
 from .api_dedup import router as dedup_router
@@ -57,6 +57,7 @@ async def lifespan(_app):
     log.info("mccb v%s starting (web)", get_version())
     settings.ensure_dirs()
     db.conn()
+    mailbox_size.reset_pending()
     _admin_startup()
     task = asyncio.get_running_loop().create_task(_prune_events())
     try:
@@ -339,7 +340,8 @@ def list_accounts(server_id: int | None = None):
         rows = db.q("SELECT * FROM accounts WHERE server_id=? ORDER BY email", (server_id,))
     else:
         rows = db.q("SELECT * FROM accounts ORDER BY email")
-    return [repo.account_view(r) for r in rows]
+    imported = mailbox_size.imported_by_account(rows)
+    return [repo.account_view(r, imported=imported.get(r["id"])) for r in rows]
 
 
 @app.post("/api/accounts", status_code=201)
@@ -479,6 +481,16 @@ def test_account_row(r) -> dict:
 @app.post("/api/accounts/{aid:int}/test")
 def test_account(aid: int):
     return test_account_row(_account_or_404(aid))
+
+
+@app.post("/api/accounts/{aid:int}/size")
+def compute_account_size(aid: int):
+    """Measures the mail of the source again, in the background (source_size.computing until it ends). 422: the
+    source cannot be measured before a job (PST, uploaded files: their job's listing gives it)."""
+    _account_or_404(aid)
+    if not mailbox_size.start(aid):
+        raise HTTPException(422, "the size of this source is known once a migration listed it")
+    return repo.get_account(aid)
 
 
 @app.post("/api/accounts/import-csv")
