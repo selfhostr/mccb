@@ -198,6 +198,12 @@ class Source(abc.ABC):
         """Items changed since `cursor`. Default for protocols that cannot tell: a full listing."""
         return Changes(list(self.iter_items(folder)), None, reset=True)
 
+    def flags_of(self, folder: SourceFolder) -> dict[str, list[str]] | None:
+        """{key: flags} of every mail of the folder, cheaper than a listing, for a pass that did not list it all
+        (delta): the flags its copies on the target should have. None: this source cannot tell (no flags, or no
+        cheaper way than a listing). Never alters the source."""
+        return None
+
     def read_rules(self) -> list[dict]:
         """Mail rules as sieve.py expects them. Only for sources declaring CAP_RULES, called after open()."""
         return []
@@ -266,6 +272,13 @@ class TargetSession(abc.ABC):
     def count_ours(self, folder: str, namespace: str, names: set[str] | None = None) -> int:
         """Number of items in the folder written by us (never the pre-existing content): those whose import id
         starts with "<namespace>-", or, for targets working with resource names, those listed in `names`."""
+
+    def add_missing_flags(self, folder: str, namespace: str, wanted: dict[str, list[str]]
+                          ) -> tuple[int, int, int] | None:
+        """Our mails in the folder (import id "<namespace>-...", never another message) given the read, answered,
+        starred and draft flags of `wanted` ({bare import id: flags}) they lack; nothing removed. (checked, fixed,
+        still lacking them after the change). None: this target does not do it (its flags are those written)."""
+        return None
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
         """Content of an item (only with CAP_READBACK)."""

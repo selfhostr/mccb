@@ -23,7 +23,7 @@ from . import policy as pol
 from .config import settings
 from .dav import DavClient, DavError
 from .engine_loader import engine
-from .imap import (SPECIAL_DEFAULT, SPECIAL_FLAGS, ImapConn, ImapError, ImapParams, find_special,
+from .imap import (SPECIAL_DEFAULT, SPECIAL_FLAGS, ImapConn, ImapError, ImapParams, find_special, flags_to_add,
                    personal_prefix, utf7_decode, utf7_encode, with_retry, wrap_exc)
 from .security import decrypt
 
@@ -1523,8 +1523,12 @@ class JobRunner:
         raw = res["raw"]
         if self._size_gate("mail", key, fkey, len(raw), res["subject"], target):
             return
+        from .mirror import canon_flags
+        # version: the flags it is written with (as on the connector route), given again by phase_verify to a copy
+        # the server kept without them
         params = self._upsert_params("mail", key, fkey, "inflight", target=target, subject=res["subject"],
-                                     hash=res["hash"], size=len(raw), warnings=warnings)
+                                     hash=res["hash"], size=len(raw), warnings=warnings,
+                                     version=canon_flags(res["flags"]))
         self._inflight_buf.append((params, AppendTask(0, target, raw, res["flags"], res["internaldate"], len(raw),
                                                       import_id)))
         if not self._defer_inflight:
@@ -1753,6 +1757,46 @@ class JobRunner:
                 return list(f.path)
         return [fkey]
 
+    def _repair_server_flags(self, conn: ImapConn, targets: set[str]) -> None:
+        """Our copies on the server given the read, answered and starred flags they were written with and lack (a
+        server may ignore the flags of APPEND, a copy may be found there instead of being written again). Nothing
+        removed, only our own copies (exact X-PST-Import-Id). Rows of imports older than this check have no flags
+        recorded: left as they are."""
+        sha = self.pst_row["pst_sha"]
+        wanted: dict[str, dict[str, list[str]]] = {}
+        for r in db.q("SELECT item_key, target, version FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+                      "AND status='ok' AND version IS NOT NULL AND version<>''", (self.account_id, self.pst_key)):
+            flags = flags_to_add(r["version"].split(), ())
+            if flags and r["target"] in targets:
+                wanted.setdefault(r["target"], {})[import_id_of(sha, r["item_key"])[1:-1]] = flags
+        totals = {"checked": 0, "fixed": 0, "not_kept": 0}
+        for target, want in wanted.items():
+            self.check()
+            try:
+                checked, fixed, lacking = with_retry(
+                    lambda c: c.add_missing_flags(target, IMPORT_HEADER, f"{sha}-", want), conn, settings.max_retries,
+                    should_stop=self._should_stop)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    continue
+                if e.kind in ("temp", "auth"):
+                    raise
+                self.log(f"Flags of our mails in '{target}' not checked: {e}", "error")
+                continue
+            totals["checked"] += checked
+            totals["fixed"] += fixed
+            totals["not_kept"] += lacking
+            if fixed:
+                self.log(f"Folder '{target}': flags added to {fixed} of our {checked} mail(s) that lacked them "
+                         "(read, answered, starred)")
+            if lacking:
+                w = (f"Folder '{target}': the server did not keep the flags set on {lacking} mail(s): their read "
+                     "state may differ from the PST")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+        if wanted:
+            self.report["flags"] = totals
+
     def check_folder_status(self, conn: ImapConn, fkey: str, target: str, n_ok: int) -> dict:
         """Check of a target folder: number of messages bearing OUR fingerprint (X-PST-Import-Id containing
         "<sha>-") >= `n_ok` items marked as sent to this folder. Pre-existing content is not counted."""
@@ -1918,6 +1962,7 @@ class JobRunner:
                 targets = {r["target"]: (r["folder"], r["n"]) for r in rows}
                 for target, fk in self._mail_targets.items():
                     targets.setdefault(target, (fk, 0))
+                self._repair_server_flags(conn, set(targets))
                 for target, (fk, n_ok) in targets.items():
                     self.check()
                     e = self.check_folder_status(conn, fk, target, n_ok)
