@@ -459,6 +459,25 @@ test.describe('migrations', () => {
 		expect([calendar(1), calendar(2), calendar(3)]).toEqual([false, false, true]);
 	});
 
+	test('turning calendars on for several mailboxes says whose source has no CalDAV, and one click on its server fixes it', async ({ page }) => {
+		await ready(page);
+		// alice reads her old mail server, saved as Staging, whose DAV is off; bob comes from a PST.
+		const res = await page.request.put('/api/accounts/1/source', { data: { kind: 'imap', config: { host: 'mail.home.arpa', port: 143, security: 'starttls', login: 'alice@example.com' }, secrets: { password: 'pw' } } });
+		expect(res.ok()).toBe(true);
+		await ready(page);
+		await row(page, 'alice@example.com').getByRole('checkbox').check();
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+		await page.getByTestId('bulk-edit').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('srcdav-notice')).toHaveCount(0);
+		await dialog.getByLabel('Calendar').selectOption('on');
+		await expect(dialog.getByTestId('srcdav-notice')).toContainText('Calendars and contacts will stay at the source: CalDAV/CardDAV is off on the source server Staging.');
+		await expect(dialog.getByTestId('srcdav-list')).toHaveText('alice@example.com');
+		await dialog.getByTestId('srcdav-enable').click();
+		await expect(dialog.getByTestId('srcdav-notice')).toHaveCount(0);
+		expect((await (await page.request.get('/api/servers/2')).json()).dav_enabled).toBe(true);
+	});
+
 	test('a mailbox without a job has its own panel, with its URL', async ({ page }) => {
 		await ready(page);
 		await page.getByTestId('filter-q').fill('alice');

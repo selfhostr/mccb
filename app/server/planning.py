@@ -127,6 +127,7 @@ def plan_account(account_id: int) -> dict:
             src.open()
             folders = [f for f in src.folders() if f.kind in PHASES and not getattr(f, "skip", None)]
             out["source"] = {"kind": src_kind, "ok": True, "msg": f"{len(folders)} folder(s) found"}
+            warnings.extend(f"source: {p}" for p in getattr(src, "problems", None) or [])
     except ConnectorError as e:
         out.update(status="error", source={"kind": src_kind, "ok": False, "error_kind": e.kind, "msg": str(e)})
         return out
@@ -151,6 +152,9 @@ def plan_account(account_id: int) -> dict:
             targets = {}
             out["status"] = "error"
             out["targets"]["all"] = {"ok": False, "error_kind": e.kind, "msg": str(e)}
+        # wanted, a target for them, but the source cannot bring them: said, never left out in silence
+        warnings.extend(f"{'calendars' if k == 'calendar' else k} wanted but {why}: not copied"
+                        for k, why in wiring.source_gaps(acc).items() if k in targets)
         for phase in PHASES:
             mine = [(f, e) for f, e in entries.values() if e["kind"] == phase and not e["excluded"]]
             if not mine:

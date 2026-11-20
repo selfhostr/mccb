@@ -817,16 +817,25 @@ def preview_account(account_id: int, opts: Options) -> dict:
             sessions[phase] = s
         if not an.blocked:
             try:
-                src = ReadOnlySource(wiring.source_of_account(acc))
+                raw = wiring.source_of_account(acc)
+                src = ReadOnlySource(raw)
                 src.open()
                 folders, known, keys = _folders_of(src, acc, policy, phases)
             except ConnectorError as e:
                 an.block(SOURCE_UNLISTABLE, f"the source could not be read: {e}")
             else:
+                # a DAV part of an IMAP source that could not be read: its kinds are left out, as in the job
+                failed = getattr(raw, "failed", set())
+                phases = [p for p in phases if p not in failed]
+                for p in list(sessions):
+                    if p in failed:
+                        sessions.pop(p).close()
                 caps = {p: targets[p].capabilities for p in phases}
                 owners = {p for p in phases if getattr(targets[p], "names_resources", False)}
                 an = analyze(src, folders, known, sessions, caps, account_id, pst_key, policy, opts, source_keys=keys,
                              owners=owners)
+                for p in getattr(raw, "problems", None) or []:
+                    an.note("source_dav_unreadable", f"{p}: calendars, tasks and contacts are left out of this pass")
     finally:
         if src is not None:
             src.close()

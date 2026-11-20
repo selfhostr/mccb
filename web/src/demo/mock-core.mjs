@@ -362,7 +362,21 @@ function accountView(a) {
 	const job = [...state.jobs.values()].filter((j) => j.account_id === a.id).sort((x, y) => y.id - x.id)[0] ?? null;
 	const { srcSecrets, tgtSecrets, ...rest } = a;
 	const source = a.source ?? { kind: 'pst', config: { pst_id: a.pst_id }, has_secret: false };
-	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
+	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, ...sourceReach(a), job };
+}
+
+/** Same rules as wiring.source_carries and wiring.source_server: an IMAP source reads the CalDAV/CardDAV of the saved server of its host and port. */
+function sourceReach(a) {
+	const kind = a.source?.kind ?? 'pst';
+	if (kind === 'pst' || kind === 'files') return { source_carries: null, source_dav: null };
+	const items = CATALOGUE.find((c) => c.kind === kind)?.source?.items ?? [];
+	if (kind !== 'imap') return { source_carries: { calendar: items.includes(CALENDAR), contacts: items.includes(CONTACTS) }, source_dav: null };
+	const cfg = { ...(a.source.config ?? {}), ...(a.source.connection ? (state.sourceConnections.get(a.source.connection.id)?.config ?? {}) : {}) };
+	const host = String(cfg.host ?? '').trim().toLowerCase();
+	const port = Number(cfg.port ?? 993);
+	const srv = [...state.servers.values()].find((s) => s.imap_host.trim().toLowerCase() === host && s.imap_port === port && s.id !== a.server_id);
+	const problem = !srv ? 'no_server' : srv.dav_enabled ? null : 'dav_off';
+	return { source_carries: { calendar: !problem, contacts: !problem }, source_dav: { server_id: srv?.id ?? null, problem } };
 }
 
 /** Same rules as registry.normalize_config and merge_secrets. Returns [config, secrets] or throws a message. */

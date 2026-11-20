@@ -59,8 +59,14 @@ export interface Account {
 	/** The account's own target. kind null = the account's server. */
 	target?: Endpoint;
 	options: AccountOptions;
+	/** Whether the source can bring calendars and contacts; null when it cannot be known without reading it (PST, files). */
+	source_carries?: { calendar: boolean; contacts: boolean } | null;
+	/** IMAP source: the saved server of its host and port, whose CalDAV/CardDAV is read with the source's login; problem: why it is not. */
+	source_dav?: { server_id: number | null; problem: SourceDavProblem | null } | null;
 	job: Job | null;
 }
+
+export type SourceDavProblem = 'no_server' | 'ambiguous' | 'dav_off' | 'same_mailbox';
 
 export type JobStatus = 'queued' | 'running' | 'paused' | 'stopping' | 'stopped' | 'done' | 'done_with_errors' | 'failed';
 export type JobPhase = 'precheck' | 'mail' | 'calendar' | 'contacts' | 'verify';

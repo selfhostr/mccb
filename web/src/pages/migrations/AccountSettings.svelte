@@ -25,6 +25,7 @@
 	import { fmtBytes } from '../../lib/format.ts';
 	import { currentResult, importPlan, isActive, testPassed } from '../../lib/logic/accounts.ts';
 	import { endpointSummary, hasCustomSource, PST_KIND } from '../../lib/logic/connector.ts';
+	import { sourceGaps } from '../../lib/logic/sourceDav.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
@@ -33,6 +34,7 @@
 	import SettingRow from '../../lib/ui/SettingRow.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import NoDavNotice from './NoDavNotice.svelte';
+	import SourceGapNotice from './SourceGapNotice.svelte';
 	import ConnectionCell, { sourceProbes, sourceTestable, testSource } from './ConnectionCell.svelte';
 
 	const UPLOAD_VALUE = '__upload';
@@ -97,6 +99,8 @@
 	const running = $derived(isActive(job));
 	const plan = $derived(importPlan([account], (accountId) => data.jobs.get(accountId), (fileId) => data.psts.get(fileId), data.davEnabled));
 	const noDavServer = $derived(plan.noDav.length ? data.servers.find((s) => s.id === account.server_id) : undefined);
+	// Calendars or contacts asked for that the source cannot bring (an IMAP source reads the DAV of its saved server).
+	const srcGaps = $derived(sourceGaps([account], (a, k) => a.options[k], (sid) => data.servers.find((s) => s.id === sid)));
 	const sourceReady = $derived(!plan.noPst.length && picked == null);
 	const sourceRefused = $derived(sourceProbe?.state === 'done' && !sourceProbe.ok);
 	const result = $derived(currentResult(account));
@@ -275,6 +279,7 @@
 			{/each}
 		</div>
 		{#if noDavServer}<NoDavNotice server={noDavServer} />{/if}
+		{#if srcGaps.length}<SourceGapNotice groups={srcGaps} />{/if}
 	</section>
 
 	<section class="flex flex-col gap-2" data-testid="step-mirror">
