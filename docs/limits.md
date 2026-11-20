@@ -21,9 +21,10 @@
   - Tasks go where the target can hold them: Exchange to Exchange, CalDAV `VTODO`, in either direction. They follow the calendar option of the mailbox. A PST source does not read them, an IMAP target cannot hold them.
   - Every calendar or address book of a source goes to one DAV collection.
 - **IMAP as a source**:
-  - One pass, not a sync: a flag changed or a message deleted at the source after its copy is not carried over. A rerun lists every
-    folder again and copies what is new. The final resync (`mode: "delta"`) asks only for the messages newer than the previous pass
-    (`changed_since`): new messages only, in the same way.
+  - One pass, not a sync: a message deleted at the source after its copy is not carried over. A rerun lists every folder again and
+    copies what is new. The final resync (`mode: "delta"`) asks only for the messages newer than the previous pass
+    (`changed_since`): new messages only, in the same way. Read, answered and starred flags gained at the source since are added to
+    the copies at every pass to an IMAP target (never removed outside the mirror; keywords are not carried afterwards).
   - Each copied mail gains an `X-PST-Import-Id` header at the top; the rest of the message is unchanged. The target may refuse
     keywords (`$Forwarded`...): the message is then copied with its system flags only.
   - Messages flagged `\Deleted` are not copied, nor are virtual folders (`\All`, `\Flagged`, `\Important`), so nothing is copied
@@ -80,6 +81,7 @@
   - The date filter does not apply to contacts. Items without a date are never left out by it.
   - The bandwidth limit is split equally between the running jobs of a server, recounted every few seconds, and applied when a message is sent: a very large message goes at once and the next ones wait. It counts message bytes, not protocol overhead. Jobs on two server entries pointing at the same real server have a limit each.
   - Allowed hours are checked between two items, at most every 2 seconds, and the clock is that of the worker. A message being sent when the window closes is finished first.
-  - A final resync finds new messages only (IMAP). It does not carry flag changes or deletions, and a PST is a snapshot: it has nothing new to find.
+  - A final resync finds new messages only (IMAP). It adds the read, answered and starred flags gained at the source on an IMAP target, but removes none and carries no deletion, and a PST is a snapshot: it has nothing new to find.
+  - The flags of mails imported from a PST by an earlier version are not recorded: a server that ignored them at `APPEND` cannot be repaired from the PST without importing again.
   - The comparison counts the messages that carry this migration's marker, per target folder. It cannot tell a message moved by the user from a missing one.
   - API tokens do not expire and are not tied to the admin password: revoke them by hand.

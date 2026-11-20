@@ -12,16 +12,17 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import timezone
+from urllib.parse import unquote
 
 from ..connectors import registry, wiring
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
                                CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, MailboxSize,
-                               OutgoingItem, Target,
-                               stamp_import_id)
+                               OutgoingItem, Target, TargetSession, stamp_import_id)
 from . import crash, db, foldermap, mailbox_size, ordering
 from . import mirror as mm
 from . import policy as pol
 from .config import settings
+from .imap import flags_to_add
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
                      StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
 from .tuner import ErrorNote, classify_error
@@ -31,6 +32,32 @@ DAV_EXT = {"calendar": "ics", "contacts": "vcf", TASKS: "ics"}
 # tasks only exist on this route: the historical path, its progress and its reports know three kinds
 CARRIED = {**KIND_OF_PHASE, TASKS: "task"}
 PHASE_OF_KIND = {kind: phase for phase, kind in CARRIED.items()}
+
+
+def _pin_key(account_id: int, pst_key: str, phase: str) -> str:
+    return f"dav-collections:{account_id}:{pst_key}:{phase}"
+
+
+def _ukey(url: str) -> str:
+    return unquote(url if url.endswith("/") else url + "/")
+
+
+def collection_history(account_id: int, pst_key: str, phase: str) -> dict:
+    """For a DAV target's plan (DavSession.history): the collections the items of earlier runs went to, and the
+    one each folder was given by the last run (kept while it is there: a plan never goes back and forth)."""
+    rows = db.q("SELECT DISTINCT target FROM items WHERE account_id=? AND pst_key=? AND kind=? AND status='ok' "
+                "AND target IS NOT NULL AND target<>''", (account_id, pst_key, CARRIED[phase]))
+    pinned = db.jload(db.kv_get(_pin_key(account_id, pst_key, phase)), {}) or {}
+    return {"previous": {_ukey(r["target"]) for r in rows}, "pinned": pinned if isinstance(pinned, dict) else {}}
+
+
+def pin_collections(account_id: int, pst_key: str, phase: str, plan: dict) -> None:
+    """Keeps the existing collection given to each folder (not one still to create: its URL never changes)."""
+    pins = db.jload(db.kv_get(_pin_key(account_id, pst_key, phase)), {}) or {}
+    if not isinstance(pins, dict):
+        pins = {}
+    pins.update({fk: p.name for fk, p in plan.items() if not p.label})
+    db.kv_set(_pin_key(account_id, pst_key, phase), db.jdump(pins))
 
 
 def as_connector_error(e: BaseException) -> ConnectorError:
@@ -140,6 +167,7 @@ class ConnectorJobRunner(JobRunner):
         self._source_keys: set[str] = set()       # folder_key() of every folder the source has (no old keys)
         self._deferred: list = []                 # items waiting for another write of their resource name
         self._deferring = False
+        self._src_flags: dict[str, dict[str, list[str]]] = {}  # folder key -> {item key: flags} of a full listing
         self._sizing: list[int] | None = None    # [bytes, messages] of the mail listing in progress (source size)
         if not self.acc:
             return
@@ -275,6 +303,8 @@ class ConnectorJobRunner(JobRunner):
             else:
                 for phase in phases:
                     self._run_phase(phase)
+            if MAIL in phases:
+                self._repair_flags()
             self.verify_targets(phases)
             if TASKS in phases:
                 self.report[TASKS] = dict(self.progress.get(TASKS) or {})
@@ -314,7 +344,14 @@ class ConnectorJobRunner(JobRunner):
                     self.plans[phase] = self._on_session(
                         session, lambda: foldermap.plan_mapped(session.plan_folders, folders, self.policy.mapper()))
                 else:
+                    dav = hasattr(session, "history")  # DAV: which collections earlier runs wrote to
+                    if dav:
+                        session.history = collection_history(self.account_id, self.pst_key, phase)
                     self.plans[phase] = self._on_session(session, lambda: session.plan_folders(folders))
+                    for note in getattr(session, "notes", None) or []:
+                        self.log(f"Target for {phase}: {note}")
+                    if dav:
+                        pin_collections(self.account_id, self.pst_key, phase, self.plans[phase])
                 quota = self._on_session(session, session.quota)
                 info = session.info()
                 self.report["precheck"][phase] = {"ok": True, "quota": quota, **info}
@@ -369,6 +406,36 @@ class ConnectorJobRunner(JobRunner):
                 self.set_item(r["id"], "pending")
                 r["status"] = "pending"
 
+    def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str], plan_name: str) -> None:
+        """DAV: the items an earlier run copied into another collection than the one the plan now gives their folder
+        (the second "Contacts" an earlier version created) go to this one. Each is first looked up there by its
+        resource name: one already there is left as it is, never written over; the others are copied. The earlier
+        copies are never deleted: the log and the report name that collection, to delete by hand once checked."""
+        target = self.targets.get(PHASE_OF_KIND.get(kind, ""))
+        if self.mode == "errors" or kind == MAIL or not getattr(target, "names_resources", False):
+            return
+        moved = [r for r in rows.values() if r["item_key"] in seen and r["status"] == "ok" and r["target"]
+                 and _ukey(r["target"]) != _ukey(plan_name)]
+        if not moved:
+            return
+        was: dict[str, int] = {}
+        for r in moved:
+            was[r["target"]] = was.get(r["target"], 0) + 1
+            db.ex("UPDATE items SET status='inflight', target=?, target_etag=NULL WHERE id=?", (plan_name, r["id"]))
+            r["status"], r["target"] = "inflight", plan_name
+        names = getattr(target, "listed", None) or {}
+        for old, n in was.items():
+            name = names.get(_ukey(old))
+            w = (f"collection_changed: {n} item(s) of '{fkey}' were copied by an earlier run into "
+                 f"{f'{name!r} ' if name else ''}({old}); this folder now goes to {plan_name}: they are copied there "
+                 f"too (those already there are left as they are). The earlier copies are not deleted: once checked, "
+                 f"that collection can be deleted by hand if nothing else is in it")
+            self.log(w, "warning")
+            self.report["warnings"].append(w)
+            self.report.setdefault("dav_moved", []).append(
+                {"folder": fkey, "from": old, "from_name": name, "to": plan_name, "items": n})
+        self._resolve(session, kind, {r["item_key"]: r for r in moved})
+
     def _list_folder(self, session, f, kind: str, fi: int, plan_name: str) -> list:
         """Entries (sort value, key, folder index, item) of a folder still to migrate."""
         fkey = folder_key(f.path)
@@ -392,6 +459,8 @@ class ConnectorJobRunner(JobRunner):
         if not partial:
             self.totals[kind] += len(listing) - int(f.count or 0)
             f.count = len(listing)
+            if kind == MAIL:  # the flags of the whole folder, for the copies already on the target (_repair_flags)
+                self._src_flags[fkey] = {it.key: it.flags for it in listing if flags_to_add(it.flags, ())}
         if self._sizing is not None:  # size of the mail at the source, from this listing (see _run_phase)
             if partial or any(it.size is None for it in listing):
                 self._sizing = None
@@ -404,6 +473,7 @@ class ConnectorJobRunner(JobRunner):
         for r in rows.values():
             if not partial and r["item_key"] not in seen and r["source_ref"]:
                 orphans.setdefault(r["source_ref"], []).append(r)
+        self._relocate(session, kind, fkey, rows, seen, plan_name)
         entries = []
         filtered: dict[str, list[tuple]] = {}
         for it in listing:
@@ -900,6 +970,76 @@ class ConnectorJobRunner(JobRunner):
                 self.set_item(a.row["id"], "deleted", f"mirror: deleted at the source "
                               f"({session.delete_mode(a.row['target'])})")
                 st["deleted"] += 1
+
+    # ------------------------------------------------------------ flags
+    def _repair_flags(self) -> None:
+        """Every copy of ours on the target is given the read, answered and starred flags its source has and it
+        lacks: what the source has now when this pass read its flags (a full listing, else Source.flags_of), else
+        the flags it was written with. This settles a target that kept none of the flags of APPEND, a copy found on
+        the target instead of being written again, and a mail read or starred at the source since an earlier pass.
+        Nothing is ever removed here (the mirror does that), and only our own copies are touched (exact import id)."""
+        session = self.targets[MAIL].session()
+        if type(session).add_missing_flags is TargetSession.add_missing_flags:
+            return  # this target does not do it (its flags are those written): the source is not read for it
+        try:
+            wanted = self._flags_wanted()
+            totals = {"checked": 0, "fixed": 0, "not_kept": 0}
+            if wanted:
+                self.report["flags"] = totals
+            for name, want in wanted.items():
+                self.check()
+                self.current_folder = f"Flags {name}"
+                try:
+                    checked, fixed, lacking = self._on_session(
+                        session, lambda: session.add_missing_flags(name, self.pst_key, want))
+                except ConnectorError as e:
+                    msg = f"Flags of our mails in '{name}' not checked: {e}"
+                    self.log(msg, "error")
+                    self.problems.append(msg)
+                    continue
+                totals["checked"] += checked
+                totals["fixed"] += fixed
+                totals["not_kept"] += lacking
+                if fixed:
+                    self.log(f"Folder '{name}': flags of the source added to {fixed} of our {checked} mail(s) that "
+                             "lacked them (read, answered, starred)")
+                if lacking:
+                    w = (f"Folder '{name}': the target did not keep the flags set on {lacking} mail(s): their read "
+                         "state may differ from the source")
+                    self.log(w, "warning")
+                    self.report["warnings"].append(w)
+        finally:
+            session.close()
+            self.current_folder = None
+
+    def _flags_wanted(self) -> dict[str, dict[str, list[str]]]:
+        """{target folder: {bare import id: flags its copy must carry}} for the mails of the folders of this pass."""
+        folders = [f for f in self.folders if f.kind == MAIL]
+        current: dict[str, dict[str, list[str]] | None] = {}  # folder key -> flags at the source now, None: unknown
+        for f in folders:
+            fk = folder_key(f.path)
+            got = self._src_flags.get(fk)
+            if got is None and self.mode != "mirror":  # mirror: its analysis has just recorded them (version)
+                self.check()
+                try:
+                    got = self._on_source(lambda: self.source.flags_of(f))
+                except ConnectorError as e:
+                    self.log(f"Flags of '{fk}' unreadable at the source ({e}): those it was written with are used",
+                             "warning")
+            current[fk] = got
+        for f in folders:  # rows of earlier imports may carry the old key; a folder key always wins
+            current.setdefault(legacy_folder_key(f.path), current[folder_key(f.path)])
+        wanted: dict[str, dict[str, list[str]]] = {}
+        for r in db.q("SELECT item_key, folder, target, stamp, version FROM items WHERE account_id=? AND pst_key=? "
+                      "AND kind='mail' AND status='ok' AND target IS NOT NULL", (self.account_id, self.pst_key)):
+            if r["folder"] not in current:
+                continue  # a folder outside this pass
+            now = current[r["folder"]]
+            flags = flags_to_add(now.get(r["item_key"]) if now is not None else mm.split_flags(r["version"]), ())
+            if flags:
+                ident = r["stamp"] or import_id_of(self.pst_key, r["item_key"])
+                wanted.setdefault(r["target"], {})[ident.strip("<>")] = flags
+        return wanted
 
     # ------------------------------------------------------------ checks
     def _check_target(self, session, phase: str, fkeys: list[str], target: str) -> dict:

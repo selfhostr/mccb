@@ -207,6 +207,12 @@ class Source(abc.ABC):
         """Items changed since `cursor`. Default for protocols that cannot tell: a full listing."""
         return Changes(list(self.iter_items(folder)), None, reset=True)
 
+    def flags_of(self, folder: SourceFolder) -> dict[str, list[str]] | None:
+        """{key: flags} of every mail of the folder, cheaper than a listing, for a pass that did not list it all
+        (delta): the flags its copies on the target should have. None: this source cannot tell (no flags, or no
+        cheaper way than a listing). Never alters the source."""
+        return None
+
     def mailbox_size(self, folders: list[SourceFolder], deadline: float) -> MailboxSize | None:
         """Size of the mail folders among `folders` (from folders(), after open()), READ ONLY and without reading any
         body. None: the source cannot tell cheaply, or `deadline` (time.monotonic()) passed. Never a guess shown as
@@ -281,6 +287,13 @@ class TargetSession(abc.ABC):
     def count_ours(self, folder: str, namespace: str, names: set[str] | None = None) -> int:
         """Number of items in the folder written by us (never the pre-existing content): those whose import id
         starts with "<namespace>-", or, for targets working with resource names, those listed in `names`."""
+
+    def add_missing_flags(self, folder: str, namespace: str, wanted: dict[str, list[str]]
+                          ) -> tuple[int, int, int] | None:
+        """Our mails in the folder (import id "<namespace>-...", never another message) given the read, answered,
+        starred and draft flags of `wanted` ({bare import id: flags}) they lack; nothing removed. (checked, fixed,
+        still lacking them after the change). None: this target does not do it (its flags are those written)."""
+        return None
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
         """Content of an item (only with CAP_READBACK)."""

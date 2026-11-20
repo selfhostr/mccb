@@ -325,9 +325,11 @@ class DavClient:
                     _q(NS_DAV, "displayname")) is not None else ""
         return None
 
-    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
+    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None,
+                          create: bool = True) -> str:
         """The collection `url` exists (otherwise it is created, named `display`). A collection the server lists but
-        will not open (MDaemon: "Invalid Path") is never created again over itself: an explicit error instead."""
+        will not open (MDaemon: "Invalid Path") is never created again over itself: an explicit error instead.
+        `create` False: a collection the server listed earlier, never created over itself either."""
         status = self._probe(kind, url)
         if status is None:
             return url
@@ -340,6 +342,11 @@ class DavClient:
             raise DavError(f"the server lists the {what} '{listed or url}' ({url}) but refuses to open it "
                            f"(PROPFIND -> HTTP {status}): check this {what} on the server (it may be damaged), or set "
                            f"the {kind.upper()} URL of a working collection in the server configuration",
+                           status=status if status >= 400 else 409)
+        if not create:
+            what = "calendar" if kind == "caldav" else "address book"
+            raise DavError(f"the {what} '{display or url}' ({url}) was listed by the server but cannot be opened now "
+                           f"(PROPFIND -> HTTP {status}): not created again, check it on the server",
                            status=status if status >= 400 else 409)
         return self._mkcol(kind, _slash(url), component, display)
 
@@ -392,14 +399,22 @@ class DavClient:
 
     def collections_at(self, kind: str, coll: str | None, home: str | None) -> list[tuple[str, str, list[str]]]:
         """As `collections`, from a discovery already made: the collections of `home`, else `coll` alone."""
+        return [(url, label, comps) for url, label, comps, _w in self.listing(kind, coll, home)]
+
+    WRITE_PRIVILEGES = frozenset({"all", "write", "write-content", "bind"})
+
+    def listing(self, kind: str, coll: str | None, home: str | None, privileges: bool = False
+                ) -> list[tuple[str, str, list[str], bool]]:
+        """[(url, display name, accepted components, writable)] of the collections of `home`, else of `coll` alone.
+        `privileges`: DAV:current-user-privilege-set is asked too, and a collection that says it grants no write
+        (a global address list...) is not writable; without that property (or not asked), every one is."""
+        props = [(NS_DAV, "resourcetype"), (NS_DAV, "displayname"), (NS_CAL, "supported-calendar-component-set")]
+        if privileges:
+            props.append((NS_DAV, "current-user-privilege-set"))
         if home is None:
-            starts = [coll] if coll else []
-            rows = [e for s in starts for e in self._propfind(s, [
-                (NS_DAV, "displayname"), (NS_DAV, "resourcetype"),
-                (NS_CAL, "supported-calendar-component-set")], 0)]
+            rows = [e for s in ([coll] if coll else []) for e in self._propfind(s, props, 0)]
         else:
-            rows = self._propfind(home, [(NS_DAV, "resourcetype"), (NS_DAV, "displayname"),
-                                         (NS_CAL, "supported-calendar-component-set")], 1)
+            rows = self._propfind(home, props, 1)
         out = []
         for href, p in rows:
             if home is not None and _slash(href) == home:
@@ -410,8 +425,14 @@ class DavClient:
             label = (name.text or "").strip() if name is not None else ""
             comp = p.get(_q(NS_CAL, "supported-calendar-component-set"))
             comps = [c.get("name", "").upper() for c in comp.findall(_q(NS_CAL, "comp"))] if comp is not None else []
+            privs = p.get(_q(NS_DAV, "current-user-privilege-set"))
+            writable = True
+            if privs is not None:
+                granted = {child.tag.rsplit("}", 1)[-1].lower() for pr in privs.findall(_q(NS_DAV, "privilege"))
+                           for child in pr}
+                writable = bool(granted & self.WRITE_PRIVILEGES)
             url = _slash(href)
-            out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps))
+            out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps, writable))
         return out
 
     # ---- objects -----------------------------------------------------

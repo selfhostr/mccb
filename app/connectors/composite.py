@@ -76,6 +76,10 @@ class ImapDavSource(Source):
             return part.changed_since(folder, cursor)
         return Changes(list(part.iter_items(folder)), None, reset=True)  # DAV: a full listing, no cursor kept
 
+    def flags_of(self, folder: SourceFolder) -> dict[str, list[str]] | None:
+        part = self._part(folder)
+        return part.flags_of(folder) if part is self.mail else None
+
     def read_rules(self) -> list[dict]:
         return self.mail.read_rules()
 
