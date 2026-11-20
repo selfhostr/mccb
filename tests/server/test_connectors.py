@@ -1,6 +1,7 @@
 """Connector interface, catalogue, secrets, migration of an existing database, and the connector route of JobRunner
 against the in-memory connectors (no network service needed)."""
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -388,11 +389,17 @@ def test_pause_then_resume_without_duplicates(client, mem):
     aid, box_, store = memory_account(client, {"INBOX": 30})
     jid = start(client, aid)
     calls = []
+    gate = threading.Lock()
 
     def pause_after_five(item):
-        calls.append(item.import_id)
-        if len(calls) == 5:
-            db.ex("UPDATE jobs SET status='paused' WHERE id=?", (jid,))
+        # Two writer threads call this hook. Without the lock both could append before either counts (nobody sees
+        # exactly 5), and the other writer would keep writing while the pause is still being committed. Under the
+        # lock, a put that starts after the 5th waits until the pause is in the database, so the runner has
+        # something to observe before the next write.
+        with gate:
+            calls.append(item.import_id)
+            if len(calls) == 5:
+                db.ex("UPDATE jobs SET status='paused' WHERE id=?", (jid,))
 
     store.on_put = pause_after_five
     j = run_job(client, jid)
