@@ -621,6 +621,74 @@ class ImapConn:
         m = re.search(r"UIDVALIDITY\s+(\d+)", t, re.I)
         return m.group(1) if m else ""
 
+    # -- mirror mode on the TARGET (app/server/mirror.py): our own messages only, by UID
+    def flags_and_header(self, name: str, uids: list[str], header: str) -> dict[str, tuple[list[str], list[str]]]:
+        """{uid: (flags, [unfolded values of `header`])} in chunks of UID FETCH (BODY.PEEK: nothing marked read)."""
+        if not uids:
+            return {}
+        self.ensure_selected(name, True)
+        from email.parser import BytesHeaderParser
+        out: dict[str, tuple[list[str], list[str]]] = {}
+        for i in range(0, len(uids), 200):
+            chunk = uids[i:i + 200]
+            try:
+                typ, data = self._m().uid("FETCH", ",".join(chunk), f"(UID FLAGS BODY.PEEK[HEADER.FIELDS ({header})])")
+            except Exception as e:
+                raise wrap_exc(e) from e
+            self._check(typ, data, "FETCH")
+            data = list(data or [])
+            for j, d in enumerate(data):
+                if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
+                    continue
+                tail = data[j + 1] if j + 1 < len(data) and isinstance(data[j + 1], bytes) else b""
+                meta = (d[0] or b"") + b" " + tail
+                mu = re.search(rb"UID\s+(\d+)", meta)
+                if not mu:
+                    continue
+                mf = re.search(rb"FLAGS\s+\(([^)]*)\)", meta)
+                flags = mf.group(1).decode("utf-8", "replace").split() if mf else []
+                msg = BytesHeaderParser().parsebytes(d[1])
+                vals = [re.sub(r"\s+", "", str(v)) for v in (msg.get_all(header) or [])]
+                out[mu.group(1).decode()] = (flags, vals)
+        return out
+
+    def uid_store(self, name: str, uids: list[str], op: str, flags: list[str]) -> None:
+        """UID STORE <uids> +FLAGS.SILENT / -FLAGS.SILENT (flags), in a folder selected read-write."""
+        if not uids or not flags:
+            return
+        self.ensure_selected(name, False)
+        try:
+            typ, data = self._m().uid("STORE", ",".join(uids), f"{op}FLAGS.SILENT", "(" + " ".join(flags) + ")")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "STORE")
+
+    def uid_move(self, name: str, uids: list[str], dest: str) -> str | None:
+        """Moves messages (MOVE, else COPY + \\Deleted + UID EXPUNGE of these UIDs only; without UIDPLUS they stay
+        flagged \\Deleted in `name`, never a plain EXPUNGE). Returns the new UID of the last one when told (COPYUID)."""
+        self.ensure_selected(name, False)
+        M = self._m()
+        seq = ",".join(uids)
+        try:
+            if "MOVE" in self.caps:
+                typ, data = M.uid("MOVE", seq, quote(dest))
+                self._check(typ, data, f"MOVE to {dest}")
+            else:
+                typ, data = M.uid("COPY", seq, quote(dest))
+                self._check(typ, data, f"COPY to {dest}")
+                typ, d2 = M.uid("STORE", seq, "+FLAGS.SILENT", "(\\Deleted)")
+                self._check(typ, d2, "STORE")
+                if "UIDPLUS" in self.caps:
+                    typ, d3 = M.uid("EXPUNGE", seq)
+                    self._check(typ, d3, "UID EXPUNGE")
+        except ImapError:
+            raise
+        except Exception as e:
+            raise wrap_exc(e) from e
+        text = _text(data) + " " + _text(M.untagged_responses.pop("COPYUID", []) or [])
+        m = re.search(r"COPYUID\s+\d+\s+\S+\s+(\d+(?:[:,]\d+)*)", text)
+        return re.split(r"[:,]", m.group(1))[-1] if m else None
+
     def uid_copy(self, name: str, uids: list[str], dest: str) -> None:
         self.ensure_selected(name, False)
         try:

@@ -40,6 +40,8 @@ export interface AccountOptions {
 	mail: boolean;
 	calendar: boolean;
 	contacts: boolean;
+	/** Mirror mode: a rerun makes the destination identical to the source (deletions and changes included). Never touches the source. */
+	mirror?: boolean;
 }
 
 export interface Account {
@@ -87,6 +89,10 @@ export interface Job {
 	finished_at: number | null;
 	error: string | null;
 	mode?: string | null;
+	/** Mirror job: the options, the counters by kind and what stopped it (see MirrorReport); null for the others. */
+	mirror?: MirrorReport | null;
+	/** POST /runs: a job of the mailbox that was still active is given back as it is, not created. */
+	existing?: boolean;
 	created_at?: number | null;
 	tuning: { mode: string; builders: number; connections: number; fallback?: boolean } | null;
 }
@@ -304,7 +310,98 @@ export interface InboxListing {
 export interface RunInput {
 	account_ids: number[];
 	name?: string;
-	mode?: 'full' | 'delta';
+	mode?: 'full' | 'delta' | 'mirror';
+	/** Mirror only. true (the default on the server): nothing is written, the answer is a MirrorPlan. */
+	dry_run?: boolean;
+	/** Mirror only: the most the run may delete on a mailbox, in percent of what the destination holds. */
+	max_delete_percent?: number;
+	/** Mirror only: lets a run delete more than the limit above. */
+	allow_large_delete?: boolean;
+	/** Mirror only: the percentage above only applies from this many deletions of a kind (integer from 0; 10 by default on the server). */
+	min_delete_count?: number;
+	/** Mirror only: the keys of the folders (the `folder` of a `source_empty` block) whose empty listing is accepted: their items are deleted. */
+	allow_empty_folders?: string[];
+}
+
+export type MirrorKind = 'mail' | 'calendar' | 'contacts' | 'tasks';
+export type MirrorAction = 'add' | 'update' | 'delete';
+export type MirrorCounts = Partial<Record<MirrorKind, number>>;
+
+export interface MirrorBlock {
+	/** mirror_off, source_unlistable, too_many_deletes, source_empty, no_prior_run, uidvalidity_changed, target_unreachable, job_active, unknown_account. */
+	code: string;
+	message: string;
+	/** job_active: the job still queued or running. */
+	job_id?: number;
+	/** source_empty and too_many_deletes: the kind of item concerned. */
+	kind?: MirrorKind;
+	/** source_empty: the key of the folder, to pass in `allow_empty_folders`. */
+	folder?: string;
+	/** too_many_deletes: the `max_delete_percent` that would let the deletions through. */
+	needed_percent?: number;
+}
+
+/** Not a block: what the mirror run will do that is worth knowing (soft_delete, hard_delete, no_copy_kept, shared_resource, target_modified; a code this version does not know shows its message). */
+export interface MirrorNote {
+	code: string;
+	message: string;
+}
+
+export interface MirrorSample {
+	kind: MirrorKind;
+	action: MirrorAction;
+	folder: string;
+	subject: string;
+	date: string;
+}
+
+/** What a mirror run would do to one mailbox's destination. */
+export interface MirrorAccountPlan {
+	account_id: number;
+	email: string;
+	ready: boolean;
+	to_add: MirrorCounts;
+	to_update: MirrorCounts;
+	to_delete: MirrorCounts;
+	blocked: MirrorBlock[];
+	sample: MirrorSample[];
+	notes?: MirrorNote[];
+}
+
+/** The answer of POST /runs with mode mirror and dry_run true. */
+export interface MirrorPlan {
+	accounts: MirrorAccountPlan[];
+}
+
+/** What a mirror run did to one kind of item. */
+export interface MirrorCounters {
+	added: number;
+	updated: number;
+	deleted: number;
+	skipped_by_safety: number;
+	errors: number;
+}
+
+/** job.report.mirror (and job.mirror): the options, what stopped the run, and the counters keyed by kind. */
+export type MirrorReport = {
+	options?: { max_delete_percent: number; allow_large_delete: boolean };
+	blocked?: MirrorBlock[];
+	notes?: MirrorNote[];
+} & Partial<Record<MirrorKind, MirrorCounters>>;
+
+/** One entry of the answer of POST /runs with mode mirror and dry_run false. */
+export interface MirrorStart {
+	account_id: number;
+	email: string | null;
+	ready: boolean;
+	blocked: MirrorBlock[];
+	job_id?: number;
+}
+
+/** The answer of POST /runs with mode mirror and dry_run false: a job per mailbox that may run, the others stay blocked. */
+export interface MirrorRun {
+	accounts: MirrorStart[];
+	jobs: Job[];
 }
 
 export type PlanStatus = 'queued' | 'running' | 'done' | 'failed';

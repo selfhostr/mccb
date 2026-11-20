@@ -10,7 +10,7 @@
 	import Button from '../../lib/ui/Button.svelte';
 	import IconButton from '../../lib/ui/IconButton.svelte';
 
-	let { id, onclose, settings }: { id: number; onclose: () => void; settings: Snippet<[number]> } = $props();
+	let { id, onclose, settings }: { id: number; onclose: () => void; settings: Snippet<[number, boolean?]> } = $props();
 
 	let heading = $state<HTMLElement>();
 	const email = $derived(prefs.email(data.accounts.get(id)?.email));

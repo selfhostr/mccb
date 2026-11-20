@@ -357,6 +357,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # Only for a source_connections table created before the column (SCHEMA has it).
     _add_column(conn, "source_connections", "provisioned TEXT")
     _add_column(conn, "items", "source_ref TEXT")
+    # mirror mode (docs/planning.md "Mirror"): accounts.opt_mirror opts the account in; items.version is the version of
+    # the item at the source when it was last written (mail: its flags, others: etag or equivalent); items.stamp is the
+    # import id the item carries on the target when it differs from its key's (a mail the mirror moved); jobs.mirror
+    # holds the options and the counters of a mirror job (JSON)
+    _add_column(conn, "accounts", "opt_mirror INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "items", "version TEXT")
+    _add_column(conn, "items", "stamp TEXT")
+    _add_column(conn, "items", "src_ref TEXT")  # JSON of SourceItem.ref when written: for Source.exists() (mirror)
+    # version (DAV etag) of the item on the target as mccb last wrote it: changed there since, the mirror leaves it
+    _add_column(conn, "items", "target_etag TEXT")
+    _add_column(conn, "jobs", "mirror TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
     _migrate_tuning(conn)

@@ -156,7 +156,10 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
 - Planning (see [Plan, filter and control a migration](planning.md)):
   `POST /api/runs/plan {account_ids}` → **202** `{id,status:'queued'|'running'|'done'|'failed',account_ids,error,result}`; `GET /api/plans/{id}` (full result:
   `{accounts:[{account_id,email,status:'ok'|'warning'|'error',source,targets,kinds,folders,quota,target_limit,warnings,notes}],totals,done,total}`), `GET /api/plans`.
-  Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'` and `priority`.
+  Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'|'mirror'` and `priority`.
+  `mode:'mirror'` also takes `dry_run` (default true: `{accounts:[{account_id,email,ready,to_add,to_update,to_delete,blocked,sample}]}`,
+  nothing written), `max_delete_percent` (20) and `allow_large_delete` (false); with `dry_run:false` → `{accounts,jobs}`. The account
+  option `options.mirror` (GET/PUT `/api/accounts/{id}`) enables it. See [Mirror](planning.md#mirror).
   `GET/PUT /api/servers/{id}/policy` and `GET/PUT /api/accounts/{id}/policy`: `{policy}` (account: also `effective`); body
   `{folder_map:[{source,target}],exclude_folders:[...],date_from,date_to,max_size_mb}` plus, for a server, `window:{days?,start,end,tz}` and `rate_mb_s`;
   `null` or `{}` clears; **422** with the reason when invalid.

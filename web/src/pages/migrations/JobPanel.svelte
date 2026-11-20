@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Ban from '@lucide/svelte/icons/ban';
+	import GitCompareArrows from '@lucide/svelte/icons/git-compare-arrows';
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Pause from '@lucide/svelte/icons/pause';
 	import Play from '@lucide/svelte/icons/play';
@@ -12,6 +13,7 @@
 	import type { Job, JobPhase } from '../../lib/api/types.ts';
 	import { fmtBytes, fmtDuration, fmtNum, pct } from '../../lib/format.ts';
 	import { isActive } from '../../lib/logic/accounts.ts';
+	import { canMirrorResync } from '../../lib/logic/mirror.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { router } from '../../lib/router.svelte.ts';
 	import { jobLookOf } from '../../lib/status.ts';
@@ -32,7 +34,7 @@
 	import JobLog from './JobLog.svelte';
 	import JobReport from './JobReport.svelte';
 
-	let { id, onclose, settings }: { id: number; onclose: () => void; settings: Snippet<[number]> } = $props();
+	let { id, onclose, settings, onmirror }: { id: number; onclose: () => void; settings: Snippet<[number, boolean?]>; onmirror: (accountId: number) => void } = $props();
 
 	let fetched = $state.raw<Job | null>(null);
 	let loadError = $state<string | null>(null);
@@ -149,6 +151,9 @@
 				{#if job.status === 'done' || job.status === 'done_with_errors'}
 					<Button variant={job.status === 'done' ? 'primary' : 'secondary'} icon={RefreshCw} loading={busy === 'delta'} onclick={() => act('delta', m.jobs_action_delta_done())} data-testid="job-delta">{m.jobs_action_delta()}</Button>
 				{/if}
+				{#if account && !isActive(job) && canMirrorResync(job)}
+					<Button icon={GitCompareArrows} onclick={() => onmirror(account.id)} data-testid="job-mirror">{m.migrations_mirror_resync()}</Button>
+				{/if}
 				{#if !isActive(job)}
 					<Button variant={job.status === 'done' ? 'secondary' : 'primary'} icon={RotateCw} loading={busy === 'retry'} onclick={() => act('retry', m.jobs_action_retry_done())}>{m.jobs_action_retry()}</Button>
 				{/if}
@@ -208,7 +213,7 @@
 
 			{#if account}
 				<Disclosure title={m.migrations_row_settings()} bind:open={settingsOpen} data-testid="account-settings">
-					{@render settings(account.id)}
+					{@render settings(account.id, true)}
 				</Disclosure>
 			{/if}
 

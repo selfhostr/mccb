@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -80,10 +81,32 @@ class JmapServer:
         self.books = {"ab-1": {"id": "ab-1", "name": "Personal", "sortOrder": 0}}
         self.cards: dict[str, dict] = {}
         self.state = 1
-        self.log: list[tuple[int, str, str]] = []  # (state after, "created", id)
+        self.log: list[tuple[int, str, str]] = []  # (state after, "created" | "updated" | "destroyed", id)
         self.no_header_filter = self.cannot_calculate = self.over_quota = False
         self.other_host = False
         self.seq = 0
+        self.calls: list[str] = []        # every JMAP method called, in order ("Email/set", ...)
+        self.set_args: list[dict] = []    # arguments of every Email/set and ContactCard/set
+        self.query_hook = None            # called as hook(server, n) after each Email/query (n counts from 1): changes under paging
+        self.queries = 0
+
+    def add_trash(self) -> str:
+        self.mailboxes["mb-trash"] = {"id": "mb-trash", "name": "Trash", "parentId": None, "role": "trash"}
+        return "mb-trash"
+
+    def add_junk(self) -> str:
+        self.mailboxes["mb-junk"] = {"id": "mb-junk", "name": "Junk", "parentId": None, "role": "junk"}
+        return "mb-junk"
+
+    def destroy_email(self, eid: str) -> None:
+        del self.emails[eid]
+        self.state += 1
+        self.log.append((self.state, "destroyed", eid))
+
+    def destroy_card(self, cid: str) -> None:
+        del self.cards[cid]
+        self.state += 1
+        self.log.append((self.state, "destroyed", cid))
 
     def close(self):
         self.http.close()
@@ -156,6 +179,7 @@ class JmapServer:
             if broken:
                 out.append(["error", {"type": "invalidResultReference"}, cid])
                 continue
+            self.calls.append(name)
             fn = getattr(self, "m_" + name.replace("/", "_"), None)
             if fn is None:
                 out.append(["error", {"type": "unknownMethod"}, cid])
@@ -203,7 +227,11 @@ class JmapServer:
         ids.sort(key=lambda e: e["receivedAt"], reverse=True)
         pos, lim = int(a.get("position") or 0), int(a.get("limit") or 1000)
         page = [e["id"] for e in ids[pos:pos + lim]]
-        return {"queryState": "q", "canCalculateChanges": False, "position": pos, "ids": page, "total": len(ids)}
+        res = {"queryState": f"q{self.state}", "canCalculateChanges": False, "position": pos, "ids": page, "total": len(ids)}
+        self.queries += 1
+        if self.query_hook:
+            self.query_hook(self, self.queries)    # a change AFTER this page was read: the next one sees another state
+        return res
 
     def m_Email_get(self, a):
         if a.get("ids") is not None and len(a["ids"]) > 3:
@@ -230,9 +258,49 @@ class JmapServer:
         if self.cannot_calculate:
             raise JmapError("cannotCalculateChanges")
         since = int(a["sinceState"][1:])
-        ids = [i for st, _k, i in self.log if st > since and i in self.emails]
-        return {"oldState": a["sinceState"], "newState": f"s{self.state}", "hasMoreChanges": False, "created": ids,
-                "updated": [], "destroyed": []}
+        created = [i for st, k, i in self.log if st > since and k == "created" and i in self.emails]
+        updated = [i for st, k, i in self.log if st > since and k == "updated" and i in self.emails and i not in created]
+        destroyed = [i for st, k, i in self.log if st > since and k == "destroyed" and i not in self.emails]
+        return {"oldState": a["sinceState"], "newState": f"s{self.state}", "hasMoreChanges": False, "created": created,
+                "updated": updated, "destroyed": destroyed}
+
+    def m_Email_set(self, a):
+        """update (patches: "keywords/$x", "mailboxIds/<id>") and destroy, with ifInState. No create (Email/import does)."""
+        self.set_args.append(a)
+        if a.get("ifInState") is not None and a["ifInState"] != f"s{self.state}":
+            raise JmapError("stateMismatch")
+        old, updated, notu, destroyed, notd = f"s{self.state}", {}, {}, [], {}
+        for eid, patch in (a.get("update") or {}).items():
+            e = self.emails.get(eid)
+            if e is None:
+                notu[eid] = {"type": "notFound"}
+                continue
+            bad = [k for k in patch if k.split("/")[0] not in ("keywords", "mailboxIds")]
+            new_boxes = {k.split("/")[1] for k, v in patch.items() if k.startswith("mailboxIds/") and v}
+            if bad or any(b not in self.mailboxes for b in new_boxes):
+                notu[eid] = {"type": "invalidProperties", "properties": bad or ["mailboxIds"]}
+                continue
+            for k, v in patch.items():
+                prop, _, sub = k.partition("/")
+                if v is None or v is False:
+                    e[prop].pop(sub, None)
+                else:
+                    e[prop][sub] = True
+            if not e["mailboxIds"]:
+                e["mailboxIds"] = {}
+                notu[eid] = {"type": "invalidProperties", "properties": ["mailboxIds"]}
+                continue
+            self.state += 1
+            self.log.append((self.state, "updated", eid))
+            updated[eid] = None
+        for eid in a.get("destroy") or []:
+            if eid not in self.emails:
+                notd[eid] = {"type": "notFound"}
+                continue
+            self.destroy_email(eid)
+            destroyed.append(eid)
+        return {"oldState": old, "newState": f"s{self.state}", "updated": updated or None, "notUpdated": notu or None,
+                "destroyed": destroyed or None, "notDestroyed": notd or None}
 
     def m_Email_import(self, a):
         created, notc = {}, {}
@@ -265,6 +333,8 @@ class JmapServer:
         self.cards[cid] = {"id": cid, "addressBookIds": {b: True for b in books}, "uid": card.get("uid") or str(uuid.uuid4()),
                            **{k: v for k, v in card.items() if k != "uid"}}
         self.state += 1
+        self.cards[cid]["updated"] = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=self.state)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
         self.log.append((self.state, "created", cid))
         return cid
 
@@ -273,31 +343,62 @@ class JmapServer:
         ids = [c["id"] for c in self.cards.values()
                if f.get("inAddressBook") in (None, *c["addressBookIds"]) and f.get("uid") in (None, c["uid"])]
         pos, lim = int(a.get("position") or 0), int(a.get("limit") or 1000)
-        return {"queryState": "q", "position": pos, "ids": ids[pos:pos + lim], "total": len(ids)}
+        return {"queryState": f"q{self.state}", "position": pos, "ids": ids[pos:pos + lim], "total": len(ids)}
 
     def m_ContactCard_get(self, a):
         if a.get("ids") == []:
             return {"state": f"s{self.state}", "list": [], "notFound": []}
-        out = []
+        out, nf = [], []
         for i in a.get("ids") or []:
-            c = self.cards[i]
+            c = self.cards.get(i)
+            if c is None:
+                nf.append(i)
+                continue
             out.append({k: v for k, v in c.items() if not a.get("properties") or k in a["properties"]})
-        return {"state": f"s{self.state}", "list": out, "notFound": []}
+        return {"state": f"s{self.state}", "list": out, "notFound": nf}
 
     def m_ContactCard_changes(self, a):
         since = int(a["sinceState"][1:])
-        ids = [i for st, _k, i in self.log if st > since and i in self.cards]
-        return {"oldState": a["sinceState"], "newState": f"s{self.state}", "hasMoreChanges": False, "created": ids,
-                "updated": [], "destroyed": []}
+        created = [i for st, k, i in self.log if st > since and k == "created" and i in self.cards]
+        updated = [i for st, k, i in self.log if st > since and k == "updated" and i in self.cards and i not in created]
+        destroyed = [i for st, k, i in self.log if st > since and k == "destroyed" and i not in self.cards]
+        return {"oldState": a["sinceState"], "newState": f"s{self.state}", "hasMoreChanges": False, "created": created,
+                "updated": updated, "destroyed": destroyed}
 
     def m_ContactCard_set(self, a):
+        self.set_args.append(a)
+        if a.get("ifInState") is not None and a["ifInState"] != f"s{self.state}":
+            raise JmapError("stateMismatch")
         created, notc = {}, {}
         for cid, card in (a.get("create") or {}).items():
             if any(c["uid"] == card.get("uid") for c in self.cards.values()):
                 notc[cid] = {"type": "invalidProperties", "properties": ["uid"]}
                 continue
             created[cid] = {"id": self.add_card(card, list(card["addressBookIds"]))}
-        return {"oldState": "s", "newState": f"s{self.state}", "created": created or None, "notCreated": notc or None}
+        updated, notu, destroyed, notd = {}, {}, [], {}
+        for cid, patch in (a.get("update") or {}).items():
+            c = self.cards.get(cid)
+            if c is None:
+                notu[cid] = {"type": "notFound"}
+                continue
+            for k, v in patch.items():
+                if v is None:
+                    c.pop(k, None)
+                else:
+                    c[k] = v
+            self.state += 1
+            c["updated"] = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=self.state)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.log.append((self.state, "updated", cid))
+            updated[cid] = None
+        for cid in a.get("destroy") or []:
+            if cid not in self.cards:
+                notd[cid] = {"type": "notFound"}
+                continue
+            self.destroy_card(cid)
+            destroyed.append(cid)
+        return {"oldState": "s", "newState": f"s{self.state}", "created": created or None, "notCreated": notc or None,
+                "updated": updated or None, "notUpdated": notu or None, "destroyed": destroyed or None,
+                "notDestroyed": notd or None}
 
 
 class JmapError(Exception):

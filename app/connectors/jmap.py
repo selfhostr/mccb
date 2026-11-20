@@ -16,9 +16,11 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from . import registry
-from .base import (CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK,
-                   CONTACTS, IMPORT_HEADER, MAIL, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem,
-                   Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
+from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
+                   CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, CAP_UPDATE, CONTACTS, DELETE_HARD,
+                   DELETE_SOFT, DELETE_TRASH, IMPORT_HEADER, MAIL, MIRROR_DELETED_FLAG, Changes, ConnectorError,
+                   FetchedItem, FolderPlan, Listing, OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target,
+                   TargetSession, subject_of)
 from .convert import jscontact_to_vcard, vcard_to_jscontact
 
 CORE = "urn:ietf:params:jmap:core"
@@ -36,6 +38,9 @@ KEYWORD_OUT = {"$seen": "\\Seen", "$flagged": "\\Flagged", "$answered": "\\Answe
 KEYWORD_IN = {"\\seen": "$seen", "\\flagged": "$flagged", "\\answered": "$answered", "\\draft": "$draft"}
 KEYWORD_RE = re.compile(r"^[a-z0-9$_.+-]{1,255}$")
 BOOK_PREFIX = "@book:"     # target folder names of address books, apart from the mailbox paths
+MIRROR_TRIES = 3           # complete listings tried before the mirror is told "not sure" (a mailbox changing under it)
+MIRROR_KEYWORD = MIRROR_DELETED_FLAG.lower()  # "$mccbmirrordeleted": JMAP keywords are lower case
+PROTECTED_CARD_PROPS = frozenset({"id", "uid", "addressBookIds", "@type", "version", "created", "updated", "prodId"})
 UPLOAD_SLOTS = 4           # uploads at once per target, whatever the pool size (servers advertise maxConcurrentUpload)
 
 
@@ -421,12 +426,13 @@ class JmapSource(Source):
     def _card_item(self, rec: dict) -> SourceItem:
         uid = rec.get("uid") or ""
         return SourceItem(key=key_of("c", rec["id"]), alt_key=("u:" + _digest(uid)) if uid else None,
-                          date=parse_utc(rec.get("updated")), ref=rec)
+                          date=parse_utc(rec.get("updated")), ref=rec, version=rec.get("updated") or None)
 
     # -- incremental
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
         """Mail and cards created or updated since the state in `cursor` (Email/changes, ContactCard/changes).
-        Destroyed objects are not reported. A state the server cannot calculate from gives a full listing."""
+        Destroyed objects are reported in `removed` (keys), informative only: the mirror deletes on a complete
+        mirror_listing() and exists(). A state the server cannot calculate from gives a full listing."""
         self._need_folders()
         kind, ident = folder.ref
         tn, account, using = (("Email", self.mail_account, [CORE, CAP_MAIL]) if kind == "mail"
@@ -438,11 +444,13 @@ class JmapSource(Source):
             state = None
         if state:
             ids: list[str] = []
+            destroyed: list[str] = []
             try:
                 while True:
                     ch = c.api([(f"{tn}/changes", {"accountId": account, "sinceState": state, "maxChanges": 500}, "c")],
                                using)["c"][1]
                     ids += list(ch.get("created") or []) + list(ch.get("updated") or [])
+                    destroyed += list(ch.get("destroyed") or [])
                     state = ch.get("newState") or state
                     if not ch.get("hasMoreChanges"):
                         break
@@ -462,10 +470,109 @@ class JmapSource(Source):
                                 items.append(self._mail_item(rec))
                         elif self._card_owner(rec) == ident:
                             items.append(self._card_item(rec))
-                return Changes(items, json.dumps({"state": state}), reset=False)
+                prefix = "e" if tn == "Email" else "c"
+                return Changes(items, json.dumps({"state": state}), reset=False,
+                               removed=[key_of(prefix, i) for i in destroyed])
         # first listing, or a state the server forgot: read the state first, so that nothing falls between the two
         st = c.api([(f"{tn}/get", {"accountId": account, "ids": []}, "s")], using)["s"][1].get("state")
         return Changes(list(self.iter_items(folder)), json.dumps({"state": st}) if st else None, reset=True)
+
+    # -- mirror (read only: only /query, /get and /changes are ever sent)
+    def _kind_of(self, folder: SourceFolder) -> tuple[str, str, list[str], str]:
+        kind, ident = folder.ref
+        if kind == "mail":
+            return "Email", self.mail_account, [CORE, CAP_MAIL], ident
+        return "ContactCard", self.contacts_account, [CORE, CAP_CONTACTS], ident
+
+    def _scan(self, folder: SourceFolder) -> tuple[list[dict], str | None]:
+        """One pass over a folder: (records, why it cannot be trusted or None). The pages are read by position, so a
+        mail destroyed or received between two pages shifts the next one and would show as "gone": every page carries
+        the queryState and total of the query, and the pass is refused when they are not the same on all of them,
+        when the number of ids is not the total, when an id came twice, or when /get lost an object the query listed."""
+        tn, account, using, ident = self._kind_of(folder)
+        c = self._c()
+        flt = {"inMailbox": ident} if tn == "Email" else {"inAddressBook": ident}
+        page, position = c.page_size(), 0
+        recs: list[dict] = []
+        ids_seen: list[str] = []
+        states: list[Any] = []
+        totals: list[Any] = []
+        lost = 0
+        while True:
+            q = {"accountId": account, "filter": flt, "position": position, "limit": page, "calculateTotal": True}
+            if tn == "Email":
+                q["sort"] = [{"property": "receivedAt", "isAscending": False}]
+            g = {"accountId": account, "#ids": {"resultOf": "q", "name": f"{tn}/query", "path": "/ids"}}
+            if tn == "Email":
+                g["properties"] = EMAIL_PROPS
+            got = c.api([(f"{tn}/query", q, "q"), (f"{tn}/get", g, "g")], using)
+            qr = got["q"][1]
+            ids = qr.get("ids") or []
+            lst = got["g"][1].get("list") or []
+            states.append(qr.get("queryState"))
+            totals.append(qr.get("total"))
+            lost += max(0, len(ids) - len(lst))
+            recs += lst
+            ids_seen += ids
+            position += len(ids)
+            total = qr.get("total")
+            if not ids or (total is not None and position >= total) or (total is None and len(ids) < page):
+                break
+        if any(s is None for s in states):
+            return recs, "the server gave no queryState: cannot tell that the listing is consistent"
+        if len(set(states)) > 1:
+            return recs, "the folder changed while it was being listed (queryState differs between the first and the last page)"
+        if None in totals or len(set(totals)) > 1:
+            return recs, "the server gave no stable total for the listing"
+        if len(ids_seen) != totals[-1] or len(set(ids_seen)) != len(ids_seen):
+            return recs, f"{len(ids_seen)} ids listed for a total of {totals[-1]}"
+        if lost:
+            return recs, f"{lost} objects listed by the query could not be read"
+        return recs, None
+
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """Complete listing of a mailbox or address book. The pass is repeated (up to MIRROR_TRIES) while the server
+        reports a change under it; after that the listing is returned as `complete=False` and nothing is deleted.
+        Mail versions are None on purpose: a JMAP message never changes (its flags are in `flags`, a move is a new
+        mailboxIds), so there is nothing to rewrite. A card has `updated`."""
+        self._need_folders()
+        kind, ident = folder.ref
+        problem: str | None = None
+        items: list[SourceItem] = []
+        for _ in range(MIRROR_TRIES):
+            recs, problem = self._scan(folder)
+            items = ([self._mail_item(r) for r in recs if self._mine(folder, r)] if kind == "mail"
+                     else [self._card_item(r) for r in recs if self._card_owner(r) == ident])
+            if problem is None:
+                return Listing(items, True)
+        return Listing(items, False, problem=problem)
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """Direct read by id of items the listing no longer has: {key: False} only when the server itself answers
+        `notFound` for the id. Anything else (found, moved to another mailbox, key that cannot be turned back into
+        an id) is True: the caller deletes nothing for it. Errors are raised."""
+        self._need_folders()
+        kind, _ident = folder.ref
+        tn, account, using, _i = self._kind_of(folder)
+        prefix = "e" if kind == "mail" else "c"
+        out: dict[str, bool] = {}
+        ids: dict[str, str] = {}
+        for k in keys:
+            ident = k[len(prefix):] if k.startswith(prefix) else ""
+            if not ident or re.fullmatch(r"h[0-9a-f]{20}", ident):   # hashed key: the id cannot be read back
+                out[k] = True
+            else:
+                ids[ident] = k
+        c, page = self._c(), self._c().page_size()
+        todo = list(ids)
+        for i in range(0, len(todo), page):
+            chunk = todo[i:i + page]
+            r = c.api([(f"{tn}/get", {"accountId": account, "ids": chunk, "properties": ["id"]}, "g")], using)["g"][1]
+            found = {x.get("id") for x in r.get("list") or []}
+            missing = set(r.get("notFound") or [])
+            for ident in chunk:
+                out[ids[ident]] = not (ident in missing and ident not in found)
+        return out
 
     # -- content
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
@@ -491,6 +598,7 @@ class JmapSession(TargetSession):
         self.mail_account = self.contacts_account = None
         self._boxes: dict[str, dict] = {}
         self._books: dict[str, str] = {}
+        self._ours_cards: dict[str, str] = {}   # card id -> uid, for the cards this session wrote or inventoried
 
     @property
     def connected(self) -> bool:
@@ -687,6 +795,7 @@ class JmapSession(TargetSession):
                        [CORE, CAP_CONTACTS])["s"][1]
         made = (r.get("created") or {}).get("k")
         if made:
+            self._ours_cards[made["id"]] = card["uid"]
             return made["id"]
         err = (r.get("notCreated") or {}).get("k") or {}
         t = err.get("type")
@@ -705,20 +814,21 @@ class JmapSession(TargetSession):
                        [CORE, CAP_CONTACTS])["q"][1]
         return list(r.get("ids") or [])
 
-    def _header_hits(self, box: str, needle: str) -> Iterator[tuple[str, list[str]]]:
-        """(email id, values of our header) for the mails of a mailbox whose header contains `needle`."""
+    def _header_recs(self, box: str, needle: str, extra: tuple[str, ...] = ()) -> Iterator[tuple[dict, list[str]]]:
+        """(record, values of our header) for the mails of a mailbox whose header contains `needle`."""
         acc, c = self._mail(), self._c()
         prop = f"header:{IMPORT_HEADER}:asText:all"
+        props = ["id", prop, *extra]
         page, position = c.page_size(), 0
         try:
             while True:
                 got = c.api([("Email/query", {"accountId": acc, "filter": {"inMailbox": box, "header": [IMPORT_HEADER, needle]},
                                               "position": position, "limit": page}, "q"),
                              ("Email/get", {"accountId": acc, "#ids": {"resultOf": "q", "name": "Email/query", "path": "/ids"},
-                                            "properties": ["id", prop]}, "g")], [CORE, CAP_MAIL])
+                                            "properties": props}, "g")], [CORE, CAP_MAIL])
                 ids = got["q"][1].get("ids") or []
                 for rec in got["g"][1].get("list") or []:
-                    yield rec["id"], [str(v).strip() for v in rec.get(prop) or []]
+                    yield rec, [str(v).strip() for v in rec.get(prop) or []]
                 position += len(ids)
                 if len(ids) < page:
                     return
@@ -731,10 +841,28 @@ class JmapSession(TargetSession):
             got = c.api([("Email/query", {"accountId": acc, "filter": {"inMailbox": box}, "position": position,
                                           "limit": page}, "q"),
                          ("Email/get", {"accountId": acc, "#ids": {"resultOf": "q", "name": "Email/query", "path": "/ids"},
-                                        "properties": ["id", prop]}, "g")], [CORE, CAP_MAIL])
+                                        "properties": props}, "g")], [CORE, CAP_MAIL])
             ids = got["q"][1].get("ids") or []
             for rec in got["g"][1].get("list") or []:
-                yield rec["id"], [str(v).strip() for v in rec.get(prop) or []]
+                yield rec, [str(v).strip() for v in rec.get(prop) or []]
+            position += len(ids)
+            if len(ids) < page:
+                return
+
+    def _header_hits(self, box: str, needle: str) -> Iterator[tuple[str, list[str]]]:
+        for rec, vals in self._header_recs(box, needle):
+            yield rec["id"], vals
+
+    def _book_cards(self, book: str, props: list[str]) -> Iterator[dict]:
+        c, page, position = self._c(), self._c().page_size(), 0
+        while True:
+            got = c.api([("ContactCard/query", {"accountId": self.contacts_account, "filter": {"inAddressBook": book},
+                                                "position": position, "limit": page}, "q"),
+                         ("ContactCard/get", {"accountId": self.contacts_account,
+                                              "#ids": {"resultOf": "q", "name": "ContactCard/query", "path": "/ids"},
+                                              "properties": props}, "g")], [CORE, CAP_CONTACTS])
+            ids = got["q"][1].get("ids") or []
+            yield from got["g"][1].get("list") or []
             position += len(ids)
             if len(ids) < page:
                 return
@@ -753,19 +881,7 @@ class JmapSession(TargetSession):
             book = self._book(folder[len(BOOK_PREFIX):])
             if not book:
                 return 0
-            n, c, page, position = 0, self._c(), self._c().page_size(), 0
-            while True:
-                got = c.api([("ContactCard/query", {"accountId": self.contacts_account,
-                                                    "filter": {"inAddressBook": book}, "position": position,
-                                                    "limit": page}, "q"),
-                             ("ContactCard/get", {"accountId": self.contacts_account,
-                                                  "#ids": {"resultOf": "q", "name": "ContactCard/query", "path": "/ids"},
-                                                  "properties": ["id", "uid"]}, "g")], [CORE, CAP_CONTACTS])
-                ids = got["q"][1].get("ids") or []
-                n += sum(1 for rec in got["g"][1].get("list") or [] if rec.get("uid") in uids)
-                position += len(ids)
-                if len(ids) < page:
-                    return n
+            return sum(1 for rec in self._book_cards(book, ["id", "uid"]) if rec.get("uid") in uids)
         box = self._find_box([p for p in folder.split("/") if p], refresh=True)
         if box is None:
             return 0
@@ -773,11 +889,222 @@ class JmapSession(TargetSession):
         return sum(1 for _i, vals in self._header_hits(box, start) if any(v.startswith(start) for v in vals))
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
+        if folder.startswith(BOOK_PREFIX):
+            r = self._call([("ContactCard/get", {"accountId": self.contacts_account, "ids": [remote_id]}, "g")],
+                           [CORE, CAP_CONTACTS])["g"][1]
+            lst = r.get("list") or []
+            res = jscontact_to_vcard(lst[0]) if lst else None
+            return res[0].encode("utf-8") if res else None
         acc, c = self._mail(), self._c()
         r = self._call([("Email/get", {"accountId": acc, "ids": [remote_id], "properties": ["id", "blobId"]}, "g")],
                        [CORE, CAP_MAIL])["g"][1]
         lst = r.get("list") or []
         return c.download(lst[0]["blobId"], "message/rfc822", "message.eml") if lst else None
+
+    # -- mirror: every method acts on ONE item mccb wrote, re-checked at the moment of the call
+    def _role_of(self, box: str) -> str | None:
+        return (self._boxes.get(box) or {}).get("role")
+
+    def _trash_box(self) -> str | None:
+        """The mailbox of role trash, None when the account has none (then nothing is moved, mails are only marked)."""
+        if not self._boxes:
+            self._load_boxes()
+        return next((i for i, b in self._boxes.items() if b.get("role") == "trash"), None)
+
+    def _folder_box(self, folder: str) -> str | None:
+        return self._find_box([p for p in folder.split("/") if p], refresh=True)
+
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """OUR items of the folder: mails whose X-PST-Import-Id starts with "<namespace>-" ({import id: copies}), cards
+        whose uid is the one derived from a name of `names` ({name: copies}). Mails the mirror already deleted
+        (MIRROR_DELETED_FLAG) are not listed any more."""
+        out: dict[str, list[RemoteItem]] = {}
+        if folder.startswith(BOOK_PREFIX):
+            book = self._book(folder[len(BOOK_PREFIX):])
+            uids = {"urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, "mccb:" + n)): n for n in names or ()}
+            if not book or not uids:
+                return out
+            for rec in self._book_cards(book, ["id", "uid", "updated"]):
+                n = uids.get(rec.get("uid"))
+                if n is not None:
+                    self._ours_cards[rec["id"]] = rec["uid"]
+                    out.setdefault(n, []).append(RemoteItem(ref=rec["id"], version=rec.get("updated") or None))
+            return out
+        box = self._folder_box(folder)
+        if box is None:
+            return out
+        start = f"<{namespace}-"
+        for rec, vals in self._header_recs(box, start, ("keywords",)):
+            kw = {k.lower() for k, v in (rec.get("keywords") or {}).items() if v}
+            if MIRROR_KEYWORD in kw:
+                continue
+            for v in vals:
+                if v.startswith(start):
+                    out.setdefault(v, []).append(RemoteItem(ref=rec["id"], flags=flags_of(rec.get("keywords"))))
+        return out
+
+    def delete_mode(self, folder: str) -> str:
+        """Cards have no trash in JMAP (DELETE_HARD: the runner keeps a copy first, read() gives it). A mail goes to the
+        mailbox of role trash; in the trash or junk mailbox itself, or without a trash mailbox, it is only marked.
+        A mail is never destroyed."""
+        if folder.startswith(BOOK_PREFIX):
+            return DELETE_HARD
+        box = self._folder_box(folder)
+        if box is not None and self._role_of(box) in ("trash", "junk"):
+            return DELETE_SOFT
+        return DELETE_TRASH if self._trash_box() else DELETE_SOFT
+
+    def _our_mail(self, folder: str, ref: str, expected: str | None = None) -> tuple[str, dict, str | None] | None:
+        """(mailbox id, record, Email state) when `ref` is a mail written by mccb (it carries our header) and still sits
+        in `folder`; None when it is gone, or was moved elsewhere by someone (then it is left alone)."""
+        box = self._folder_box(folder)
+        if box is None:
+            return None
+        prop = f"header:{IMPORT_HEADER}:asText:all"
+        r = self._call([("Email/get", {"accountId": self._mail(), "ids": [ref],
+                                       "properties": ["id", "mailboxIds", "keywords", prop]}, "g")], [CORE, CAP_MAIL])["g"][1]
+        lst = r.get("list") or []
+        if not lst:
+            return None
+        rec = lst[0]
+        if not (rec.get("mailboxIds") or {}).get(box):
+            return None
+        vals = [str(v).strip() for v in rec.get(prop) or [] if str(v).strip()]
+        if not vals:
+            raise ConnectorError(f"mail {ref} does not carry {IMPORT_HEADER}: not written by this tool, left alone",
+                                 ConnectorError.REJECTED)
+        if expected and expected not in vals:
+            raise ConnectorError(f"mail {ref} carries {vals}, not {expected}: left alone", ConnectorError.REJECTED)
+        return box, rec, r.get("state")
+
+    def _set_mail(self, folder: str, ref: str, patch_of, expected: str | None = None) -> bool:
+        """Email/set update with ifInState: the check of `_our_mail` and the write see the same state, otherwise they are
+        redone (up to 3 times). False when the mail is gone or not in the folder any more."""
+        acc = self._mail()
+        for _ in range(3):
+            found = self._our_mail(folder, ref, expected)
+            if found is None:
+                return False
+            box, rec, state = found
+            patch = patch_of(box, rec)
+            args: dict[str, Any] = {"accountId": acc, "update": {ref: patch}}
+            if state:
+                args["ifInState"] = state
+            try:
+                r = self._call([("Email/set", args, "s")], [CORE, CAP_MAIL])["s"][1]
+            except MethodError as e:
+                if e.jmap_type == "stateMismatch":
+                    continue
+                raise
+            err = (r.get("notUpdated") or {}).get(ref)
+            if err:
+                t = err.get("type")
+                if t == "notFound":
+                    return False
+                if t == "overQuota":
+                    raise ConnectorError("over quota", ConnectorError.QUOTA)
+                if t in ("serverFail", "serverUnavailable", "rateLimit", "stateMismatch"):
+                    raise ConnectorError(f"update: {t}", ConnectorError.TRANSIENT)
+                raise ConnectorError(f"update refused: {t} {err.get('description') or ''}".strip(), ConnectorError.REJECTED)
+            return True
+        raise ConnectorError("the mailbox keeps changing: update not applied, will be retried", ConnectorError.TRANSIENT)
+
+    def _our_card(self, folder: str, ref: str, uid: str | None = None) -> tuple[dict, str | None] | None:
+        """(card, state) when `ref` is a card we know we wrote (inventory() or put() of this session, or a uid derived
+        from the item given to update()) and it is still in the address book; None when it is gone or elsewhere."""
+        book = self._book(folder[len(BOOK_PREFIX):])
+        r = self._call([("ContactCard/get", {"accountId": self.contacts_account, "ids": [ref]}, "g")],
+                       [CORE, CAP_CONTACTS])["g"][1]
+        lst = r.get("list") or []
+        if not lst or not book or not (lst[0].get("addressBookIds") or {}).get(book):
+            return None
+        want = uid or self._ours_cards.get(ref)
+        if not want:
+            raise ConnectorError(f"card {ref} was not listed by inventory() in this session: not touched",
+                                 ConnectorError.REJECTED)
+        if lst[0].get("uid") != want:
+            raise ConnectorError(f"card {ref} has another uid than the one mccb wrote: not touched", ConnectorError.REJECTED)
+        return lst[0], r.get("state")
+
+    def _set_card(self, ref: str, state: str | None, **change) -> bool:
+        args: dict[str, Any] = {"accountId": self.contacts_account, **change}
+        if state:
+            args["ifInState"] = state
+        try:
+            r = self._call([("ContactCard/set", args, "s")], [CORE, CAP_CONTACTS])["s"][1]
+        except MethodError as e:
+            if e.jmap_type == "stateMismatch":
+                raise ConnectorError("the address book changed meanwhile: will be retried", ConnectorError.TRANSIENT) from e
+            raise
+        err = ((r.get("notUpdated") or {}).get(ref)) or ((r.get("notDestroyed") or {}).get(ref))
+        if err:
+            if err.get("type") == "notFound":
+                return False
+            kind = ConnectorError.TRANSIENT if err.get("type") in ("serverFail", "rateLimit") else ConnectorError.REJECTED
+            raise ConnectorError(f"contact refused: {err.get('type')} {err.get('description') or ''}".strip(), kind)
+        return True
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        """`expected_import_id`: the import id of the mail, or the resource name of the card, it must still carry."""
+        mode = self.delete_mode(folder)
+        if folder.startswith(BOOK_PREFIX):
+            uid = ("urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, "mccb:" + expected_import_id))
+                   if expected_import_id else None)
+            found = self._our_card(folder, ref, uid)
+            if found is not None:
+                self._set_card(ref, found[1], destroy=[ref])
+            return mode
+        trash = self._trash_box() if mode == DELETE_TRASH else None
+
+        def patch(box, _rec):
+            p: dict[str, Any] = {f"keywords/{MIRROR_KEYWORD}": True}
+            if trash and trash != box:
+                p[f"mailboxIds/{box}"] = None
+                p[f"mailboxIds/{trash}"] = True
+            return p
+        self._set_mail(folder, ref, patch, expected_import_id)
+        return mode
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        up, down = keywords_of(add), keywords_of(remove)
+
+        def patch(_box, _rec):
+            p: dict[str, Any] = {f"keywords/{k}": None for k in down if k not in up}
+            p.update({f"keywords/{k}": True for k in up})
+            return p
+        if up or down:
+            self._set_mail(folder, ref, patch)
+
+    def move(self, folder: str, ref: str, to_folder: str) -> str | None:
+        dest = self._folder_box(to_folder)
+        if dest is None:
+            raise ConnectorError(f"mailbox '{to_folder}' does not exist", ConnectorError.FOLDER_MISSING)
+
+        def patch(box, _rec):
+            return {} if box == dest else {f"mailboxIds/{box}": None, f"mailboxIds/{dest}": True}
+        self._set_mail(folder, ref, patch)
+        return ref
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        """Rewrites one of our cards in place (ContactCard/set update: the properties the new card no longer has are
+        set to null). A mail is immutable: the mirror deletes and imports it again instead."""
+        if item.kind != CONTACTS or not folder.startswith(BOOK_PREFIX):
+            raise ConnectorError("a mail cannot be updated in place", ConnectorError.CONFIG)
+        uid = self._card_uid(item)
+        found = self._our_card(folder, ref, uid)
+        if found is None:
+            return None
+        old, state = found
+        try:
+            new, _w = vcard_to_jscontact(item.raw.decode("utf-8", "replace"))
+        except ValueError as e:
+            raise ConnectorError(str(e), ConnectorError.REJECTED) from e
+        patch = {k: v for k, v in new.items() if k not in PROTECTED_CARD_PROPS and old.get(k) != v}
+        patch.update({k: None for k in old if k not in PROTECTED_CARD_PROPS and k not in new})
+        if patch:
+            self._set_card(ref, state, update={ref: patch})
+        self._ours_cards[ref] = uid
+        return ref
 
     def quota(self) -> dict | None:
         """RFC 9425 Quota/get, octets, account scope. None when the server has no quota capability."""
@@ -801,7 +1128,8 @@ class JmapSession(TargetSession):
 
 
 class JmapTarget(Target):
-    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK})
+    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK,
+                              CAP_INVENTORY, CAP_DELETE, CAP_UPDATE, CAP_SET_FLAGS, CAP_MOVE})
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
@@ -826,7 +1154,7 @@ _CONNECTION = (
 
 registry.register(registry.ConnectorSpec(
     kind="jmap", label="JMAP", description="Mail and contacts of a JMAP server (RFC 8620, 8621, 9610). Calendars: use CalDAV.",
-    source=registry.Role(JmapSource, (MAIL, CONTACTS), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+    source=registry.Role(JmapSource, (MAIL, CONTACTS), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_MIRROR}),
                          _CONNECTION, identity),
     target=registry.Role(JmapTarget, (MAIL, CONTACTS), JmapTarget.capabilities,
                          _CONNECTION + (registry.Field("root_folder", "Root folder",

@@ -52,13 +52,14 @@ UNCONVERTED = "item cannot be converted"
 
 
 UPSERT_ITEM = (
-    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at,version,src_ref) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
     "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
     "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
     "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
     "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
-    "job_id=excluded.job_id, updated_at=excluded.updated_at "
+    "job_id=excluded.job_id, updated_at=excluded.updated_at, version=COALESCE(excluded.version, items.version), "
+    "src_ref=COALESCE(excluded.src_ref, items.src_ref) "
     "RETURNING id")
 # an item left out by a filter: never overwrites a row that is already migrated
 UPSERT_FILTERED = (
@@ -182,6 +183,7 @@ class AppendResult:
     msg: str = ""
     uid: str | None = None
     size: int = 0
+    version: str | None = None  # TargetSession.written_version() of the write (items.target_etag)
 
 
 class AppendPool:
@@ -558,6 +560,7 @@ class JobRunner:
         self._window = self.policy.window
         self._limiter = pol.Limiter(self.srv["id"], self.policy.rate, self.log) if self.policy.rate and self.srv else None
         self.filtered_folders: dict[str, int] = {}  # excluded folder -> items it holds
+        self.problems: list[str] = []  # not about one item (mirror: deletions held back): the job ends with errors
 
     # ------------------------------------------------------------ utilities
     def log(self, msg: str, level: str = "info") -> None:
@@ -791,7 +794,7 @@ class JobRunner:
     def _upsert_params(self, kind: str, key: str, fkey: str, status: str, **kw) -> tuple:
         return (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, kw.get("target"), kw.get("error"),
                 kw.get("warnings"), kw.get("subject"), kw.get("hash"), kw.get("size"), kw.get("source_ref"), self.job_id,
-                time.time())
+                time.time(), kw.get("version"), kw.get("src_ref"))
 
     def upsert_item(self, kind: str, key: str, fkey: str, status: str, **kw) -> int:
         return db.ex(UPSERT_ITEM, self._upsert_params(kind, key, fkey, status, **kw)).fetchone()[0]
@@ -887,13 +890,15 @@ class JobRunner:
             self.log(err, "error")
         n_verify = len(self.report["verify"].get("problems") or [])
         n_folders = len(self.folder_errors)  # a folder not created on the target, even with nothing in it
-        status = "done_with_errors" if (n_err or verify_ko or n_unfinished or n_folders) else "done"
+        status = "done_with_errors" if (n_err or verify_ko or n_unfinished or n_folders or self.problems) else "done"
         detail = [f"{n_err} item error(s)"] + ([f"{n_folders} folder error(s)"] if n_folders else []) \
             + ([f"{n_verify} verification problem(s)"] if n_verify else []) \
             + ([f"{n_unfinished} unfinished"] if n_unfinished else [])
         total = n_err + n_folders + n_verify + n_unfinished
         if n_folders and not err:
             err = "; ".join(f"{k}: {v}" for k, v in self.folder_errors.items())[:2000]
+        if self.problems and not err:
+            err = "; ".join(self.problems)[:2000]
         self.log(f"Finished: {status} ({total} error(s)" + (f": {', '.join(detail)})" if total else ")"),
                  "warning" if status != "done" else "info")
         self._finish(status, err)
@@ -1335,6 +1340,14 @@ class JobRunner:
                 self._bytes_done += r.size or size
                 self._ok_items += 1
                 self._ok_buf.append(("ok", r.item_id))
+                if r.version:
+                    v = r.version
+                    if v.startswith("!") and db.q1(
+                            "SELECT 1 FROM items o JOIN items i ON i.id=? WHERE o.account_id=i.account_id AND "
+                            "o.kind=i.kind AND o.target=i.target AND o.hash=i.hash AND o.id<>i.id AND "
+                            "o.status IN ('ok','deleted') LIMIT 1", (r.item_id,)):
+                        v = v[1:]  # written over a resource of a row of this mailbox (another namespace): ours
+                    db.ex("UPDATE items SET target_etag=? WHERE id=?", (v, r.item_id))
             elif r.kind == "cancel":
                 self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():
@@ -1995,6 +2008,9 @@ class JobRunner:
                           "errors": c.get("error", 0), "warnings": nwarn, "skipped": c.get("skipped", 0),
                           "filtered": c.get(pol.FILTERED, 0),
                           "pending": c.get("pending", 0) + c.get("inflight", 0)}
+            mirror = (self.report.get("mirror") or {}).get(pk)
+            if mirror is not None:
+                totals[pk]["mirror"] = mirror
         errors = [dict(r) for r in db.q(
             "SELECT kind, folder, item_key, subject, error FROM items WHERE account_id=? AND pst_key=? AND status='error' "
             "ORDER BY id LIMIT 5000", (self.account_id, self.pst_key))] if self.pst_key else []

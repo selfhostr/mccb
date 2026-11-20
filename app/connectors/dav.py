@@ -7,10 +7,11 @@ import re
 import unicodedata
 from typing import Iterator
 
-from ..server.dav import DavClient, DavError
+from ..server.dav import DavClient, DavError, DavIncomplete
 from . import registry
-from .base import (CALENDAR, CAP_FOLDERS, CAP_READBACK, CONTACTS, TASKS, ConnectorError, FetchedItem, FolderPlan,
-                   OutgoingItem, Source, SourceFolder, SourceItem, Target, TargetSession)
+from .base import (CALENDAR, CAP_DELETE, CAP_FOLDERS, CAP_INVENTORY, CAP_MIRROR, CAP_READBACK, CAP_UPDATE, CONTACTS,
+                   DELETE_HARD, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem, RemoteItem, Source,
+                   SourceFolder, SourceItem, Target, TargetSession)
 from .imap import folder_hash
 
 
@@ -31,6 +32,9 @@ class DavSession(TargetSession):
         self.config = config
         self.password = secrets.get("password") or ""
         self.client: DavClient | None = None
+        self._etags: dict[tuple[str, str], str] = {}  # (collection, name) -> etag seen by the last inventory()
+        self._written: dict[tuple[str, str], str] = {}  # (collection, name) -> etag of what this session wrote
+        self.keep_versions = False  # the mirror: an etag the PUT does not give back is read
 
     @property
     def connected(self) -> bool:
@@ -118,13 +122,53 @@ class DavSession(TargetSession):
             raise convert(e) from e
 
     def put(self, folder: str, item: OutgoingItem) -> str | None:
+        """Writes the resource, over one already there as mccb always did (a migration is idempotent: its items
+        rows may be gone, its namespace new, while the resources it wrote are still on the target). The first PUT
+        says If-None-Match: *, so that a write over an existing resource is known: it then goes with If-Match on
+        the etag just read, and is marked "!" in written_version(): its owner is not proven, and the mirror never
+        deletes nor updates it on that ground."""
+        name = item.name or ""
+        text = item.raw.decode("utf-8", "replace")
+        c = self._c()
+        mark = ""
         try:
-            self._c().put(folder, item.name or "", item.raw.decode("utf-8", "replace"), self.dav_kind)
-            return item.name
+            c.put(folder, name, text, self.dav_kind, if_none_match=True)
         except DavError as e:
             if e.status in (404, 409):  # collection gone since the discovery: recreated then retried by the runner
                 raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
-            raise convert(e) from e
+            if e.status != 412:
+                raise convert(e) from e
+            mine = self._written.get((folder, name))
+            mark = "" if mine and not mine.startswith("!") else "!"  # written by this very session: still ours
+            try:
+                old = c.etag_of(folder, name)
+                c.put(folder, name, text, self.dav_kind, if_match=old or None)
+            except DavError as e2:
+                if e2.status in (404, 409):
+                    raise ConnectorError(str(e2), ConnectorError.FOLDER_MISSING) from e2
+                raise convert(e2) from e2
+        self._remember(folder, name, mark)
+        return item.name
+
+    def _remember(self, folder: str, name: str, mark: str = "") -> None:
+        """Keeps the etag of a write. Without one in the answer, it is read (PROPFIND) only for the mirror
+        (keep_versions): a normal migration does not pay a request more per item."""
+        c = self._c()
+        et = getattr(c, "last_etag", "") or ""
+        if not et and self.keep_versions:
+            try:
+                et = c.etag_of(folder, name)
+            except DavError:
+                et = ""
+        if et or mark:
+            self._written[(folder, name)] = mark + et
+        else:
+            self._written.pop((folder, name), None)
+
+    def written_version(self, folder: str, ref: str) -> str | None:
+        """The etag of what this session last wrote to `ref`, "!" first when it was written over a resource that
+        was already there (None: unknown)."""
+        return self._written.get((folder, ref))
 
     def find(self, folder: str, item: OutgoingItem) -> list[str]:
         if not item.name:
@@ -146,6 +190,52 @@ class DavSession(TargetSession):
         except DavError as e:
             raise convert(e) from e
         return text.encode("utf-8") if text is not None else None
+
+    # ---- mirror: only the resources named in `names` (ours), with If-Match on what the inventory saw
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        try:
+            found = self._c().names_etags(folder, strict=True)  # cut short: an error, not a smaller collection
+        except DavError as e:
+            if e.status == 404:
+                return {}
+            raise convert(e) from e
+        out = {}
+        wanted = {n.casefold(): n for n in names or ()}  # some servers do not keep the case of a name
+        for name, et in found.items():
+            asked = wanted.get(name.casefold())
+            if asked is not None:
+                self._etags[(folder, name)] = et
+                out[asked] = [RemoteItem(name, version=et or None)]
+        return out
+
+    def delete_mode(self, folder: str) -> str:
+        return DELETE_HARD  # no trash in DAV: the runner keeps a copy (read()) before deleting
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        if expected_import_id is not None and expected_import_id.casefold() != ref.casefold():
+            raise ConnectorError(f"{ref} is not {expected_import_id}: not deleted", ConnectorError.REJECTED)
+        try:
+            sc = self._c().delete_item(folder, ref, self._etags.get((folder, ref)))
+        except DavError as e:
+            raise convert(e) from e
+        if sc == 412:
+            raise ConnectorError(f"{ref} changed on the target since it was listed: not deleted",
+                                 ConnectorError.REJECTED)
+        self._etags.pop((folder, ref), None)
+        return DELETE_HARD
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        """PUT over our resource, with If-Match on the etag the inventory saw: changed on the target since (412),
+        it is not overwritten (a temporary error: the next pass sees it again)."""
+        etag = self._etags.get((folder, ref))
+        try:
+            self._c().put(folder, ref, item.raw.decode("utf-8", "replace"), self.dav_kind, if_match=etag or None)
+        except DavError as e:
+            if e.status in (404, 409):
+                raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
+            raise convert(e) from e
+        self._remember(folder, ref)  # the etag of the inventory stays: a second write without one gets 412
+        return ref
 
 
 def collection_slug(dav_kind: str, component: str, label: str) -> str:
@@ -173,7 +263,9 @@ def uid_name(raw: bytes, ext: str) -> str | None:
 
 
 class DavTarget(Target):
-    capabilities = frozenset({CAP_READBACK})
+    capabilities = frozenset({CAP_READBACK, CAP_INVENTORY, CAP_DELETE, CAP_UPDATE})
+    names_resources = True  # an item IS its resource name: two items of one name are one resource
+    keep_versions = False   # set by a mirror job: every write's etag is read when the PUT does not give it
     dav_kind = "caldav"
     component = "VEVENT"
 
@@ -187,7 +279,9 @@ class DavTarget(Target):
         self.labels: dict[str, str] = {}
 
     def session(self) -> DavSession:
-        return DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
+        session = DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels)
+        session.keep_versions = self.keep_versions
+        return session
 
     def for_item(self, item: str) -> "DavTarget":
         """The target to use for this item kind (wiring.py): tasks need a calendar that accepts VTODO."""
@@ -254,14 +348,45 @@ class DavSource(Source):
                 seen.add(kind)
         return out
 
+    def _key(self, folder: SourceFolder, name: str) -> str:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - identifier, not security
+        return f"{folder_hash(folder.path)}-{digest}"
+
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
+        """Every resource with its etag (`version`: the mirror updates an item whose etag changed)."""
         try:
-            names = sorted(self._c().names(folder.ref))
+            found = self._c().names_etags(folder.ref)
         except DavError as e:
             raise convert(e) from e
-        for name in names:
-            digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:32]  # noqa: S324 - identifier, not security
-            yield SourceItem(key=f"{folder_hash(folder.path)}-{digest}", ref=name)
+        for name in sorted(found):
+            yield SourceItem(key=self._key(folder, name), ref=name, version=found[name] or None)
+
+    # ---- mirror: PROPFIND and GET only
+    def _listed(self, folder: SourceFolder, found: dict[str, str]) -> list[SourceItem]:
+        return [SourceItem(key=self._key(folder, n), ref=n, version=found[n] or None) for n in sorted(found)]
+
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """The PROPFIND of the collection; complete unless the server says in it that it cut it short (507)."""
+        try:
+            found = self._c().names_etags(folder.ref, strict=True)
+        except DavIncomplete as e:
+            return Listing(self._listed(folder, e.partial or {}), complete=False, problem=str(e))
+        except DavError as e:
+            raise convert(e) from e
+        return Listing(self._listed(folder, found))
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """GET of each resource whose name was recorded. A key without a recorded name cannot be read by itself
+        (the key is a digest of the name) and another listing would only repeat the one that missed it: answered
+        present (kept), as EWS and Graph do."""
+        out = {k: True for k in keys}
+        named = {k: r for k, r in (refs or {}).items() if isinstance(r, str) and k in out}
+        try:
+            for k, name in named.items():
+                out[k] = self._c().get(folder.ref, name) is not None
+        except DavError as e:
+            raise convert(e) from e
+        return out
 
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         try:
@@ -302,9 +427,9 @@ _FIELDS = (
 
 registry.register(registry.ConnectorSpec(
     kind="caldav", label="CalDAV", description="Calendars and tasks on a CalDAV server.",
-    source=registry.Role(CalDavSource, (CALENDAR, TASKS), frozenset({CAP_FOLDERS}), _FIELDS, identity),
+    source=registry.Role(CalDavSource, (CALENDAR, TASKS), frozenset({CAP_FOLDERS, CAP_MIRROR}), _FIELDS, identity),
     target=registry.Role(CalDavTarget, (CALENDAR, TASKS), CalDavTarget.capabilities, _FIELDS, identity)))
 registry.register(registry.ConnectorSpec(
     kind="carddav", label="CardDAV", description="Address books on a CardDAV server.",
-    source=registry.Role(CardDavSource, (CONTACTS,), frozenset({CAP_FOLDERS}), _FIELDS, identity),
+    source=registry.Role(CardDavSource, (CONTACTS,), frozenset({CAP_FOLDERS, CAP_MIRROR}), _FIELDS, identity),
     target=registry.Role(CardDavTarget, (CONTACTS,), CardDavTarget.capabilities, _FIELDS, identity)))

@@ -565,7 +565,7 @@ def test_import_links_pst_and_source_and_export_never_has_a_password(client):
     out = r.json()
     assert out["created"] == 2 and out["errors"] == [] and "nope.pst" in out["warnings"][0]["msg"]
     jane = [a for a in client.get("/api/accounts").json() if a["email"] == "jane@example.test"][0]
-    assert jane["pst_id"] == 1 and jane["options"] == {"mail": True, "calendar": False, "contacts": True}
+    assert jane["pst_id"] == 1 and jane["options"] == {"mail": True, "calendar": False, "contacts": True, "mirror": False}
     assert jane["source"]["kind"] == "imap" and jane["source"]["has_secret"] is True
     assert jane["source"]["config"]["host"] == "src.example"
     exported = client.get(f"/api/accounts/export-csv?server_id={sid}").content.decode("utf-8-sig")
