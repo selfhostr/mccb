@@ -12,6 +12,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import timezone
+from urllib.parse import unquote
 
 from ..connectors import registry, wiring
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
@@ -31,6 +32,32 @@ DAV_EXT = {"calendar": "ics", "contacts": "vcf", TASKS: "ics"}
 # tasks only exist on this route: the historical path, its progress and its reports know three kinds
 CARRIED = {**KIND_OF_PHASE, TASKS: "task"}
 PHASE_OF_KIND = {kind: phase for phase, kind in CARRIED.items()}
+
+
+def _pin_key(account_id: int, pst_key: str, phase: str) -> str:
+    return f"dav-collections:{account_id}:{pst_key}:{phase}"
+
+
+def _ukey(url: str) -> str:
+    return unquote(url if url.endswith("/") else url + "/")
+
+
+def collection_history(account_id: int, pst_key: str, phase: str) -> dict:
+    """For a DAV target's plan (DavSession.history): the collections the items of earlier runs went to, and the
+    one each folder was given by the last run (kept while it is there: a plan never goes back and forth)."""
+    rows = db.q("SELECT DISTINCT target FROM items WHERE account_id=? AND pst_key=? AND kind=? AND status='ok' "
+                "AND target IS NOT NULL AND target<>''", (account_id, pst_key, CARRIED[phase]))
+    pinned = db.jload(db.kv_get(_pin_key(account_id, pst_key, phase)), {}) or {}
+    return {"previous": {_ukey(r["target"]) for r in rows}, "pinned": pinned if isinstance(pinned, dict) else {}}
+
+
+def pin_collections(account_id: int, pst_key: str, phase: str, plan: dict) -> None:
+    """Keeps the existing collection given to each folder (not one still to create: its URL never changes)."""
+    pins = db.jload(db.kv_get(_pin_key(account_id, pst_key, phase)), {}) or {}
+    if not isinstance(pins, dict):
+        pins = {}
+    pins.update({fk: p.name for fk, p in plan.items() if not p.label})
+    db.kv_set(_pin_key(account_id, pst_key, phase), db.jdump(pins))
 
 
 def as_connector_error(e: BaseException) -> ConnectorError:
@@ -316,7 +343,14 @@ class ConnectorJobRunner(JobRunner):
                     self.plans[phase] = self._on_session(
                         session, lambda: foldermap.plan_mapped(session.plan_folders, folders, self.policy.mapper()))
                 else:
+                    dav = hasattr(session, "history")  # DAV: which collections earlier runs wrote to
+                    if dav:
+                        session.history = collection_history(self.account_id, self.pst_key, phase)
                     self.plans[phase] = self._on_session(session, lambda: session.plan_folders(folders))
+                    for note in getattr(session, "notes", None) or []:
+                        self.log(f"Target for {phase}: {note}")
+                    if dav:
+                        pin_collections(self.account_id, self.pst_key, phase, self.plans[phase])
                 quota = self._on_session(session, session.quota)
                 info = session.info()
                 self.report["precheck"][phase] = {"ok": True, "quota": quota, **info}
@@ -371,6 +405,36 @@ class ConnectorJobRunner(JobRunner):
                 self.set_item(r["id"], "pending")
                 r["status"] = "pending"
 
+    def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str], plan_name: str) -> None:
+        """DAV: the items an earlier run copied into another collection than the one the plan now gives their folder
+        (the second "Contacts" an earlier version created) go to this one. Each is first looked up there by its
+        resource name: one already there is left as it is, never written over; the others are copied. The earlier
+        copies are never deleted: the log and the report name that collection, to delete by hand once checked."""
+        target = self.targets.get(PHASE_OF_KIND.get(kind, ""))
+        if self.mode == "errors" or kind == MAIL or not getattr(target, "names_resources", False):
+            return
+        moved = [r for r in rows.values() if r["item_key"] in seen and r["status"] == "ok" and r["target"]
+                 and _ukey(r["target"]) != _ukey(plan_name)]
+        if not moved:
+            return
+        was: dict[str, int] = {}
+        for r in moved:
+            was[r["target"]] = was.get(r["target"], 0) + 1
+            db.ex("UPDATE items SET status='inflight', target=?, target_etag=NULL WHERE id=?", (plan_name, r["id"]))
+            r["status"], r["target"] = "inflight", plan_name
+        names = getattr(target, "listed", None) or {}
+        for old, n in was.items():
+            name = names.get(_ukey(old))
+            w = (f"collection_changed: {n} item(s) of '{fkey}' were copied by an earlier run into "
+                 f"{f'{name!r} ' if name else ''}({old}); this folder now goes to {plan_name}: they are copied there "
+                 f"too (those already there are left as they are). The earlier copies are not deleted: once checked, "
+                 f"that collection can be deleted by hand if nothing else is in it")
+            self.log(w, "warning")
+            self.report["warnings"].append(w)
+            self.report.setdefault("dav_moved", []).append(
+                {"folder": fkey, "from": old, "from_name": name, "to": plan_name, "items": n})
+        self._resolve(session, kind, {r["item_key"]: r for r in moved})
+
     def _list_folder(self, session, f, kind: str, fi: int, plan_name: str) -> list:
         """Entries (sort value, key, folder index, item) of a folder still to migrate."""
         fkey = folder_key(f.path)
@@ -402,6 +466,7 @@ class ConnectorJobRunner(JobRunner):
         for r in rows.values():
             if not partial and r["item_key"] not in seen and r["source_ref"]:
                 orphans.setdefault(r["source_ref"], []).append(r)
+        self._relocate(session, kind, fkey, rows, seen, plan_name)
         entries = []
         filtered: dict[str, list[tuple]] = {}
         for it in listing:

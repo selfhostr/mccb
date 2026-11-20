@@ -182,6 +182,9 @@ def plan_account(account_id: int) -> dict:
                 if phase == "mail":
                     plan = foldermap.plan_mapped(session.plan_folders, srcs, policy.mapper())
                 else:
+                    if hasattr(session, "history") and key:  # DAV: the plan the run will make
+                        from .connector_runner import collection_history
+                        session.history = collection_history(account_id, key, phase)
                     plan = session.plan_folders(srcs)
                 for f, e in mine:
                     fp = plan.get(folder_key(f.path))

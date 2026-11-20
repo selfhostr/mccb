@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from . import builders, crash, db, foldermap, ordering, repo, tuner
 from . import policy as pol
@@ -1217,7 +1218,7 @@ class JobRunner:
                     continue
                 try:
                     with DavClient(params.login, params.password, bool(self.srv["verify_tls"])) as dav:
-                        url = dav.discover(kind, self.srv[tmpl] or None, self.acc["email"], self.srv["imap_host"])
+                        url = self._dav_default(dav, kind, self.srv[tmpl] or None, phase)
                 except DavError as e:
                     raise JobFailed(f"{kind.upper()}: {e}")
                 self.dav_targets[phase] = url
@@ -1815,6 +1816,16 @@ class JobRunner:
         return entry
 
     # ------------------------------------------------------------ DAV
+    def _dav_default(self, dav: DavClient, dav_kind: str, template: str | None, phase: str) -> str:
+        """The collection of this phase: the one earlier runs of this PST used, else the default one of the account
+        (connectors.dav.default_collection: by its name, never a list such as "Allowed Senders" the server lists
+        first)."""
+        from ..connectors.dav import default_collection
+        rows = db.q("SELECT DISTINCT target FROM items WHERE account_id=? AND pst_key=? AND kind=? AND status='ok' "
+                    "AND target IS NOT NULL AND target<>''", (self.account_id, self.pst_key, KIND_OF_PHASE[phase]))
+        previous = {unquote(r["target"] if r["target"].endswith("/") else r["target"] + "/") for r in rows}
+        return default_collection(dav, dav_kind, template, self.acc["email"], self.srv["imap_host"], previous)
+
     def phase_dav(self, phase: str) -> None:
         """Calendar (start desc) / contacts (last modification desc): all the folders of the phase, newest
         first (see ordering.py); builds and PUTs in this process."""
@@ -1829,7 +1840,7 @@ class JobRunner:
             if not url:
                 dk = "caldav" if phase == "calendar" else "carddav"
                 tmpl = self.srv["caldav_url" if phase == "calendar" else "carddav_url"] or None
-                url = dav.discover(dk, tmpl, self.acc["email"], self.srv["imap_host"])
+                url = self._dav_default(dav, dk, tmpl, phase)
                 self.dav_targets[phase] = url
             builder = self.pst.build_event if phase == "calendar" else self.pst.build_contact
             todo = [f for f in folders if self._folder_has_work(kind, f)]

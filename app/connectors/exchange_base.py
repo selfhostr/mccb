@@ -20,10 +20,12 @@ SPECIAL_WELL_KNOWN = {"inbox": "inbox", "sent": "sentitems", "drafts": "drafts",
 DEFAULT = "default"
 # names of the default folder of a kind, in the source's language: its content goes to the default folder of the target
 DEFAULT_NAMES = {
-    CALENDAR: {"calendar", "calendrier", "kalender", "calendario", "agenda", "calendário", "default"},
+    CALENDAR: {"calendar", "calendrier", "kalender", "calendario", "agenda", "calendário", "default",
+               "my calendar", "mon calendrier", "mein kalender", "personal calendar"},
     CONTACTS: {"contacts", "contact", "kontakte", "contactos", "contatti", "contactpersonen", "address book",
-               "default", "personal"},
-    TASKS: {"tasks", "tâches", "aufgaben", "tareas", "attività", "taken", "tarefas"},
+               "default", "personal", "my contacts", "mes contacts", "meine kontakte", "carnet d'adresses",
+               "adressbuch", "rubrica", "personal address book"},
+    TASKS: {"tasks", "tâches", "aufgaben", "tareas", "attività", "taken", "tarefas", "to do", "to-do", "todo"},
 }
 FLAG_FLAGGED = 2
 VERB_REPLY, VERB_REPLY_ALL, VERB_FORWARD = 102, 103, 104
