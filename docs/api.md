@@ -19,7 +19,13 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
   `POST /api/accounts/import-csv` (multipart file + server_id; columns `email;password[;login]`, `,` or `;`, optional header)
   → `{created,updated,errors:[{line,msg}]}` ; `GET /api/accounts/csv-template`.
   Account = `{id,server_id,email,login,has_password,status:'new'|'ok'|'auth_failed'|'error',last_test,`
-  `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},job:{...}|null}`
+  `pst_id|null,source:{kind,config,has_secret},target:{kind|null,config,has_secret},options:{mail:bool,calendar:bool,contacts:bool},`
+  `source_size:{bytes|null,count|null,at|null,approx,basis:'quota'|'file'|null,computing,measurable,imported},job:{...}|null}`.
+  `source_size` is the mail at the current source (null: unknown, never 0): measured in the background when the source is
+  set (IMAP: `STATUS SIZE`, else the sum of `RFC822.SIZE`; read only), refreshed by each job's listing when the source gives
+  item sizes, an estimate (`approx`) from the quota or the uploaded file otherwise. `imported` = bytes of mail written to the
+  target for this source; a job carries the live value in `bytes_ok`. `POST /api/accounts/{id}/size` measures again
+  (422 when the source can only be measured by a job).
 - Repair (see [Repair a damaged mailbox](repair.md)), a list separate from the accounts:
   `GET/POST /api/repair/boxes {server_id,email,password,login?}`, `PUT/DELETE /api/repair/boxes/{id}` (409 while a repair or duplicates run is active),
   `POST /api/repair/boxes/{id}/test` → `{imap:{ok,msg,quota,uidplus}}`, `POST /api/repair/boxes/import-csv` (multipart file + server_id)
@@ -156,7 +162,10 @@ JSON over HTTP, `/api` prefix, session cookie or `Authorization: Bearer <API tok
 - Planning (see [Plan, filter and control a migration](planning.md)):
   `POST /api/runs/plan {account_ids}` → **202** `{id,status:'queued'|'running'|'done'|'failed',account_ids,error,result}`; `GET /api/plans/{id}` (full result:
   `{accounts:[{account_id,email,status:'ok'|'warning'|'error',source,targets,kinds,folders,quota,target_limit,warnings,notes}],totals,done,total}`), `GET /api/plans`.
-  Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'` and `priority`.
+  Nothing is written to a target. `POST /api/runs` also takes `name` (creates a batch), `mode:'full'|'delta'|'mirror'` and `priority`.
+  `mode:'mirror'` also takes `dry_run` (default true: `{accounts:[{account_id,email,ready,to_add,to_update,to_delete,blocked,sample}]}`,
+  nothing written), `max_delete_percent` (20) and `allow_large_delete` (false); with `dry_run:false` → `{accounts,jobs}`. The account
+  option `options.mirror` (GET/PUT `/api/accounts/{id}`) enables it. See [Mirror](planning.md#mirror).
   `GET/PUT /api/servers/{id}/policy` and `GET/PUT /api/accounts/{id}/policy`: `{policy}` (account: also `effective`); body
   `{folder_map:[{source,target}],exclude_folders:[...],date_from,date_to,max_size_mb}` plus, for a server, `window:{days?,start,end,tz}` and `rate_mb_s`;
   `null` or `{}` clears; **422** with the reason when invalid.

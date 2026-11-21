@@ -1,7 +1,7 @@
 import { davDetected } from '../../src/lib/logic/dav.ts';
 import { describe, expect, it } from 'vitest';
 import type { Account, Job, Pst } from '../../src/lib/api/types.ts';
-import { connectionCounts, connectionOf, currentResult, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
+import { connectionCounts, connectionOf, currentResult, importedBytes, importPlan, jobPercent, matchesFilter, overallProgress, rowRank, sizeTotals, summarize, testPassed } from '../../src/lib/logic/accounts.ts';
 import { createCoalescer } from '../../src/lib/logic/coalesce.ts';
 import { maskEmail, maskFile, maskHost, maskText } from '../../src/lib/logic/mask.ts';
 import { legacyRedirect, matchRoute, rowHref } from '../../src/lib/logic/routes.ts';
@@ -259,6 +259,18 @@ describe('accounts', () => {
 		expect(overallProgress(list, (id) => jobs[id])).toEqual({ percent: 38, left: 5 });
 		expect(overallProgress(list, (id) => (id === 2 ? job('done') : undefined))).toEqual({ percent: 25, left: null });
 		expect(overallProgress([], () => undefined)).toEqual({ percent: 0, left: null });
+	});
+
+	it('imported bytes: the live job first, then the account; unknown sizes stay out of the totals', () => {
+		const size = (bytes: number | null, imported: number | null) => ({ bytes, count: null, at: null, approx: false, computing: false, imported });
+		expect(importedBytes(size(10, 4), { bytes_ok: 7 })).toBe(7);
+		expect(importedBytes(size(10, 4), { bytes_ok: null })).toBe(4);
+		expect(importedBytes(undefined, undefined)).toBeNull();
+		const list = [account({ id: 1, source_size: size(100, 20) }), account({ id: 2, source_size: size(null, 50) }), account({ id: 3, source_size: size(300, 0) })];
+		const jobs: Record<number, Pick<Job, 'bytes_ok'>> = { 3: { bytes_ok: 30 } };
+		expect(sizeTotals(list, (id) => jobs[id])).toEqual({ imported: 50, total: 400, known: 2, count: 3, approx: false });
+		expect(sizeTotals([account()], () => undefined)).toEqual({ imported: 0, total: 0, known: 0, count: 1, approx: false });
+		expect(sizeTotals([account({ source_size: { ...size(5, 1), approx: true } })], () => undefined).approx).toBe(true);
 	});
 
 	it('the import plan says what will not start and why', () => {

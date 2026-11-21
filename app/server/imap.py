@@ -23,6 +23,16 @@ SPECIAL_NAMES = {
     "junk": ["Junk", "Spam", "Junk E-mail", "Courrier indésirable", "INBOX.Junk", "INBOX.Spam"],
 }
 SPECIAL_DEFAULT = {"sent": "Sent", "drafts": "Drafts", "trash": "Trash", "junk": "Junk"}
+# flags a copy is given afterwards when it lacks them (read, answered, starred, draft): keywords are not, a server
+# without them would be asked again at every pass
+REPAIRED_FLAGS = {"\\seen": "\\Seen", "\\answered": "\\Answered", "\\flagged": "\\Flagged", "\\draft": "\\Draft"}
+
+
+def flags_to_add(want, have) -> list[str]:
+    """The system flags of `want` (REPAIRED_FLAGS, any case) that `have` lacks, sorted, in their usual case."""
+    got = {f.lower() for f in have or []}
+    return sorted({REPAIRED_FLAGS[f.lower()] for f in want or [] if f.lower() in REPAIRED_FLAGS} - {
+        REPAIRED_FLAGS[g] for g in got if g in REPAIRED_FLAGS})
 
 
 # ---------------------------------------------------------------- modified UTF-7 (RFC 3501 §5.1.3)
@@ -620,6 +630,111 @@ class ImapConn:
         t = _text(self._check(typ, data, f"STATUS {name}"))
         m = re.search(r"UIDVALIDITY\s+(\d+)", t, re.I)
         return m.group(1) if m else ""
+
+    # -- mirror mode on the TARGET (app/server/mirror.py): our own messages only, by UID
+    def flags_and_header(self, name: str, uids: list[str], header: str) -> dict[str, tuple[list[str], list[str]]]:
+        """{uid: (flags, [unfolded values of `header`])} in chunks of UID FETCH (BODY.PEEK: nothing marked read)."""
+        if not uids:
+            return {}
+        self.ensure_selected(name, True)
+        from email.parser import BytesHeaderParser
+        out: dict[str, tuple[list[str], list[str]]] = {}
+        for i in range(0, len(uids), 200):
+            chunk = uids[i:i + 200]
+            try:
+                typ, data = self._m().uid("FETCH", ",".join(chunk), f"(UID FLAGS BODY.PEEK[HEADER.FIELDS ({header})])")
+            except Exception as e:
+                raise wrap_exc(e) from e
+            self._check(typ, data, "FETCH")
+            data = list(data or [])
+            for j, d in enumerate(data):
+                if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
+                    continue
+                tail = data[j + 1] if j + 1 < len(data) and isinstance(data[j + 1], bytes) else b""
+                meta = (d[0] or b"") + b" " + tail
+                mu = re.search(rb"UID\s+(\d+)", meta)
+                if not mu:
+                    continue
+                mf = re.search(rb"FLAGS\s+\(([^)]*)\)", meta)
+                flags = mf.group(1).decode("utf-8", "replace").split() if mf else []
+                msg = BytesHeaderParser().parsebytes(d[1])
+                vals = [re.sub(r"\s+", "", str(v)) for v in (msg.get_all(header) or [])]
+                out[mu.group(1).decode()] = (flags, vals)
+        return out
+
+    def add_missing_flags(self, name: str, header: str, prefix: str, wanted: dict[str, list[str]]
+                          ) -> tuple[int, int, int]:
+        """Gives our copies in `name` the system flags they lack: `wanted` is {bare import id: flags its copy must
+        carry}. Our copies only: SEARCH HEADER for `prefix`, then the header of each candidate compared exactly (a
+        message of the owner, or of another import, is never touched). UID STORE +FLAGS.SILENT, grouped by flags;
+        nothing is ever removed. Some servers ignore the flags of APPEND: this is how they end up right. The flags
+        are read again after the STORE. Returns (copies checked, copies fixed, copies still lacking them)."""
+        if not wanted:
+            return 0, 0, 0
+        cands = self.search_header(name, header, prefix)
+        todo: dict[tuple[str, ...], list[str]] = {}
+        checked = 0
+        for uid, (flags, vals) in self.flags_and_header(name, cands, header).items():
+            if "\\deleted" in {f.lower() for f in flags}:
+                continue
+            want = None
+            for v in vals:
+                bare = v[1:-1] if v.startswith("<") and v.endswith(">") else v
+                if bare in wanted:
+                    want = wanted[bare]
+                    break
+            if want is None:
+                continue
+            checked += 1
+            add = flags_to_add(want, flags)
+            if add:
+                todo.setdefault(tuple(add), []).append(uid)
+        fixed: list[tuple[str, tuple[str, ...]]] = []
+        for add, uids in todo.items():
+            for i in range(0, len(uids), 200):
+                chunk = uids[i:i + 200]
+                self.uid_store(name, chunk, "+", list(add))
+                fixed.extend((u, add) for u in chunk)
+        again = self.flags_and_header(name, [u for u, _ in fixed], header) if fixed else {}
+        lacking = sum(1 for u, add in fixed if u in again and flags_to_add(add, again[u][0]))
+        return checked, len(fixed), lacking
+
+    def uid_store(self, name: str, uids: list[str], op: str, flags: list[str]) -> None:
+        """UID STORE <uids> +FLAGS.SILENT / -FLAGS.SILENT (flags), in a folder selected read-write."""
+        if not uids or not flags:
+            return
+        self.ensure_selected(name, False)
+        try:
+            typ, data = self._m().uid("STORE", ",".join(uids), f"{op}FLAGS.SILENT", "(" + " ".join(flags) + ")")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "STORE")
+
+    def uid_move(self, name: str, uids: list[str], dest: str) -> str | None:
+        """Moves messages (MOVE, else COPY + \\Deleted + UID EXPUNGE of these UIDs only; without UIDPLUS they stay
+        flagged \\Deleted in `name`, never a plain EXPUNGE). Returns the new UID of the last one when told (COPYUID)."""
+        self.ensure_selected(name, False)
+        M = self._m()
+        seq = ",".join(uids)
+        try:
+            if "MOVE" in self.caps:
+                typ, data = M.uid("MOVE", seq, quote(dest))
+                self._check(typ, data, f"MOVE to {dest}")
+            else:
+                typ, data = M.uid("COPY", seq, quote(dest))
+                self._check(typ, data, f"COPY to {dest}")
+                typ, d2 = M.uid("STORE", seq, "+FLAGS.SILENT", "(\\Deleted)")
+                self._check(typ, d2, "STORE")
+                if "UIDPLUS" in self.caps:
+                    typ, d3 = M.uid("EXPUNGE", seq)
+                    self._check(typ, d3, "UID EXPUNGE")
+        except ImapError:
+            raise
+        except Exception as e:
+            raise wrap_exc(e) from e
+        text = _text(data) + " " + _text(M.untagged_responses.pop("COPYUID", []) or [])
+        m = re.search(r"COPYUID\s+\d+\s+\S+\s+(\d+(?:[:,]\d+)*)", text)
+        return re.split(r"[:,]", m.group(1))[-1] if m else None
 
     def uid_copy(self, name: str, uids: list[str], dest: str) -> None:
         self.ensure_selected(name, False)

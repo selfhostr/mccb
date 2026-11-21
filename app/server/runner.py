@@ -16,13 +16,14 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from . import builders, crash, db, foldermap, ordering, repo, tuner
 from . import policy as pol
 from .config import settings
 from .dav import DavClient, DavError
 from .engine_loader import engine
-from .imap import (SPECIAL_DEFAULT, SPECIAL_FLAGS, ImapConn, ImapError, ImapParams, find_special,
+from .imap import (SPECIAL_DEFAULT, SPECIAL_FLAGS, ImapConn, ImapError, ImapParams, find_special, flags_to_add,
                    personal_prefix, utf7_decode, utf7_encode, with_retry, wrap_exc)
 from .security import decrypt
 
@@ -52,13 +53,14 @@ UNCONVERTED = "item cannot be converted"
 
 
 UPSERT_ITEM = (
-    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at,version,src_ref) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
     "ON CONFLICT(account_id,pst_key,kind,item_key) DO UPDATE SET pst_id=excluded.pst_id, folder=excluded.folder, status=excluded.status, "
     "target=COALESCE(excluded.target, items.target), error=excluded.error, warnings=excluded.warnings, "
     "subject=COALESCE(excluded.subject, items.subject), hash=COALESCE(excluded.hash, items.hash), "
     "size=COALESCE(excluded.size, items.size), source_ref=COALESCE(excluded.source_ref, items.source_ref), "
-    "job_id=excluded.job_id, updated_at=excluded.updated_at "
+    "job_id=excluded.job_id, updated_at=excluded.updated_at, version=COALESCE(excluded.version, items.version), "
+    "src_ref=COALESCE(excluded.src_ref, items.src_ref) "
     "RETURNING id")
 # an item left out by a filter: never overwrites a row that is already migrated
 UPSERT_FILTERED = (
@@ -182,6 +184,7 @@ class AppendResult:
     msg: str = ""
     uid: str | None = None
     size: int = 0
+    version: str | None = None  # TargetSession.written_version() of the write (items.target_etag)
 
 
 class AppendPool:
@@ -530,6 +533,7 @@ class JobRunner:
         self._rate_first: tuple[float, int, int] | None = None
         self._rate_last: tuple[float, int, int] | None = None
         self._bytes_done = 0                     # bytes APPENDed by this run (rate_bytes)
+        self.bytes_ok: int | None = None         # bytes of mail imported for this source, all runs (jobs.bytes_ok)
         self._inflight_bytes: dict[int, int] = {}  # item_id -> size: built, submitted, not yet APPENDed
         self.build_procs = builders.default_processes()
         self.byte_budget = builders.byte_budget()
@@ -558,6 +562,7 @@ class JobRunner:
         self._window = self.policy.window
         self._limiter = pol.Limiter(self.srv["id"], self.policy.rate, self.log) if self.policy.rate and self.srv else None
         self.filtered_folders: dict[str, int] = {}  # excluded folder -> items it holds
+        self.problems: list[str] = []  # not about one item (mirror: deletions held back): the job ends with errors
 
     # ------------------------------------------------------------ utilities
     def log(self, msg: str, level: str = "info") -> None:
@@ -694,6 +699,10 @@ class JobRunner:
             c = {r["status"]: r["n"] for r in rows}
             self.progress[pk] = {"done": c.get("ok", 0) + c.get("skipped", 0) + c.get(pol.FILTERED, 0), "total": self.totals[kind],
                                  "errors": c.get("error", 0)}
+        # bytes of mail written to the target for this source, all runs (covering index items_bytes)
+        r = db.q1("SELECT SUM(size) s FROM items WHERE kind='mail' AND status='ok' AND account_id=? AND pst_key=?",
+                  (self.account_id, self.pst_key))
+        self.bytes_ok = int(r["s"] or 0)
 
     def flush(self, force: bool = False) -> None:
         now = time.time()
@@ -738,10 +747,10 @@ class JobRunner:
                 eta = rem_mail * avg / rate_bytes + (rem_other / rate if rate else 0)
         if eta is None:
             eta = (max(0, total - done) / rate) if rate is not None and rate > 0 else (0 if total and done >= total else None)
-        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, rate_bytes=?, eta=?, heartbeat=? WHERE id=?",
+        db.ex("UPDATE jobs SET progress=?, current_folder=?, rate=?, rate_bytes=?, eta=?, heartbeat=?, bytes_ok=? WHERE id=?",
               (db.jdump(self.progress), self.current_folder, round(rate, 2) if rate is not None else None,
                round(rate_bytes, 1) if rate_bytes is not None else None,
-               round(eta) if eta is not None else None, now, self.job_id))
+               round(eta) if eta is not None else None, now, self.bytes_ok, self.job_id))
 
     def item_rows(self, kind: str, fkey: str, path: list[str] | None = None) -> dict[str, dict]:
         """{item key: row} of a folder. Items already ok/skipped share DONE_ROW: a folder of a million mails then
@@ -791,7 +800,7 @@ class JobRunner:
     def _upsert_params(self, kind: str, key: str, fkey: str, status: str, **kw) -> tuple:
         return (self.account_id, self.pst_id, self.pst_key, kind, key, fkey, status, kw.get("target"), kw.get("error"),
                 kw.get("warnings"), kw.get("subject"), kw.get("hash"), kw.get("size"), kw.get("source_ref"), self.job_id,
-                time.time())
+                time.time(), kw.get("version"), kw.get("src_ref"))
 
     def upsert_item(self, kind: str, key: str, fkey: str, status: str, **kw) -> int:
         return db.ex(UPSERT_ITEM, self._upsert_params(kind, key, fkey, status, **kw)).fetchone()[0]
@@ -887,13 +896,15 @@ class JobRunner:
             self.log(err, "error")
         n_verify = len(self.report["verify"].get("problems") or [])
         n_folders = len(self.folder_errors)  # a folder not created on the target, even with nothing in it
-        status = "done_with_errors" if (n_err or verify_ko or n_unfinished or n_folders) else "done"
+        status = "done_with_errors" if (n_err or verify_ko or n_unfinished or n_folders or self.problems) else "done"
         detail = [f"{n_err} item error(s)"] + ([f"{n_folders} folder error(s)"] if n_folders else []) \
             + ([f"{n_verify} verification problem(s)"] if n_verify else []) \
             + ([f"{n_unfinished} unfinished"] if n_unfinished else [])
         total = n_err + n_folders + n_verify + n_unfinished
         if n_folders and not err:
             err = "; ".join(f"{k}: {v}" for k, v in self.folder_errors.items())[:2000]
+        if self.problems and not err:
+            err = "; ".join(self.problems)[:2000]
         self.log(f"Finished: {status} ({total} error(s)" + (f": {', '.join(detail)})" if total else ")"),
                  "warning" if status != "done" else "info")
         self._finish(status, err)
@@ -1212,7 +1223,7 @@ class JobRunner:
                     continue
                 try:
                     with DavClient(params.login, params.password, bool(self.srv["verify_tls"])) as dav:
-                        url = dav.discover(kind, self.srv[tmpl] or None, self.acc["email"], self.srv["imap_host"])
+                        url = self._dav_default(dav, kind, self.srv[tmpl] or None, phase)
                 except DavError as e:
                     raise JobFailed(f"{kind.upper()}: {e}")
                 self.dav_targets[phase] = url
@@ -1335,6 +1346,14 @@ class JobRunner:
                 self._bytes_done += r.size or size
                 self._ok_items += 1
                 self._ok_buf.append(("ok", r.item_id))
+                if r.version:
+                    v = r.version
+                    if v.startswith("!") and db.q1(
+                            "SELECT 1 FROM items o JOIN items i ON i.id=? WHERE o.account_id=i.account_id AND "
+                            "o.kind=i.kind AND o.target=i.target AND o.hash=i.hash AND o.id<>i.id AND "
+                            "o.status IN ('ok','deleted') LIMIT 1", (r.item_id,)):
+                        v = v[1:]  # written over a resource of a row of this mailbox (another namespace): ours
+                    db.ex("UPDATE items SET target_etag=? WHERE id=?", (v, r.item_id))
             elif r.kind == "cancel":
                 self._ok_buf.append(("pending", r.item_id))  # never sent (pause/stop before the APPEND)
             elif r.kind == "temp" and self._should_stop():
@@ -1509,8 +1528,12 @@ class JobRunner:
         raw = res["raw"]
         if self._size_gate("mail", key, fkey, len(raw), res["subject"], target):
             return
+        from .mirror import canon_flags
+        # version: the flags it is written with (as on the connector route), given again by phase_verify to a copy
+        # the server kept without them
         params = self._upsert_params("mail", key, fkey, "inflight", target=target, subject=res["subject"],
-                                     hash=res["hash"], size=len(raw), warnings=warnings)
+                                     hash=res["hash"], size=len(raw), warnings=warnings,
+                                     version=canon_flags(res["flags"]))
         self._inflight_buf.append((params, AppendTask(0, target, raw, res["flags"], res["internaldate"], len(raw),
                                                       import_id)))
         if not self._defer_inflight:
@@ -1739,6 +1762,46 @@ class JobRunner:
                 return list(f.path)
         return [fkey]
 
+    def _repair_server_flags(self, conn: ImapConn, targets: set[str]) -> None:
+        """Our copies on the server given the read, answered and starred flags they were written with and lack (a
+        server may ignore the flags of APPEND, a copy may be found there instead of being written again). Nothing
+        removed, only our own copies (exact X-PST-Import-Id). Rows of imports older than this check have no flags
+        recorded: left as they are."""
+        sha = self.pst_row["pst_sha"]
+        wanted: dict[str, dict[str, list[str]]] = {}
+        for r in db.q("SELECT item_key, target, version FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+                      "AND status='ok' AND version IS NOT NULL AND version<>''", (self.account_id, self.pst_key)):
+            flags = flags_to_add(r["version"].split(), ())
+            if flags and r["target"] in targets:
+                wanted.setdefault(r["target"], {})[import_id_of(sha, r["item_key"])[1:-1]] = flags
+        totals = {"checked": 0, "fixed": 0, "not_kept": 0}
+        for target, want in wanted.items():
+            self.check()
+            try:
+                checked, fixed, lacking = with_retry(
+                    lambda c: c.add_missing_flags(target, IMPORT_HEADER, f"{sha}-", want), conn, settings.max_retries,
+                    should_stop=self._should_stop)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    continue
+                if e.kind in ("temp", "auth"):
+                    raise
+                self.log(f"Flags of our mails in '{target}' not checked: {e}", "error")
+                continue
+            totals["checked"] += checked
+            totals["fixed"] += fixed
+            totals["not_kept"] += lacking
+            if fixed:
+                self.log(f"Folder '{target}': flags added to {fixed} of our {checked} mail(s) that lacked them "
+                         "(read, answered, starred)")
+            if lacking:
+                w = (f"Folder '{target}': the server did not keep the flags set on {lacking} mail(s): their read "
+                     "state may differ from the PST")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+        if wanted:
+            self.report["flags"] = totals
+
     def check_folder_status(self, conn: ImapConn, fkey: str, target: str, n_ok: int) -> dict:
         """Check of a target folder: number of messages bearing OUR fingerprint (X-PST-Import-Id containing
         "<sha>-") >= `n_ok` items marked as sent to this folder. Pre-existing content is not counted."""
@@ -1758,6 +1821,16 @@ class JobRunner:
         return entry
 
     # ------------------------------------------------------------ DAV
+    def _dav_default(self, dav: DavClient, dav_kind: str, template: str | None, phase: str) -> str:
+        """The collection of this phase: the one earlier runs of this PST used, else the default one of the account
+        (connectors.dav.default_collection: by its name, never a list such as "Allowed Senders" the server lists
+        first)."""
+        from ..connectors.dav import default_collection
+        rows = db.q("SELECT DISTINCT target FROM items WHERE account_id=? AND pst_key=? AND kind=? AND status='ok' "
+                    "AND target IS NOT NULL AND target<>''", (self.account_id, self.pst_key, KIND_OF_PHASE[phase]))
+        previous = {unquote(r["target"] if r["target"].endswith("/") else r["target"] + "/") for r in rows}
+        return default_collection(dav, dav_kind, template, self.acc["email"], self.srv["imap_host"], previous)
+
     def phase_dav(self, phase: str) -> None:
         """Calendar (start desc) / contacts (last modification desc): all the folders of the phase, newest
         first (see ordering.py); builds and PUTs in this process."""
@@ -1772,7 +1845,7 @@ class JobRunner:
             if not url:
                 dk = "caldav" if phase == "calendar" else "carddav"
                 tmpl = self.srv["caldav_url" if phase == "calendar" else "carddav_url"] or None
-                url = dav.discover(dk, tmpl, self.acc["email"], self.srv["imap_host"])
+                url = self._dav_default(dav, dk, tmpl, phase)
                 self.dav_targets[phase] = url
             builder = self.pst.build_event if phase == "calendar" else self.pst.build_contact
             todo = [f for f in folders if self._folder_has_work(kind, f)]
@@ -1894,6 +1967,7 @@ class JobRunner:
                 targets = {r["target"]: (r["folder"], r["n"]) for r in rows}
                 for target, fk in self._mail_targets.items():
                     targets.setdefault(target, (fk, 0))
+                self._repair_server_flags(conn, set(targets))
                 for target, (fk, n_ok) in targets.items():
                     self.check()
                     e = self.check_folder_status(conn, fk, target, n_ok)
@@ -1995,6 +2069,9 @@ class JobRunner:
                           "errors": c.get("error", 0), "warnings": nwarn, "skipped": c.get("skipped", 0),
                           "filtered": c.get(pol.FILTERED, 0),
                           "pending": c.get("pending", 0) + c.get("inflight", 0)}
+            mirror = (self.report.get("mirror") or {}).get(pk)
+            if mirror is not None:
+                totals[pk]["mirror"] = mirror
         errors = [dict(r) for r in db.q(
             "SELECT kind, folder, item_key, subject, error FROM items WHERE account_id=? AND pst_key=? AND status='error' "
             "ORDER BY id LIMIT 5000", (self.account_id, self.pst_key))] if self.pst_key else []

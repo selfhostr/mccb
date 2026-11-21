@@ -12,8 +12,8 @@
 	import { m } from '#lib/paraglide/messages.js';
 	import { errorText, del, post } from '../../lib/api/client.ts';
 	import type { Account, Job } from '../../lib/api/types.ts';
-	import { fmtLeft } from '../../lib/format.ts';
-	import { connectionCounts, importPlan, type ImportPlan, matchesFilter, overallProgress, rowRank, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
+	import { fmtBytes, fmtLeft } from '../../lib/format.ts';
+	import { connectionCounts, importPlan, type ImportPlan, matchesFilter, overallProgress, rowRank, sizeTotals, type StatusFilter, STATUS_FILTERS, summarize } from '../../lib/logic/accounts.ts';
 	import { type BulkJobAction, bulkJobActions, jobsFor } from '../../lib/logic/bulk.ts';
 	import { FILE_ACCEPT } from '../../lib/logic/pst.ts';
 	import { headerState, splitSelection, toggleAllVisible } from '../../lib/logic/selection.ts';
@@ -45,6 +45,7 @@
 	import GettingStarted from './GettingStarted.svelte';
 	import NewMigrationDialog from './NewMigrationDialog.svelte';
 	import JobPanel from './JobPanel.svelte';
+	import MirrorDialog from './MirrorDialog.svelte';
 	import AddServer from '../settings/AddServer.svelte';
 	import RouteDialog from './RouteDialog.svelte';
 	import SelectionBar from './SelectionBar.svelte';
@@ -114,13 +115,21 @@
 	const overallPercent = $derived(overall.percent);
 	const left = $derived(overall.left);
 
+	// Bytes across the mailboxes whose source size is known: a text, so it only changes when the rounded value does.
+	const bytesLine = $derived.by(() => {
+		const t = sizeTotals(all, (id) => data.jobs.get(id));
+		if (!t.known) return '';
+		const values = { imported: fmtBytes(t.imported), total: `${t.approx ? '≈ ' : ''}${fmtBytes(t.total)}` };
+		return t.known < t.count ? m.migrations_size_of_total_partial({ ...values, known: t.known, count: t.count }) : m.migrations_size_of_total(values);
+	});
+
 	const sentence = $derived.by(() => {
 		if (data.loading) return m.common_loading();
 		const { done, total, attention } = summary;
 		const first = attention === 0 ? m.migrations_page_summary({ done, total }) : attention === 1 ? m.migrations_page_summary_one({ done, total }) : m.migrations_page_summary_many({ done, total, attention });
-		if (left == null) return first;
-		const time = fmtLeft(left);
-		return `${first} ${time ? m.migrations_page_left({ time }) : m.migrations_page_left_soon()}`;
+		const time = left == null ? null : fmtLeft(left);
+		const head = left == null ? first : `${first} ${time ? m.migrations_page_left({ time }) : m.migrations_page_left_soon()}`;
+		return bytesLine ? `${head} · ${bytesLine}` : head;
 	});
 
 	const CHIP = 'inline-flex min-h-10 items-center gap-1.5 rounded-btn border px-3 font-medium transition-colors duration-200';
@@ -191,6 +200,7 @@
 		| { kind: 'import'; plan: ImportPlan }
 		| { kind: 'server' }
 		| { kind: 'bulk-edit' }
+		| { kind: 'mirror'; ids: number[] }
 		| { kind: 'bulk-delete' }
 		| { kind: 'bulk-stop' }
 		| null
@@ -298,6 +308,9 @@
 		setTimeout(() => document.querySelector<HTMLElement>(selector)?.focus());
 	}
 
+	/** The mirror resync of the selection, or of one mailbox (its panel, its job). */
+	const openMirror = (ids: number[]) => (dialog = { kind: 'mirror', ids });
+
 	/** The start button of one mailbox's panel: the same dialog as for a selection, with one mailbox. */
 	function startOne(account: Account) {
 		dialog = { kind: 'import', plan: importPlan([account], (id) => data.jobs.get(id), (id) => data.psts.get(id), data.davEnabled) };
@@ -306,8 +319,8 @@
 
 <svelte:window onscroll={onScroll} onresize={measure} />
 
-{#snippet settings(id: number)}
-	<AccountSettings {id} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
+{#snippet settings(id: number, inJob?: boolean)}
+	<AccountSettings {id} {inJob} onmirror={(accountId) => openMirror([accountId])} ondetails={(accountId) => (dialog = { kind: 'details', id: accountId })} onupload={uploadFor} onroute={(a) => (dialog = { kind: 'route', account: a })} onedit={(a) => (dialog = { kind: 'edit', account: a })} onstart={startOne} />
 {/snippet}
 
 <!-- On a wide screen the list stays beside the panel instead of under it. -->
@@ -475,6 +488,7 @@
 		besidePanel={panelJob != null || panelAccount != null}
 		ontest={testSelected}
 		onimport={openImport}
+		onmirror={() => openMirror([...split.targets])}
 		onedit={() => (dialog = { kind: 'bulk-edit' })}
 		ondelete={() => (dialog = { kind: 'bulk-delete' })}
 		onclear={() => data.selected.clear()}
@@ -493,7 +507,7 @@
 	>
 		{#key `${panelJob}/${panelAccount}`}
 			{#if panelJob != null}
-				<JobPanel id={panelJob} onclose={closePanel} {settings} />
+				<JobPanel id={panelJob} onclose={closePanel} {settings} onmirror={(accountId) => openMirror([accountId])} />
 			{:else if panelAccount != null}
 				<AccountPanel id={panelAccount} onclose={closePanel} {settings} />
 			{/if}
@@ -515,6 +529,8 @@
 	<TestDialog accountId={dialog.id} onclose={closeDialog} />
 {:else if dialog?.kind === 'import'}
 	<ImportDialog plan={dialog.plan} onclose={closeDialog} ondone={imported} />
+{:else if dialog?.kind === 'mirror'}
+	<MirrorDialog ids={dialog.ids} onclose={closeDialog} ondone={imported} />
 {:else if dialog?.kind === 'bulk-edit'}
 	<BulkEditDialog ids={split.targets} onclose={closeDialog} />
 {:else if dialog?.kind === 'bulk-delete'}

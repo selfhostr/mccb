@@ -127,6 +127,7 @@ def plan_account(account_id: int) -> dict:
             src.open()
             folders = [f for f in src.folders() if f.kind in PHASES and not getattr(f, "skip", None)]
             out["source"] = {"kind": src_kind, "ok": True, "msg": f"{len(folders)} folder(s) found"}
+            warnings.extend(f"source: {p}" for p in getattr(src, "problems", None) or [])
     except ConnectorError as e:
         out.update(status="error", source={"kind": src_kind, "ok": False, "error_kind": e.kind, "msg": str(e)})
         return out
@@ -151,6 +152,9 @@ def plan_account(account_id: int) -> dict:
             targets = {}
             out["status"] = "error"
             out["targets"]["all"] = {"ok": False, "error_kind": e.kind, "msg": str(e)}
+        # wanted, a target for them, but the source cannot bring them: said, never left out in silence
+        warnings.extend(f"{'calendars' if k == 'calendar' else k} wanted but {why}: not copied"
+                        for k, why in wiring.source_gaps(acc).items() if k in targets)
         for phase in PHASES:
             mine = [(f, e) for f, e in entries.values() if e["kind"] == phase and not e["excluded"]]
             if not mine:
@@ -178,6 +182,9 @@ def plan_account(account_id: int) -> dict:
                 if phase == "mail":
                     plan = foldermap.plan_mapped(session.plan_folders, srcs, policy.mapper())
                 else:
+                    if hasattr(session, "history") and key:  # DAV: the plan the run will make
+                        from .connector_runner import collection_history
+                        session.history = collection_history(account_id, key, phase)
                     plan = session.plan_folders(srcs)
                 for f, e in mine:
                     fp = plan.get(folder_key(f.path))
@@ -400,11 +407,12 @@ def _lookup_missing(sess, account_id: int, key: str, target: str) -> list[dict]:
     from ..connectors.base import OutgoingItem
     from .runner import import_id_of
     out = []
-    cur = db.conn().execute("SELECT item_key, subject FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
+    cur = db.conn().execute("SELECT item_key, subject, stamp FROM items WHERE account_id=? AND pst_key=? AND kind='mail' "
                             "AND target=? AND status='ok' ORDER BY id LIMIT ?", (account_id, key, target, DETAIL_MAX))
     for r in cur.fetchall():
         try:
-            found = sess.find(target, OutgoingItem("mail", b"", import_id_of(key, r["item_key"])))
+            # stamp: the import id a mail moved by the mirror still carries (see mirror.py)
+            found = sess.find(target, OutgoingItem("mail", b"", r["stamp"] or import_id_of(key, r["item_key"])))
         except ConnectorError:
             found = [None]  # cannot tell: not reported as missing
         if not found:

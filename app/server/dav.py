@@ -1,6 +1,7 @@
 """Minimal CalDAV / CardDAV client (sync, httpx + xml.etree)."""
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote, unquote, urljoin
 
@@ -24,6 +25,23 @@ class DavError(Exception):
         self.temporary = temporary
         self.status = status
         self.retry_after = retry_after  # seconds asked by the server (Retry-After on 429/503)
+
+
+class DavIncomplete(DavError):
+    """A multistatus that says itself it is not whole: a <response> with an error status of its own, such as 507
+    (RFC 4918 §9.1: a server cutting a Depth 1 PROPFIND short). `partial`: what it did list."""
+
+    def __init__(self, msg: str, partial=None):
+        super().__init__(msg, temporary=False, status=207)
+        self.partial = partial
+
+
+_STATUS = re.compile(r"\s([1-5]\d\d)(\s|$)")
+
+
+def _status_code(text: str) -> int | None:
+    m = _STATUS.search(" " + text)
+    return int(m.group(1)) if m else None
 
 
 def expand_template(template: str, email: str, login: str) -> str:
@@ -109,8 +127,12 @@ class DavClient:
                            temporary=(sc >= 500 or sc == 429), status=sc, retry_after=_retry_after(resp))
         return resp
 
-    def _propfind(self, url: str, props: list[tuple[str, str]], depth: int
+    def _propfind(self, url: str, props: list[tuple[str, str]], depth: int, strict: bool = False
                   ) -> list[tuple[str, dict[str, ET.Element]]]:
+        """[(absolute href, {prop tag: element with a 200 status})]. A <response> with an error status of its own is
+        left out. `strict`: a cut-short answer raises DavIncomplete instead (its `partial` holds the rest): a 5xx
+        status (507: the server cut the listing short, RFC 4918) on any response, or an error status on the
+        collection itself. A 4xx on one member (gone since, not readable) is only that member left out."""
         body = ET.Element(_q(NS_DAV, "propfind"))
         prop = ET.SubElement(body, _q(NS_DAV, "prop"))
         for ns, name in props:
@@ -126,8 +148,17 @@ class DavClient:
         except ET.ParseError as e:
             raise DavError(f"PROPFIND {url}: invalid XML ({e})") from e
         out = []
+        problems = []
         for r in root.findall(_q(NS_DAV, "response")):
             href_el = r.find(_q(NS_DAV, "href"))
+            status = (r.findtext(_q(NS_DAV, "status")) or "").strip()  # the response's own, not a propstat's
+            code = _status_code(status) if status else None
+            if code is not None and not 200 <= code < 300:
+                raw = (href_el.text or "").strip() if href_el is not None else ""
+                itself = not raw or _slash(urljoin(base, raw)) == _slash(urljoin(base, url))
+                if code >= 500 or itself:
+                    problems.append(f"{raw or '?'}: {status}")
+                continue
             if href_el is None or not (href_el.text or "").strip():
                 continue
             href = urljoin(base, href_el.text.strip())
@@ -141,6 +172,9 @@ class DavClient:
                     for child in p:
                         found[child.tag] = child
             out.append((href, found))
+        if strict and problems:
+            raise DavIncomplete(f"PROPFIND {url}: the server says its answer is incomplete ("
+                                + "; ".join(problems[:3]) + ")", partial=out)
         return out
 
     @staticmethod
@@ -291,9 +325,11 @@ class DavClient:
                     _q(NS_DAV, "displayname")) is not None else ""
         return None
 
-    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
+    def ensure_collection(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None,
+                          create: bool = True) -> str:
         """The collection `url` exists (otherwise it is created, named `display`). A collection the server lists but
-        will not open (MDaemon: "Invalid Path") is never created again over itself: an explicit error instead."""
+        will not open (MDaemon: "Invalid Path") is never created again over itself: an explicit error instead.
+        `create` False: a collection the server listed earlier, never created over itself either."""
         status = self._probe(kind, url)
         if status is None:
             return url
@@ -306,6 +342,11 @@ class DavClient:
             raise DavError(f"the server lists the {what} '{listed or url}' ({url}) but refuses to open it "
                            f"(PROPFIND -> HTTP {status}): check this {what} on the server (it may be damaged), or set "
                            f"the {kind.upper()} URL of a working collection in the server configuration",
+                           status=status if status >= 400 else 409)
+        if not create:
+            what = "calendar" if kind == "caldav" else "address book"
+            raise DavError(f"the {what} '{display or url}' ({url}) was listed by the server but cannot be opened now "
+                           f"(PROPFIND -> HTTP {status}): not created again, check it on the server",
                            status=status if status >= 400 else 409)
         return self._mkcol(kind, _slash(url), component, display)
 
@@ -358,14 +399,22 @@ class DavClient:
 
     def collections_at(self, kind: str, coll: str | None, home: str | None) -> list[tuple[str, str, list[str]]]:
         """As `collections`, from a discovery already made: the collections of `home`, else `coll` alone."""
+        return [(url, label, comps) for url, label, comps, _w in self.listing(kind, coll, home)]
+
+    WRITE_PRIVILEGES = frozenset({"all", "write", "write-content", "bind"})
+
+    def listing(self, kind: str, coll: str | None, home: str | None, privileges: bool = False
+                ) -> list[tuple[str, str, list[str], bool]]:
+        """[(url, display name, accepted components, writable)] of the collections of `home`, else of `coll` alone.
+        `privileges`: DAV:current-user-privilege-set is asked too, and a collection that says it grants no write
+        (a global address list...) is not writable; without that property (or not asked), every one is."""
+        props = [(NS_DAV, "resourcetype"), (NS_DAV, "displayname"), (NS_CAL, "supported-calendar-component-set")]
+        if privileges:
+            props.append((NS_DAV, "current-user-privilege-set"))
         if home is None:
-            starts = [coll] if coll else []
-            rows = [e for s in starts for e in self._propfind(s, [
-                (NS_DAV, "displayname"), (NS_DAV, "resourcetype"),
-                (NS_CAL, "supported-calendar-component-set")], 0)]
+            rows = [e for s in ([coll] if coll else []) for e in self._propfind(s, props, 0)]
         else:
-            rows = self._propfind(home, [(NS_DAV, "resourcetype"), (NS_DAV, "displayname"),
-                                         (NS_CAL, "supported-calendar-component-set")], 1)
+            rows = self._propfind(home, props, 1)
         out = []
         for href, p in rows:
             if home is not None and _slash(href) == home:
@@ -376,8 +425,14 @@ class DavClient:
             label = (name.text or "").strip() if name is not None else ""
             comp = p.get(_q(NS_CAL, "supported-calendar-component-set"))
             comps = [c.get("name", "").upper() for c in comp.findall(_q(NS_CAL, "comp"))] if comp is not None else []
+            privs = p.get(_q(NS_DAV, "current-user-privilege-set"))
+            writable = True
+            if privs is not None:
+                granted = {child.tag.rsplit("}", 1)[-1].lower() for pr in privs.findall(_q(NS_DAV, "privilege"))
+                           for child in pr}
+                writable = bool(granted & self.WRITE_PRIVILEGES)
             url = _slash(href)
-            out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps))
+            out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps, writable))
         return out
 
     # ---- objects -----------------------------------------------------
@@ -385,13 +440,37 @@ class DavClient:
     def _item_url(collection_url: str, filename: str) -> str:
         return _slash(collection_url) + quote(filename, safe="")
 
-    def put(self, collection_url: str, filename: str, content: str, kind: str) -> int:
+    def put(self, collection_url: str, filename: str, content: str, kind: str, if_match: str | None = None,
+            if_none_match: bool = False) -> int:
+        """PUT of one resource. `if_match`: only over the resource that still has this etag (412 otherwise, raised
+        as a temporary DavError: nothing is overwritten, the next pass lists it again). `if_none_match`: only if
+        no resource has this name yet (412 otherwise, raised as DavError status 412, not temporary). The ETag the
+        server gives back is kept in `last_etag` ('' when it gives none)."""
         ctype = "text/calendar" if kind == "caldav" else "text/vcard"
-        resp = self._request(
-            "PUT", self._item_url(collection_url, filename),
-            content=content.encode("utf-8"),
-            headers={"Content-Type": f"{ctype}; charset=utf-8"})
+        headers = {"Content-Type": f"{ctype}; charset=utf-8"}
+        if if_match:
+            headers["If-Match"] = if_match
+        if if_none_match:
+            headers["If-None-Match"] = "*"
+        self.last_etag = ""
+        try:
+            resp = self._request("PUT", self._item_url(collection_url, filename), content=content.encode("utf-8"),
+                                 headers=headers)
+        except DavError as e:
+            if if_match and e.status == 412:
+                raise DavError(f"PUT {filename}: changed on the server since it was listed (HTTP 412), not "
+                               "overwritten", temporary=True, status=412) from e
+            raise
+        self.last_etag = (resp.headers.get("etag") or "").strip()
         return resp.status_code
+
+    def etag_of(self, collection_url: str, filename: str) -> str:
+        """The etag of one resource (PROPFIND Depth 0), '' when the server gives none."""
+        url = self._item_url(collection_url, filename)
+        for _href, p in self._propfind(url, [(NS_DAV, "getetag")], 0):
+            et = p.get(_q(NS_DAV, "getetag"))
+            return (et.text or "").strip() if et is not None else ""
+        return ""
 
     def exists(self, collection_url: str, filename: str) -> bool:
         return self.get(collection_url, filename) is not None
@@ -439,12 +518,54 @@ class DavClient:
                 out.add(unquote(seg))
         return out
 
+    def names_etags(self, collection_url: str, strict: bool = False) -> dict[str, str]:
+        """{name (as names() gives it): etag, '' when the server gives none} of the non-collection resources.
+        `strict`: an answer the server says is incomplete raises DavIncomplete (`partial` in this form)."""
+        def named(tags: dict[str, str]) -> dict[str, str]:
+            from urllib.parse import unquote, urlparse
+            out: dict[str, str] = {}
+            for href, et in tags.items():
+                seg = (urlparse(href).path or href).rstrip("/").rsplit("/", 1)[-1]
+                if seg:
+                    out[unquote(seg)] = et
+            return out
+        try:
+            return named(self.etags(collection_url, strict))
+        except DavIncomplete as e:
+            raise DavIncomplete(str(e), partial=named(e.partial or {})) from e
+
+    def delete_item(self, collection_url: str, filename: str, etag: str | None = None) -> int:
+        """DELETE of one resource, with If-Match when the etag is known. 2xx deleted, 404 gone already, 412 changed
+        since it was listed; any other answer raises."""
+        url = self._item_url(collection_url, filename)
+        if etag:
+            return self.delete_if_match(url, etag)
+        try:
+            resp = self._send("DELETE", url)
+        except httpx.HTTPError as e:
+            raise DavError(f"DELETE {url}: {e.__class__.__name__}: {e}", temporary=True) from e
+        sc = resp.status_code
+        if 200 <= sc < 300 or sc == 404:
+            return sc
+        raise DavError(f"DELETE {url} -> HTTP {sc}", temporary=(sc >= 500 or sc == 429), status=sc,
+                       retry_after=_retry_after(resp))
+
     # ---- duplicate search (dedup_runs.py) -------------------------------
-    def etags(self, collection_url: str) -> dict[str, str]:
-        """{absolute href: etag ('' when the server gives none)} of the non-collection resources."""
+    def etags(self, collection_url: str, strict: bool = False) -> dict[str, str]:
+        """{absolute href: etag ('' when the server gives none)} of the non-collection resources. `strict`: see
+        _propfind (DavIncomplete, `partial` in this form)."""
         url = _slash(collection_url)
+        props = [(NS_DAV, "resourcetype"), (NS_DAV, "getetag")]
+        try:
+            rows = self._propfind(url, props, 1, strict)
+        except DavIncomplete as e:
+            raise DavIncomplete(str(e), partial=self._etags_of(url, e.partial or [])) from e
+        return self._etags_of(url, rows)
+
+    @staticmethod
+    def _etags_of(url: str, rows: list) -> dict[str, str]:
         out: dict[str, str] = {}
-        for href, p in self._propfind(url, [(NS_DAV, "resourcetype"), (NS_DAV, "getetag")], 1):
+        for href, p in rows:
             if _slash(href) == url:
                 continue
             rt = p.get(_q(NS_DAV, "resourcetype"))

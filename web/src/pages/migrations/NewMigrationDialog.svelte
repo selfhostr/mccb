@@ -41,6 +41,7 @@
 	import Toggle from '../../lib/ui/Toggle.svelte';
 	import { roving, tabStop, tileClass } from '../../lib/ui/tiles.ts';
 	import ListImport from './ListImport.svelte';
+	import SizeTotal from './SizeTotal.svelte';
 
 	interface Props {
 		defaultServer?: number | null;
@@ -416,6 +417,9 @@
 											<Plate icon={Hourglass} label={m.migrations_new_row_adding()} />
 										{:else if done}
 											<Plate tone="signal" icon={CircleCheck} label={m.migrations_new_row_added()} />
+											{#if row.accountId != null && data.accounts.get(row.accountId)?.source_size?.measurable}
+												<span class="font-mono text-xs text-ink-2" title={m.migrations_size_source()}><SizeTotal size={data.accounts.get(row.accountId)?.source_size} /></span>
+											{/if}
 										{:else}
 											<Plate tone="warning" icon={CircleX} label={m.migrations_new_row_failed()} />
 											<span class="min-w-0 text-xs break-words text-ink-2">{row.sourceFailed ? `${m.migrations_new_row_source_failed()} ${row.error ?? ''}` : row.error}</span>

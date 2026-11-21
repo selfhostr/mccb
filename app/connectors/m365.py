@@ -8,20 +8,24 @@ import base64
 import hashlib
 import json
 import random
+import re
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Iterator
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
 from . import exchange_base as xb
 from . import oauth, pim, registry
-from .base import (CALENDAR, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_RULES,
-                   CONTACTS, MAIL, TASKS, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem, Source,
-                   SourceFolder, SourceItem, Target, TargetSession, subject_of)
+from .base import (CALENDAR, CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY,
+                   CAP_MIRROR, CAP_MOVE, CAP_PARALLEL, CAP_RULES, CAP_SET_FLAGS, CAP_UPDATE, CONTACTS, DELETE_HARD,
+                   DELETE_SOFT, DELETE_TRASH, MAIL, MIRROR_DELETED_FLAG, TASKS, Changes, ConnectorError, FetchedItem,
+                   FolderPlan, Listing, OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target,
+                   TargetSession, subject_of)
 
 # global service, US Government L4, US Government L5 (DoD), China operated by 21Vianet
 CLOUDS = {"global": ("https://login.microsoftonline.com", "https://graph.microsoft.com"),
@@ -38,7 +42,7 @@ PROP_IMPORT = f"String {{{xb.IMPORT_GUID}}} Name {xb.IMPORT_PROP}"
 # the import id header, as Exchange names an x-header of a MIME message when it stores it as a property
 PROP_HEADER = "String {00020386-0000-0000-C000-000000000046} Name X-PST-Import-Id"
 PROP_SIZE, PROP_VERB, PROP_DELIVERY = "Integer 0x0E08", "Integer 0x1081", "SystemTime 0x0E06"
-MESSAGE_FIELDS = "id,internetMessageId,receivedDateTime,isRead,isDraft,flag"
+MESSAGE_FIELDS = "id,internetMessageId,receivedDateTime,isRead,isDraft,flag,changeKey"
 MESSAGE_EXPAND = f"singleValueExtendedProperties($filter=id eq '{PROP_SIZE}' or id eq '{PROP_VERB}')"
 EVENT_FIELDS = ("id,iCalUId,type,subject,body,start,end,isAllDay,location,organizer,attendees,showAs,sensitivity,"
                 "categories,isReminderOn,reminderMinutesBeforeStart,recurrence,originalStart,originalStartTimeZone,"
@@ -62,6 +66,21 @@ INDEX_NAMES = {1: "first", 2: "second", 3: "third", 4: "fourth", -1: "last"}
 INDEX_CODES = {v: k for k, v in INDEX_NAMES.items()}
 PERMISSIONS = "Mail.ReadWrite, Calendars.ReadWrite, Contacts.ReadWrite, Tasks.ReadWrite.All, MailboxSettings.Read"
 
+# ---- mirror
+BATCH = 20                  # documented maximum of requests in one JSON batch
+MIRROR_PASSES = 2           # the listing pages by offset: an item missed by one pass (deletion meanwhile) is in the other
+MAIL_SEALED = "sealed"      # version of a sent or received message: its content never changes, only its flags
+# answers of GraphSource.exists()
+HERE, MOVED, GONE = "here", "moved", "gone"
+# a 404 says the ITEM is gone only with one of these codes (a missing mailbox or a wrong path says something else)
+GONE_CODES = frozenset({"erroritemnotfound", "itemnotfound", "resourcenotfound"})
+MARK_RE = re.compile(r"^<[^<>\s]+-[^<>\s]+>$")   # an import id written by mccb, see runner.import_id_of
+INVITATIONS_REFUSED = ("mirror: events are never deleted nor changed on this target because 'Send invitations' is on: "
+                       "Microsoft Graph would mail a cancellation or an update to every attendee, and this cannot be "
+                       "turned off")
+ATTENDEES_REFUSED = ("mirror: this event has attendees on the target (added there): deleting or changing it would mail "
+                     "them, it is left alone")
+
 _sleep = time.sleep  # replaced in the tests
 
 
@@ -81,7 +100,8 @@ class GraphClient:
     """One thread. The token source and the limit on concurrent requests are shared by the sessions of a target."""
 
     def __init__(self, config: dict, secrets: dict, token: oauth.OAuthToken, gate: threading.BoundedSemaphore,
-                 tenant: bool = False):
+                 tenant: bool = False, read_only: bool = False):
+        self.read_only = read_only  # a source: anything but GET is refused before it leaves (the mirror never writes there)
         self.root = CLOUDS.get(config.get("cloud") or "global", CLOUDS["global"])[1]
         self.mailbox = str(config.get("mailbox") or "").strip()
         if tenant:  # directory mode: paths are tenant-wide, no /users/{mailbox} prefix
@@ -102,8 +122,11 @@ class GraphClient:
         return f"{self.root}/{version}{self.user}{path}"
 
     def request(self, method: str, url: str, *, params: dict | None = None, json_body=None, content: bytes | None = None,
-                headers: dict | None = None, connecting: bool = False) -> httpx.Response:
-        """Waits and tries again on 429, 503 and 504, as long as Retry-After says. Raises GraphError otherwise."""
+                headers: dict | None = None, connecting: bool = False, exclusive: bool = False) -> httpx.Response:
+        """Waits and tries again on 429, 503 and 504, as long as Retry-After says. Raises GraphError otherwise.
+        exclusive: holds every slot of the gate (a JSON batch runs several requests at once on the mailbox)."""
+        if self.read_only and method != "GET":
+            raise ConnectorError(f"Graph: {method} refused, this connection only reads (source)", ConnectorError.CONFIG)
         if not url.startswith(self.root + "/"):  # a next link from elsewhere must not receive the token
             raise ConnectorError(f"Graph: unexpected link to {url[:80]}", ConnectorError.REJECTED)
         attempt = 0
@@ -116,7 +139,7 @@ class GraphClient:
                            ("Prefer", 'outlook.body-content-type="text"')]
             all_headers.extend((headers or {}).items())
             try:
-                with self.gate:
+                with (_Exclusive(self.gate) if exclusive else self.gate):
                     if json_body is not None:
                         r = self.http.request(method, url, params=params, json=json_body, headers=all_headers)
                     else:
@@ -152,9 +175,12 @@ class GraphClient:
             code, text = str(err.get("code") or ""), str(err.get("message") or "")
         except (ValueError, AttributeError):
             pass
-        msg = f"Graph HTTP {r.status_code} {code}: {text}"[:1000]
-        st = r.status_code
-        if code in ("ErrorInvalidUser", "MailboxNotEnabledForRESTAPI", "ResourceNotFound") and "mailFolders/inbox" in str(r.url):
+        return self.classify(r.status_code, code, text, str(r.url), connecting)
+
+    @staticmethod
+    def classify(st: int, code: str, text: str, url: str = "", connecting: bool = False) -> GraphError:
+        msg = f"Graph HTTP {st} {code}: {text}"[:1000]
+        if code in ("ErrorInvalidUser", "MailboxNotEnabledForRESTAPI", "ResourceNotFound") and "mailFolders/inbox" in url:
             kind = ConnectorError.CONFIG
         elif st in (401, 403):
             msg += f" (application permissions needed, with admin consent: {PERMISSIONS})"
@@ -191,6 +217,104 @@ class GraphClient:
     def all(self, path_or_url: str, params: dict | None = None) -> Iterator[dict]:
         for page in self.pages(path_or_url, params):
             yield from page.get("value") or []
+
+    def batch(self, reqs: list[dict]) -> dict[str, dict]:
+        """JSON batch: reqs [{"id", "method", "path" (in the mailbox, query included), "body"?}], BATCH per call of
+        Graph, every slot of the gate held meanwhile (4 requests at once per mailbox). The sub-requests answered 429,
+        503 or 504 are sent again after their Retry-After. {id: {"status": int, "body": dict}}."""
+        out: dict[str, dict] = {}
+        pending = list(reqs)
+        attempt = 0
+        while pending:
+            attempt += 1
+            retry: list[dict] = []
+            wait = 0.0
+            for i in range(0, len(pending), BATCH):
+                chunk = pending[i:i + BATCH]
+                subs = []
+                for q in chunk:
+                    sub = {"id": q["id"], "method": q["method"], "url": f"{self.user}{q['path']}",
+                           "headers": {"Prefer": 'IdType="ImmutableId"'}}
+                    if q.get("body") is not None:
+                        sub["body"] = q["body"]
+                        sub["headers"]["Content-Type"] = "application/json"
+                    subs.append(sub)
+                r = self.request("POST", f"{self.root}/v1.0/$batch", json_body={"requests": subs}, exclusive=True)
+                try:
+                    answers = {str(a.get("id")): a for a in r.json().get("responses") or []}
+                except (ValueError, AttributeError) as e:
+                    raise ConnectorError("Graph: invalid JSON batch answer", ConnectorError.TRANSIENT) from e
+                for q in chunk:
+                    a = answers.get(str(q["id"]))
+                    if a is None:
+                        raise ConnectorError(f"Graph: no answer for request {q['id']} of a batch", ConnectorError.TRANSIENT)
+                    status = int(a.get("status") or 0)
+                    if status in (429, 503, 504):
+                        retry.append(q)
+                        heads = {str(k).lower(): v for k, v in (a.get("headers") or {}).items()}
+                        try:
+                            wait = max(wait, float(heads.get("retry-after", "")))
+                        except ValueError:
+                            wait = max(wait, RETRY_DEFAULT * (2 ** (attempt - 1)))
+                        continue
+                    body = a.get("body")
+                    out[str(q["id"])] = {"status": status, "body": body if isinstance(body, dict) else {}}
+            if retry:
+                if attempt > RETRIES:
+                    raise GraphError(f"Graph: throttled in a batch after {attempt} attempts", ConnectorError.TRANSIENT, 429)
+                _sleep(min(wait or RETRY_DEFAULT, RETRY_MAX_WAIT))
+            pending = retry
+        return out
+
+
+_EXCLUSIVE_LOCKS: "weakref.WeakKeyDictionary[threading.BoundedSemaphore, threading.Lock]" = weakref.WeakKeyDictionary()
+_EXCLUSIVE_GUARD = threading.Lock()
+
+
+class _Exclusive:
+    """Every slot of a gate: taken one by one under a lock of the gate, so that two batches never hold half each."""
+
+    def __init__(self, gate: threading.BoundedSemaphore):
+        self.gate = gate
+        self.held = 0
+
+    def __enter__(self):
+        with _EXCLUSIVE_GUARD:
+            lock = _EXCLUSIVE_LOCKS.setdefault(self.gate, threading.Lock())
+        with lock:
+            for _ in range(MAX_CONCURRENT):
+                self.gate.acquire()
+                self.held += 1
+        return self
+
+    def __exit__(self, *exc):
+        for _ in range(self.held):
+            self.gate.release()
+        self.held = 0
+        return False
+
+
+def _with_query(path: str, params: dict) -> str:
+    return f"{path}?{urlencode(params, quote_via=quote, safe='$(),')}" if params else path
+
+
+def _gone(status: int, code: str) -> bool:
+    return status == 404 and code.lower() in GONE_CODES
+
+
+# the extension of the resource name the runner gives a calendar, contact or task object (connector_runner.DAV_EXT)
+NAME_EXT = {CALENDAR: "ics", CONTACTS: "vcf", TASKS: "ics"}
+
+
+def resource_name_of(kind: str, import_id: str) -> str:
+    """items.hash of an event, contact or task written to this target: Target.resource_name() is not overridden,
+    the runner names it after its import id (connector_runner: sha256(import id)[:32] + extension)."""
+    return f"{hashlib.sha256(import_id.encode('utf-8')).hexdigest()[:32]}.{NAME_EXT[kind]}"
+
+
+def _version(o: dict) -> str | None:
+    """changeKey (messages, events, contacts), else the etag (To Do tasks have no changeKey)."""
+    return str(o.get("changeKey") or o.get("@odata.etag") or "") or None
 
 
 # ------------------------------------------------------------------ JSON <-> neutral model
@@ -415,6 +539,11 @@ def contact_json(c: pim.Contact, import_id: str) -> dict:
     return out
 
 
+# the scalar fields contact_json writes: set to null by a mirror update when the new version has none
+CONTACT_SCALARS = ("displayName", "givenName", "surname", "middleName", "title", "generation", "nickName", "companyName",
+                   "department", "jobTitle", "profession", "spouseName", "assistantName", "mobilePhone", "personalNotes")
+
+
 def task_from_json(o: dict, uid: str) -> pim.Task:
     t = pim.Task(uid=uid, subject=str(o.get("title") or ""), body=_body_text(o),
                  status=TASK_STATUS.get(o.get("status") or "", "NEEDS-ACTION"),
@@ -474,7 +603,7 @@ def attendees_text(e: pim.Event) -> str:
     return "\n".join(lines)
 
 
-def event_json(e: pim.Event, import_id: str, send_invitations: bool) -> dict:
+def event_json(e: pim.Event, import_id: str, send_invitations: bool, transaction: str | None = None) -> dict:
     win = pim.windows_zone(e.tz, e.start)
     tz = e.tz if win else None
     body = e.body.strip()
@@ -485,7 +614,7 @@ def event_json(e: pim.Event, import_id: str, send_invitations: bool) -> dict:
                  "sensitivity": GRAPH_SENS.get(e.sensitivity, "normal"), "isReminderOn": e.reminder_minutes is not None,
                  "responseRequested": False,
                  # documented: the server avoids a second event when a POST is retried with the same value
-                 "transactionId": hashlib.sha256(import_id.encode("utf-8")).hexdigest()[:40],
+                 "transactionId": hashlib.sha256((transaction or import_id).encode("utf-8")).hexdigest()[:40],
                  "singleValueExtendedProperties": [{"id": PROP_IMPORT, "value": import_id}]}
     if body:
         out["body"] = {"contentType": "text", "content": body}
@@ -552,7 +681,7 @@ class GraphSource(Source):
     def open(self) -> None:
         if self._token is None:
             self._token = _shared_token(self.config, self.secrets)
-        client = GraphClient(self.config, self.secrets, self._token, self._gate)
+        client = GraphClient(self.config, self.secrets, self._token, self._gate, read_only=True)
         try:
             client.get_json("/mailFolders/inbox", {"$select": "id"}, connecting=True)
         except ConnectorError:
@@ -631,24 +760,28 @@ class GraphSource(Source):
         mid = " ".join(str(m.get("internetMessageId") or "").split()) or None
         flagged = ((m.get("flag") or {}).get("flagStatus")) == "flagged"
         flags = xb.flags_of(bool(m.get("isRead")), flagged, _int(_ext_value(m, PROP_VERB)), bool(m.get("isDraft")))
+        # the content of a message only changes while it is a draft: otherwise a change of changeKey is a change of flags
+        version = _version(m) if m.get("isDraft") else MAIL_SEALED
         return SourceItem(key=xb.item_key(folder.path, rid), alt_key=xb.alt_key(mid, when, size), date=when, size=size,
-                          flags=flags, ref=rid)
+                          flags=flags, ref=rid, version=version)
 
     def _plain_item(self, folder: SourceFolder, o: dict) -> SourceItem | None:
         if o.get("@removed") or not o.get("id"):
             return None
         rid = str(o["id"])
         when = _instant(o.get("start")) or pim.parse_utc(o.get("lastModifiedDateTime"))
-        return SourceItem(key=xb.item_key(folder.path, rid), date=when, ref=rid)
+        return SourceItem(key=xb.item_key(folder.path, rid), date=when, ref=rid, version=_version(o))
 
     def _listing(self, folder: SourceFolder) -> tuple[str, dict, object]:
         if folder.kind == MAIL:
             params = {"$select": MESSAGE_FIELDS, "$expand": MESSAGE_EXPAND, "$top": str(PAGE)}
             return f"{folder.ref}/messages", params, self._message_item
         if folder.kind == CALENDAR:
-            return f"{folder.ref}/events", {"$select": "id,start,lastModifiedDateTime", "$top": str(PAGE)}, self._plain_item
+            return (f"{folder.ref}/events", {"$select": "id,start,lastModifiedDateTime,changeKey", "$top": str(PAGE)},
+                    self._plain_item)
         if folder.kind == CONTACTS:
-            return f"{folder.ref}/contacts", {"$select": "id,lastModifiedDateTime", "$top": str(PAGE)}, self._plain_item
+            return (f"{folder.ref}/contacts", {"$select": "id,lastModifiedDateTime,changeKey", "$top": str(PAGE)},
+                    self._plain_item)
         return f"{folder.ref}/tasks", {"$top": str(PAGE)}, self._plain_item
 
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
@@ -667,7 +800,10 @@ class GraphSource(Source):
         when they are many. With no usable cursor (first delta pass after a full copy, expired state), the round
         starts the change tracking and the folder is listed in full, as by iter_items.
         Events have no per-calendar delta in v1.0 (calendarView only, with a time window), and the default contact
-        folder has none (contactFolders/{id}/contacts/delta only): always a full listing."""
+        folder has none (contactFolders/{id}/contacts/delta only): always a full listing.
+
+        The items the round reports @removed are in `removed` (their keys): a hint only, as a message moved to
+        another folder is @removed from this one. exists() tells a deletion from a move."""
         if folder.kind == CALENDAR or (folder.kind == CONTACTS and not folder.ref):
             return Changes(list(self.iter_items(folder)), None, reset=True)
         c = self._c()
@@ -676,6 +812,7 @@ class GraphSource(Source):
         reset = not cursor
         link, query = (cursor, None) if cursor else (c.url(f"{url}/delta"), first)
         rows: list[dict] = []
+        removed: list[str] = []
         while True:
             try:
                 body = c.get_json(link, query)
@@ -686,11 +823,13 @@ class GraphSource(Source):
                     reset = True  # the state token expired: a full round
                     link, query = c.url(f"{url}/delta"), first
                     rows = []
+                    removed = []
                     continue
                 raise
             query = None
             if not reset:
                 rows.extend(o for o in body.get("value") or [] if not o.get("@removed") and o.get("id"))
+                removed.extend(str(o["id"]) for o in body.get("value") or [] if o.get("@removed") and o.get("id"))
             if body.get("@odata.nextLink"):
                 link = body["@odata.nextLink"]
                 continue
@@ -698,11 +837,12 @@ class GraphSource(Source):
             break
         if reset or (folder.kind == MAIL and len(rows) > DELTA_DETAILS_MAX):
             # after the round has started the tracking: what changes during the listing comes with the next round
-            return Changes(list(self.iter_items(folder)), delta_link, reset=True)
+            return Changes(list(self.iter_items(folder)), delta_link, reset=True,
+                           removed=[xb.item_key(folder.path, r) for r in removed])
         if folder.kind == MAIL:
             rows = [d for d in (self._message_details(str(o["id"])) for o in rows) if d is not None]
         items = [it for it in (make(folder, o) for o in rows) if it is not None]
-        return Changes(items, delta_link, reset=False)
+        return Changes(items, delta_link, reset=False, removed=[xb.item_key(folder.path, r) for r in removed])
 
     def _message_details(self, rid: str) -> dict | None:
         """One message with the fields of the listing (extended properties included); None if gone since."""
@@ -712,6 +852,80 @@ class GraphSource(Source):
             if e.status == 404:
                 return None
             raise
+
+    # -- mirror (read only: the client of a source refuses anything but GET)
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """The whole folder, MIRROR_PASSES times: Graph pages by offset ($skip in the next links), an item deleted
+        during a pass shifts the next ones and one may be skipped; the union of the passes keeps it. Any error raises
+        (the mirror then deletes nothing). The keys hold the path of the folder: a message moved to another folder
+        changes key but keeps its ref (ImmutableId), see exists()."""
+        seen: dict[str, SourceItem] = {}
+        for _ in range(MIRROR_PASSES):
+            for it in self.iter_items(folder):
+                seen[it.key] = it  # the last pass is the freshest
+        return Listing(list(seen.values()), complete=True)
+
+    def _item_path(self, folder: SourceFolder, ref: str) -> str:
+        if folder.kind == MAIL:
+            return f"/messages/{ref}"
+        if folder.kind == CALENDAR:
+            return f"/events/{ref}"
+        if folder.kind == CONTACTS:
+            return f"/contacts/{ref}"
+        return f"{folder.ref}/tasks/{ref}"
+
+    def _contact_folder_ids(self) -> set[str]:
+        out: set[str] = set()
+        todo = ["/contactFolders"]
+        while todo:
+            url = todo.pop()
+            for f in self._c().all(url, {"$top": str(PAGE), "$select": "id"}):
+                out.add(str(f.get("id")))
+                todo.append(f"/contactFolders/{f.get('id')}/childFolders")
+        return out
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """{key: still at the source}, by probe() on the ref recorded for each key (the ImmutableId: the key, a hash,
+        cannot be turned back into it). No ref recorded, or a ref that is not an id: True (cannot tell, kept).
+        MOVED is True: a move is not a deletion."""
+        refs = refs or {}
+        wanted = {k: refs.get(k) for k in keys if isinstance(refs.get(k), str) and refs.get(k)}
+        states = self.probe(folder, list(dict.fromkeys(wanted.values()))) if wanted else {}
+        return {k: states.get(wanted[k], HERE) != GONE if k in wanted else True for k in keys}
+
+    def probe(self, folder: SourceFolder, refs: list[str]) -> dict[str, str]:
+        """Read directly, one by one: {ref: HERE | MOVED | GONE}. GONE only on a 404 saying the item is not found,
+        and only if the mailbox itself still answers afterwards; any other failure raises. MOVED: a message or a
+        contact now in another folder (same ImmutableId), not a deletion. An event moved to another calendar answers
+        HERE (Graph does not say its calendar): never deleted, at worst copied twice."""
+        c = self._c()
+        here = folder.ref.rsplit("/", 1)[-1] if folder.ref else None
+        others: set[str] | None = None
+        out: dict[str, str] = {}
+        for ref in refs:
+            params = {"$select": "id,parentFolderId"} if folder.kind in (MAIL, CONTACTS) else {"$select": "id"}
+            try:
+                o = c.get_json(self._item_path(folder, ref), params)
+            except GraphError as e:
+                if _gone(e.status, e.code):
+                    out[ref] = GONE
+                    continue
+                raise
+            parent = str(o.get("parentFolderId") or "")
+            state = HERE
+            if folder.kind == MAIL and parent and parent != here:
+                state = MOVED
+            elif folder.kind == CONTACTS and parent:
+                if here is not None:
+                    state = MOVED if parent != here else HERE
+                else:  # the default folder: moved when it is now in one of the other contact folders
+                    if others is None:
+                        others = self._contact_folder_ids()
+                    state = MOVED if parent in others else HERE
+            out[ref] = state
+        if GONE in out.values():  # a 404 from a mailbox that no longer answers is not a deletion
+            c.get_json("/mailFolders/inbox", {"$select": "id"})
+        return out
 
     # -- reading
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
@@ -779,6 +993,7 @@ class GraphSession(TargetSession):
         self.client: GraphClient | None = None
         self._urls: dict[str, str] = {}
         self._delivery_time_works = True
+        self._marks = target.marks  # (folder, id) -> import id, as inventory() found them: shared by the sessions
 
     @property
     def connected(self) -> bool:
@@ -958,11 +1173,12 @@ class GraphSession(TargetSession):
                   "$select": "id,start,originalStart", "$top": str(PAGE)}
         return list(self._c().all(f"/events/{master}/instances", params))
 
-    def _put_event(self, url: str, e: pim.Event, import_id: str) -> str | None:
+    def _put_event(self, url: str, e: pim.Event, import_id: str, transaction: str | None = None) -> str | None:
         """The series, then its exceptions. All or nothing, as on EWS: a series without its exceptions would pass for
         migrated. The occurrences are matched by their original start."""
         c = self._c()
-        o = c.request("POST", c.url(f"{url}/events"), json_body=event_json(e, import_id, self.target.send_invitations)).json()
+        o = c.request("POST", c.url(f"{url}/events"),
+                      json_body=event_json(e, import_id, self.target.send_invitations, transaction)).json()
         rid = str(o.get("id") or "")
         if not (e.recurrence is not None and (e.exdates or e.overrides) and rid):
             return rid
@@ -1044,6 +1260,304 @@ class GraphSession(TargetSession):
         return {"protocol": "Microsoft Graph", "mailbox": self.target.config.get("mailbox"),
                 "import_mode": self.target.import_mode, "send_invitations": self.target.send_invitations}
 
+    # -- mirror. Only items carrying OUR mark, read again just before each change; DELETE moves them to Deleted Items
+    # (never permanentDelete); events are never touched when Graph would mail their attendees.
+    def _mirror_item_path(self, folder: str, kind: str, ref: str) -> str:
+        if kind == TASKS:
+            return f"{self._folder(folder)}/tasks/{ref}"
+        return {MAIL: "/messages", CALENDAR: "/events", CONTACTS: "/contacts"}[kind] + f"/{ref}"
+
+    @staticmethod
+    def _mark_query(kind: str) -> dict:
+        if kind == TASKS:
+            return {"$expand": "linkedResources"}
+        if kind == MAIL:
+            return {"$select": "id,categories,isRead,flag,isDraft,changeKey",
+                    "$expand": f"singleValueExtendedProperties($filter=id eq '{PROP_IMPORT}' or id eq '{PROP_HEADER}')"}
+        select = "id,changeKey,type,attendees" if kind == CALENDAR else "id,changeKey"
+        return {"$select": select, "$expand": f"singleValueExtendedProperties($filter=id eq '{PROP_IMPORT}')"}
+
+    @staticmethod
+    def _mark_of(kind: str, o: dict) -> str | None:
+        if kind == TASKS:
+            for link in o.get("linkedResources") or []:
+                if link.get("applicationName") == "mccb" and link.get("externalId"):
+                    return str(link["externalId"])
+            return None
+        mark = _ext_value(o, PROP_IMPORT)
+        if mark is None and kind == MAIL:  # written but the PATCH after it was lost: the header of the MIME
+            mark = _ext_value(o, PROP_HEADER)
+        return str(mark) if mark is not None else None
+
+    def _check_ours(self, folder: str, kind: str, ref: str, o: dict, expected: str | None) -> None:
+        """Raises unless the item carries the mark expected: the import id (or, for an event, a contact or a task,
+        the resource name the runner derived from it) given by the mirror, else the one inventory() found for it.
+        An item inventory() did not list and the mirror says nothing about is never touched."""
+        mark = self._mark_of(kind, o)
+        expected = expected or self._marks.get((folder, ref))
+        if expected is None:
+            raise ConnectorError(f"mirror: item {ref} was not listed by the inventory of our items, left alone",
+                                 ConnectorError.REJECTED)
+        same = mark == expected or (mark is not None and kind in NAME_EXT and resource_name_of(kind, mark) == expected)
+        if mark is None or not MARK_RE.match(mark) or not same:
+            raise ConnectorError(f"mirror: item {ref} was not written by mccb as {expected} (mark {mark!r}), left alone",
+                                 ConnectorError.REJECTED)
+        if kind == CALENDAR and o.get("attendees"):
+            raise ConnectorError(ATTENDEES_REFUSED, ConnectorError.REJECTED)
+        self._marks[(folder, ref)] = mark
+
+    def _read_ours(self, folder: str, kind: str, ref: str, expected: str | None) -> dict | None:
+        """The item read again with its mark, checked; None when it is gone."""
+        c = self._c()
+        try:
+            o = c.get_json(self._mirror_item_path(folder, kind, ref), self._mark_query(kind))
+        except GraphError as e:
+            if _gone(e.status, e.code):
+                return None
+            raise
+        self._check_ours(folder, kind, ref, o, expected)
+        return o
+
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """Our items: those whose mark (PROP_IMPORT, or the import header of a message whose PATCH was lost, or the
+        linked resource of a task) starts with "<namespace>-", compared exactly (Graph's filter ignores case).
+        Mails by import id. Events, contacts and tasks by their resource name when `names` is given (the runner
+        records that name, see resource_name_of), only those in `names`; by import id otherwise."""
+        kind, _wk, _path = xb.parse_spec(folder)
+        url = self._folder(folder)
+        prefix = f"<{namespace}-"
+        c = self._c()
+        out: dict[str, list[RemoteItem]] = {}
+        seen: set[str] = set()
+
+        def add(mark: str, rid: str, flags: list[str], version: str | None) -> None:
+            if rid in seen or not mark.startswith(prefix):
+                return
+            ident = mark
+            if names is not None and kind in NAME_EXT:
+                ident = resource_name_of(kind, mark)
+                if ident not in names:
+                    return
+            seen.add(rid)
+            self._marks[(folder, rid)] = mark
+            out.setdefault(ident, []).append(RemoteItem(ref=rid, flags=flags, version=version))
+
+        if kind == TASKS:
+            for t in c.all(f"{url}/tasks", {"$expand": "linkedResources", "$top": str(PAGE)}):
+                mark = self._mark_of(TASKS, t)
+                if mark and t.get("id"):
+                    add(mark, str(t["id"]), [], _version(t))
+            return out
+        for prop in ([PROP_IMPORT, PROP_HEADER] if kind == MAIL else [PROP_IMPORT]):
+            extra = f" or id eq '{PROP_VERB}'" if kind == MAIL else ""
+            params = {"$select": "id,changeKey" + (",isRead,flag,isDraft" if kind == MAIL else ""), "$top": str(PAGE),
+                      "$filter": f"singleValueExtendedProperties/Any(ep: ep/id eq '{prop}' and "
+                                 f"startswith(ep/value, '{_odata(prefix)}'))",
+                      "$expand": f"singleValueExtendedProperties($filter=id eq '{prop}'{extra})"}
+            for o in c.all(self._items_url(url, kind), params):
+                mark = _ext_value(o, prop)
+                if mark is None or not o.get("id"):
+                    continue
+                flags: list[str] = []
+                if kind == MAIL:
+                    flags = xb.flags_of(bool(o.get("isRead")), (o.get("flag") or {}).get("flagStatus") == "flagged",
+                                        _int(_ext_value(o, PROP_VERB)), bool(o.get("isDraft")))
+                add(str(mark), str(o["id"]), flags, _version(o))
+        return out
+
+    def delete_mode(self, folder: str) -> str:
+        kind, well_known, _path = xb.parse_spec(folder)
+        if kind == TASKS:
+            return DELETE_HARD  # To Do has no Deleted Items: the runner keeps a copy first (read())
+        if kind == MAIL and well_known == "deleteditems":
+            return DELETE_SOFT  # a DELETE there would leave Deleted Items: only marked
+        return DELETE_TRASH
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        got = self._delete_many(folder, [ref], {ref: expected_import_id} if expected_import_id else None)[ref]
+        if isinstance(got, ConnectorError):
+            raise got
+        return got
+
+    def delete_many(self, folder: str, refs: list[str],
+                    expected_import_ids: dict[str, str] | None = None) -> dict[str, str]:
+        """{ref: mode} of those deleted (or already gone); a ref missing failed, its reason is logged."""
+        out: dict[str, str] = {}
+        for ref, got in self._delete_many(folder, refs, expected_import_ids).items():
+            if isinstance(got, ConnectorError):
+                xb.log.warning("mirror: %s in %s not deleted: %s", ref, folder, got)
+            else:
+                out[ref] = got
+        return out
+
+    def _delete_many(self, folder: str, refs: list[str],
+                     expected: dict[str, str] | None = None) -> dict[str, str | ConnectorError]:
+        """In JSON batches of BATCH: the marks read again (the expected one when given), then (mails) the category
+        MIRROR_DELETED_FLAG added, then DELETE, which moves them to Deleted Items. {ref: mode, or the error of that
+        item}. Already gone is not an error."""
+        expected = expected or {}
+        kind, _wk, _path = xb.parse_spec(folder)
+        mode = self.delete_mode(folder)
+        if kind == CALENDAR and self.target.send_invitations:
+            return {r: ConnectorError(INVITATIONS_REFUSED, ConnectorError.REJECTED) for r in refs}
+        c = self._c()
+        refs = list(dict.fromkeys(refs))
+        out: dict[str, str | ConnectorError] = {}
+        query = self._mark_query(kind)
+        paths = [self._mirror_item_path(folder, kind, r) for r in refs]
+        got = c.batch([{"id": str(i), "method": "GET", "path": _with_query(paths[i], query)} for i in range(len(refs))])
+        ours: list[tuple[int, dict]] = []
+        for i, r in enumerate(refs):
+            a = got[str(i)]
+            err = (a["body"] or {}).get("error") or {}
+            if a["status"] >= 300:
+                if _gone(a["status"], str(err.get("code") or "")):
+                    out[r] = mode
+                else:
+                    out[r] = GraphClient.classify(a["status"], str(err.get("code") or ""), str(err.get("message") or ""))
+                continue
+            try:
+                self._check_ours(folder, kind, r, a["body"], expected.get(r))
+            except ConnectorError as e:
+                out[r] = e
+                continue
+            ours.append((i, a["body"]))
+        steps: list[list[dict]] = []
+        if kind == MAIL:  # findable again in Deleted Items, to undo
+            steps.append([{"id": str(i), "method": "PATCH", "path": paths[i],
+                           "body": {"categories": [*(o.get("categories") or []), MIRROR_DELETED_FLAG]}}
+                          for i, o in ours if MIRROR_DELETED_FLAG not in (o.get("categories") or [])])
+        if mode != DELETE_SOFT:
+            steps.append([{"id": str(i), "method": "DELETE", "path": paths[i]} for i, _o in ours])
+        failed: set[str] = set()
+        for step in steps:
+            step = [q for q in step if q["id"] not in failed]
+            if not step:
+                continue
+            for qid, a in c.batch(step).items():
+                err = (a["body"] or {}).get("error") or {}
+                if a["status"] >= 300 and not _gone(a["status"], str(err.get("code") or "")):
+                    failed.add(qid)
+                    out[refs[int(qid)]] = GraphClient.classify(a["status"], str(err.get("code") or ""),
+                                                               str(err.get("message") or ""))
+        for i, _o in ours:
+            if str(i) not in failed:
+                out[refs[i]] = mode
+                self._marks.pop((folder, refs[i]), None)
+        return out
+
+    def update(self, folder: str, ref: str, item: OutgoingItem) -> str | None:
+        """Events and contacts: PATCH in place when it can be (a single event, a contact), else a new one is written
+        and then the old one goes to Deleted Items. Tasks: PATCH. Mails (a draft changed at the source): MIME cannot
+        be changed, the new one is imported, then the old one goes to Deleted Items. Always in that order: a write
+        that fails leaves the old copy where it was."""
+        kind, _wk, _path = xb.parse_spec(folder)
+        if kind == CALENDAR and self.target.send_invitations:
+            raise ConnectorError(INVITATIONS_REFUSED, ConnectorError.REJECTED)
+        o = self._read_ours(folder, kind, ref, item.import_id)
+        if o is None:
+            raise ConnectorError(f"mirror: item {ref} is no longer on the target", ConnectorError.REJECTED)
+        c = self._c()
+        path = self._mirror_item_path(folder, kind, ref)
+        if kind == MAIL:  # the new copy first: a failed write leaves the old one where it was, never only trashed
+            new = self.put(folder, item)
+            if new and new != ref:  # never the copy just written
+                self.delete(folder, ref)
+            return new
+        if kind == CONTACTS:
+            body = contact_json(pim.vcard_to_contact(item.raw), item.import_id)
+            for key in CONTACT_SCALARS:
+                body.setdefault(key, None)
+            for key in ("emailAddresses", "businessPhones", "homePhones", "imAddresses", "categories"):
+                body.setdefault(key, [])
+            for key in ("businessAddress", "homeAddress", "otherAddress", "birthday", "businessHomePage"):
+                body.setdefault(key, None)
+            c.request("PATCH", c.url(path), json_body=body)
+            return ref
+        if kind == TASKS:
+            body = task_json(pim.ics_to_task(item.raw), item.import_id)
+            body.pop("linkedResources", None)  # kept as it is: our mark
+            body.setdefault("body", {"contentType": "text", "content": ""})
+            body.setdefault("categories", [])
+            for key in ("startDateTime", "dueDateTime", "completedDateTime", "recurrence"):
+                body.setdefault(key, None)
+            c.request("PATCH", c.url(path), json_body=body)
+            return ref
+        event = pim.ics_to_event(item.raw)
+        if event.all_day and not event.tz:
+            event.tz = self.target.time_zone
+        if event.recurrence is None and o.get("type") in (None, "singleInstance"):
+            body = event_json(event, item.import_id, False)
+            body.pop("transactionId", None)
+            body.setdefault("body", {"contentType": "text", "content": ""})
+            body.setdefault("location", {"displayName": ""})
+            body.setdefault("categories", [])
+            c.request("PATCH", c.url(path), json_body=body)
+            return ref
+        # a series: its exceptions cannot be patched reliably, a new series replaces it (written first, as a mail).
+        # Its transactionId names the content AND the copy it replaces: the same update replayed gets the copy it
+        # wrote back (Graph answers so for a transactionId already used), never one of an earlier update that may
+        # be in Deleted Items by now (V1 -> V2 -> V1 -> V2)
+        salt = hashlib.sha256(item.raw).hexdigest()[:16]
+        new = self._put_event(self._folder(folder), event, item.import_id,
+                              transaction=f"{item.import_id}:{salt}:{ref}")
+        if new and new != ref:  # Graph gives the event of a transactionId already used back: that one stays
+            self.delete(folder, ref)
+        return new
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        """\\Seen and \\Flagged, and \\Answered / $Forwarded added (the last verb cannot be taken back)."""
+        kind, _wk, _path = xb.parse_spec(folder)
+        if kind != MAIL:
+            raise ConnectorError("mirror: flags are for mails", ConnectorError.REJECTED)
+        o = self._read_ours(folder, kind, ref, None)
+        if o is None:
+            raise ConnectorError(f"mirror: message {ref} is no longer on the target", ConnectorError.REJECTED)
+        added, removed = {f.lower() for f in add}, {f.lower() for f in remove}
+        body: dict = {}
+        if "\\seen" in added or "\\seen" in removed:
+            body["isRead"] = "\\seen" in added
+        if "\\flagged" in added or "\\flagged" in removed:
+            body["flag"] = {"flagStatus": "flagged" if "\\flagged" in added else "notFlagged"}
+        verb = xb.VERB_REPLY if "\\answered" in added else xb.VERB_FORWARD if "$forwarded" in added else None
+        if verb:
+            body["singleValueExtendedProperties"] = [{"id": PROP_VERB, "value": str(verb)}]
+        if body:
+            c = self._c()
+            c.request("PATCH", c.url(f"/messages/{ref}"), json_body=body)
+
+    def move(self, folder: str, ref: str, to_folder: str) -> str | None:
+        kind, _wk, _path = xb.parse_spec(folder)
+        if kind != MAIL or xb.parse_spec(to_folder)[0] != MAIL:
+            raise ConnectorError("mirror: only mails are moved", ConnectorError.REJECTED)
+        mark = self._marks.get((folder, ref))
+        o = self._read_ours(folder, kind, ref, None)
+        if o is None:
+            raise ConnectorError(f"mirror: message {ref} is no longer on the target", ConnectorError.REJECTED)
+        dest = self._folder(to_folder).rsplit("/", 1)[-1]
+        c = self._c()
+        new = str(c.request("POST", c.url(f"/messages/{ref}/move"), json_body={"destinationId": dest}).json().get("id")
+                  or ref)
+        self._marks.pop((folder, ref), None)
+        self._marks[(to_folder, new)] = mark or str(self._mark_of(MAIL, o))
+        return new
+
+    def read(self, folder: str, remote_id: str) -> bytes | None:
+        """Tasks only (no Deleted Items in To Do: the copy the runner keeps before a hard delete), and messages."""
+        kind, _wk, _path = xb.parse_spec(folder)
+        c = self._c()
+        try:
+            if kind == TASKS:
+                o = c.get_json(self._mirror_item_path(folder, kind, remote_id), {"$expand": "linkedResources"})
+                return pim.task_to_ics(task_from_json(o, self._mark_of(TASKS, o) or f"graph-{remote_id}"))
+            if kind == MAIL:
+                return c.request("GET", c.url(f"/messages/{remote_id}/$value")).content
+        except GraphError as e:
+            if _gone(e.status, e.code):
+                return None
+            raise
+        return None
+
 
 def _as_datetime(value: datetime | date) -> datetime:
     return value if isinstance(value, datetime) else pim.date_at_midnight(value)
@@ -1055,7 +1569,8 @@ def _sort_key(value: datetime | date) -> datetime:
 
 class GraphTarget(Target):
     # no CAP_READBACK: Exchange rewrites the MIME it stores, a re-read never hashes the same
-    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_PARALLEL})
+    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_PARALLEL, CAP_INVENTORY, CAP_DELETE, CAP_UPDATE, CAP_SET_FLAGS,
+                              CAP_MOVE})
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
         self.config = config
@@ -1067,6 +1582,7 @@ class GraphTarget(Target):
         self.gate = threading.BoundedSemaphore(MAX_CONCURRENT)
         self._token: oauth.OAuthToken | None = None
         self._lock = threading.Lock()
+        self.marks: dict[tuple[str, str], str] = {}  # mirror: what inventory() found, for every session
 
     def token(self) -> oauth.OAuthToken:
         with self._lock:
@@ -1301,7 +1817,7 @@ registry.register(registry.ConnectorSpec(
     kind="m365_graph", label="Exchange Online (Microsoft Graph)",
     description="Microsoft 365 mailboxes, with one Entra application. Tested against simulated servers, not real Exchange.",
     source=registry.Role(GraphSource, _ITEMS,
-                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_RULES}),
+                         frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL, CAP_RULES, CAP_MIRROR}),
                          _SOURCE_FIELDS, identity),
     target=registry.Role(GraphTarget, _ITEMS, GraphTarget.capabilities, _TARGET_FIELDS, identity),
     directory=GraphDirectory(),

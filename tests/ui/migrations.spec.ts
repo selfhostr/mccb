@@ -143,18 +143,18 @@ test.describe('migrations', () => {
 	test('the sentence says how far it is, and the bar moves with it', async ({ page }) => {
 		await mock(page.request, 'reset', { hold: true });
 		await ready(page);
-		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done.');
+		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done. · 0 byte imported of ≈ 8.58 MB (size known for 3 of 6 mailboxes)');
 		await row(page, 'alice@example.com').getByRole('checkbox').check();
 		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
 		await page.getByTestId('import-confirm').click();
 
 		const progress = { mail: { done: 300, total: 900, errors: 0 }, calendar: { done: 0, total: 0, errors: 0 }, contacts: { done: 0, total: 0, errors: 0 } };
 		await mock(page.request, 'job', { id: 1, patch: { status: 'running', progress, rate: 10 } });
-		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done\. About 1\d* min left\.$/);
+		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done\. About 1\d* min left\. · .+ imported of ≈ 8\.58 MB/);
 		await expect(page.getByTestId('overall').getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6');
 
 		await mock(page.request, 'job', { id: 1, patch: { status: 'failed', error: 'connection lost' } });
-		await expect(page.getByTestId('page-sentence')).toHaveText('0 of 6 mailboxes done, 1 needs you.');
+		await expect(page.getByTestId('page-sentence')).toHaveText(/^0 of 6 mailboxes done, 1 needs you\. · /);
 	});
 
 	test('a filter says what stays selected and leaves it out', async ({ page }) => {
@@ -457,6 +457,25 @@ test.describe('migrations', () => {
 		const { accounts } = await mock(page.request, 'state');
 		const calendar = (id: number) => accounts.find((a: { id: number }) => a.id === id).options.calendar;
 		expect([calendar(1), calendar(2), calendar(3)]).toEqual([false, false, true]);
+	});
+
+	test('turning calendars on for several mailboxes says whose source has no CalDAV, and one click on its server fixes it', async ({ page }) => {
+		await ready(page);
+		// alice reads her old mail server, saved as Staging, whose DAV is off; bob comes from a PST.
+		const res = await page.request.put('/api/accounts/1/source', { data: { kind: 'imap', config: { host: 'mail.home.arpa', port: 143, security: 'starttls', login: 'alice@example.com' }, secrets: { password: 'pw' } } });
+		expect(res.ok()).toBe(true);
+		await ready(page);
+		await row(page, 'alice@example.com').getByRole('checkbox').check();
+		await row(page, 'bob@example.com').getByRole('checkbox').check();
+		await page.getByTestId('bulk-edit').click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByTestId('srcdav-notice')).toHaveCount(0);
+		await dialog.getByLabel('Calendar').selectOption('on');
+		await expect(dialog.getByTestId('srcdav-notice')).toContainText('Calendars and contacts will stay at the source: CalDAV/CardDAV is off on the source server Staging.');
+		await expect(dialog.getByTestId('srcdav-list')).toHaveText('alice@example.com');
+		await dialog.getByTestId('srcdav-enable').click();
+		await expect(dialog.getByTestId('srcdav-notice')).toHaveCount(0);
+		expect((await (await page.request.get('/api/servers/2')).json()).dav_enabled).toBe(true);
 	});
 
 	test('a mailbox without a job has its own panel, with its URL', async ({ page }) => {
