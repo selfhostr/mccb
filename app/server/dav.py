@@ -10,6 +10,7 @@ import httpx
 NS_DAV = "DAV:"
 NS_CAL = "urn:ietf:params:xml:ns:caldav"
 NS_CARD = "urn:ietf:params:xml:ns:carddav"
+NS_CS = "http://calendarserver.org/ns/"
 
 IMPORT_NAME = "import-pst"
 IMPORT_DISPLAY = "PST Import"
@@ -262,38 +263,58 @@ class DavClient:
         slug = "-contacts/" if kind != "caldav" else "-tasks/" if component == "VTODO" else "-agenda/"
         return self._mkcol(kind, home + IMPORT_NAME + slug, component)
 
-    def _mkcol(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
-        """Creates a collection at `url` ("PST Import" unless `display` names it): MKCALENDAR (CalDAV) or extended
-        MKCOL (CardDAV, RFC 5689). Server refusal -> explicit DavError (non-temporary except 5xx/429)."""
-        display = display or IMPORT_DISPLAY
-        if kind == "caldav":
+    def _mkcol_body(self, method: str, kind: str, component: str, display: str) -> bytes:
+        if method == "MKCALENDAR":
             root = ET.Element(_q(NS_CAL, "mkcalendar"))
-            setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
-            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = display
-            comps = ET.SubElement(setp, _q(NS_CAL, "supported-calendar-component-set"))
-            ET.SubElement(comps, _q(NS_CAL, "comp")).set("name", component)
-            method = "MKCALENDAR"
         else:
             root = ET.Element(_q(NS_DAV, "mkcol"))
-            setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
+        setp = ET.SubElement(ET.SubElement(root, _q(NS_DAV, "set")), _q(NS_DAV, "prop"))
+        if method == "MKCOL":  # extended MKCOL (RFC 5689): the resource type says what to create
             rt = ET.SubElement(setp, _q(NS_DAV, "resourcetype"))
             ET.SubElement(rt, _q(NS_DAV, "collection"))
-            ET.SubElement(rt, _q(NS_CARD, "addressbook"))
-            ET.SubElement(setp, _q(NS_DAV, "displayname")).text = display
-            method = "MKCOL"
-        data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-        try:
-            self._request(method, url, ok=(200, 201, 204), content=data,
-                          headers={"Content-Type": "application/xml; charset=utf-8"})
-        except DavError as e:
-            if e.status == 405 and self._is_collection(kind, url):
-                return url  # already exists (created in the meantime)
-            what = "the calendar" if kind == "caldav" else "the address book"
-            raise DavError(f"creation of {what} '{display}' refused by the server "
-                           f"({method} {url} -> {f'HTTP {e.status}' if e.status else e}): create the collection "
-                           f"manually or set its URL in the server configuration",
-                           temporary=e.temporary, status=e.status) from e
-        return url
+            ET.SubElement(rt, _q(NS_CAL, "calendar") if kind == "caldav" else _q(NS_CARD, "addressbook"))
+        ET.SubElement(setp, _q(NS_DAV, "displayname")).text = display
+        if kind == "caldav":
+            comps = ET.SubElement(setp, _q(NS_CAL, "supported-calendar-component-set"))
+            ET.SubElement(comps, _q(NS_CAL, "comp")).set("name", component)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    # answers to a creation that another form of the request may get past (not a 401, not a server in trouble)
+    _MKCOL_RETRY = frozenset({400, 403, 405, 409, 412, 415, 422, 501})
+
+    def _mkcol(self, kind: str, url: str, component: str = "VEVENT", display: str | None = None) -> str:
+        """Creates a collection at `url` ("PST Import" unless `display` names it). CalDAV: MKCALENDAR, then an
+        extended MKCOL (RFC 5689) when the server refuses it; CardDAV: extended MKCOL. A name with "/" (a sub-list at
+        the source, "Tâches/24me") is tried again with " - " in its place: SmarterMail reads it as a path and
+        answers 409. Server refusal -> explicit DavError (non-temporary except 5xx/429). `last_display`: the name
+        the collection was created under."""
+        display = display or IMPORT_DISPLAY
+        names = [display]
+        flat = re.sub(r"\s*[/\\]\s*", " - ", display).strip(" -") or display
+        if flat != display:
+            names.append(flat)
+        methods = ["MKCALENDAR", "MKCOL"] if kind == "caldav" else ["MKCOL"]
+        first: DavError | None = None
+        tried = []
+        for name, method in [(n, m) for n in names for m in methods]:
+            try:
+                self._request(method, url, ok=(200, 201, 204), content=self._mkcol_body(method, kind, component, name),
+                              headers={"Content-Type": "application/xml; charset=utf-8"})
+                self.last_display = name
+                return url
+            except DavError as e:
+                if e.status == 405 and self._is_collection(kind, url):
+                    self.last_display = name
+                    return url  # already exists (created in the meantime)
+                first = first or e
+                tried.append(f"{method} '{name}' -> {f'HTTP {e.status}' if e.status else e}")
+                if e.status not in self._MKCOL_RETRY:
+                    first = e  # a server in trouble, a refused login: said as it is, not asked again
+                    break
+        assert first is not None
+        what = "the calendar" if kind == "caldav" else "the address book"
+        raise DavError(f"creation of {what} '{display}' refused by the server ({url}: {'; '.join(tried)})",
+                       temporary=first.temporary, status=first.status) from first
 
     def _is_collection(self, kind: str, url: str) -> bool:
         try:
@@ -397,6 +418,12 @@ class DavClient:
         the server does not say."""
         return self.collections_at(kind, *self._discover(kind, template_url, email, imap_host, False))
 
+    def source_collections(self, kind: str, template_url: str | None, email: str, imap_host: str
+                           ) -> tuple[list[tuple[str, str, list[str]]], dict]:
+        """`collections`, with what the server says of who owns each one (`ownership`)."""
+        coll, home = self._discover(kind, template_url, email, imap_host, False)
+        return self.collections_at(kind, coll, home), self.ownership(kind, home, coll)
+
     def collections_at(self, kind: str, coll: str | None, home: str | None) -> list[tuple[str, str, list[str]]]:
         """As `collections`, from a discovery already made: the collections of `home`, else `coll` alone."""
         return [(url, label, comps) for url, label, comps, _w in self.listing(kind, coll, home)]
@@ -435,6 +462,67 @@ class DavClient:
             out.append((url, label or url.rstrip("/").rsplit("/", 1)[-1], comps, writable))
         return out
 
+    def ownership(self, kind: str, home: str | None, coll: str | None = None) -> dict:
+        """What says, for each collection of `home`, whether this account owns it: {"principals": hrefs of the account
+        (DAV:current-user-principal, DAV:owner of the home), "collections": {url: {"owner": href or None, "shared":
+        bool}}}. `shared`: the server marks it as shared with this account (calendarserver.org <shared/> resource
+        type or CS:shared-url). Best effort: an error gives what is known (nothing)."""
+        props = [(NS_DAV, "resourcetype"), (NS_DAV, "owner"), (NS_DAV, "current-user-principal"),
+                 (NS_CS, "shared-url")]
+        out: dict = {"principals": set(), "collections": {}}
+        try:
+            rows = self._propfind(home, props, 1) if home else self._propfind(coll, props, 0) if coll else []
+        except DavError:
+            return out
+        for href, p in rows:
+            me = self._href_of(p.get(_q(NS_DAV, "current-user-principal")))
+            if me:
+                out["principals"].add(_slash(urljoin(href, me)))
+            owner = self._href_of(p.get(_q(NS_DAV, "owner")))
+            owner = _slash(urljoin(href, owner)) if owner else None
+            if home is not None and _slash(href) == home:
+                if owner:
+                    out["principals"].add(owner)
+                continue
+            rt = p.get(_q(NS_DAV, "resourcetype"))
+            shared = (rt is not None and rt.find(_q(NS_CS, "shared")) is not None) or \
+                p.get(_q(NS_CS, "shared-url")) is not None
+            out["collections"][_slash(href)] = {"owner": owner, "shared": shared}
+        return out
+
+    def find_uid(self, kind: str, collection_url: str, uid: str, component: str = "VEVENT") -> list[str]:
+        """Absolute hrefs of the objects of this collection whose UID is `uid` (addressbook-query / calendar-query,
+        RFC 6352 and 4791). Raises DavError when the server does not do the query."""
+        if kind == "caldav":
+            body = ET.Element(_q(NS_CAL, "calendar-query"))
+            ET.SubElement(ET.SubElement(body, _q(NS_DAV, "prop")), _q(NS_DAV, "getetag"))
+            f = ET.SubElement(ET.SubElement(body, _q(NS_CAL, "filter")), _q(NS_CAL, "comp-filter"), name="VCALENDAR")
+            f = ET.SubElement(f, _q(NS_CAL, "comp-filter"), name=component)
+            m = ET.SubElement(ET.SubElement(f, _q(NS_CAL, "prop-filter"), name="UID"), _q(NS_CAL, "text-match"),
+                              collation="i;octet")
+        else:
+            body = ET.Element(_q(NS_CARD, "addressbook-query"))
+            ET.SubElement(ET.SubElement(body, _q(NS_DAV, "prop")), _q(NS_DAV, "getetag"))
+            f = ET.SubElement(body, _q(NS_CARD, "filter"))
+            m = ET.SubElement(ET.SubElement(f, _q(NS_CARD, "prop-filter"), name="UID"), _q(NS_CARD, "text-match"),
+                              collation="i;octet")
+            m.set("match-type", "equals")
+        m.text = uid
+        resp = self._request("REPORT", _slash(collection_url), ok=(207,),
+                             content=ET.tostring(body, encoding="utf-8", xml_declaration=True),
+                             headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError as e:
+            raise DavError(f"REPORT {collection_url}: invalid XML ({e})") from e
+        base = str(resp.url)
+        out = []
+        for r in root.findall(_q(NS_DAV, "response")):
+            href = (r.findtext(_q(NS_DAV, "href")) or "").strip()
+            if href and _slash(urljoin(base, href)) != _slash(collection_url):
+                out.append(urljoin(base, href))
+        return out
+
     # ---- objects -----------------------------------------------------
     @staticmethod
     def _item_url(collection_url: str, filename: str) -> str:
@@ -463,6 +551,15 @@ class DavClient:
             raise
         self.last_etag = (resp.headers.get("etag") or "").strip()
         return resp.status_code
+
+    def state_of(self, collection_url: str, filename: str) -> str | None:
+        """The etag of one resource ('' when the server gives none), None when there is no such resource."""
+        try:
+            return self.etag_of(collection_url, filename)
+        except DavError as e:
+            if e.status == 404:
+                return None
+            raise
 
     def etag_of(self, collection_url: str, filename: str) -> str:
         """The etag of one resource (PROPFIND Depth 0), '' when the server gives none."""

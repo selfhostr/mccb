@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Iterator
 from urllib.parse import unquote
 
 from ..server.dav import DavClient, DavError, DavIncomplete
-from . import registry
+from . import davfix, registry
 from .base import (CALENDAR, CAP_DELETE, CAP_FOLDERS, CAP_INVENTORY, CAP_MIRROR, CAP_READBACK, CAP_UPDATE, CONTACTS,
-                   DELETE_HARD, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem, RemoteItem, Source,
-                   SourceFolder, SourceItem, Target, TargetSession)
+                   DELETE_HARD, NOT_SENT, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem,
+                   RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession)
 from .imap import folder_hash
 
 
@@ -26,9 +28,16 @@ def convert(e: DavError) -> ConnectorError:
 
 
 class DavSession(TargetSession):
+    ITEM_RETRY_DELAY = 2.0  # seconds before the one retry of an object the server answered 500 to
+
     def __init__(self, dav_kind: str, config: dict, secrets: dict, component: str = "VEVENT",
-                 labels: dict[str, str] | None = None, listed: dict[str, str] | None = None):
+                 labels: dict[str, str] | None = None, listed: dict[str, str] | None = None,
+                 breaker: "Breaker | None" = None):
         self.dav_kind = dav_kind  # caldav | carddav
+        self.breaker = breaker if breaker is not None else Breaker()  # shared by the sessions of the target
+        self.last_note = ""  # what the last put() had to do to get the object written ("" when nothing)
+        self.renamed: dict[str, str] = {}  # collection created under another name than asked -> that name
+        self._diag: dict | None = None  # the other collections and their names, for the diagnosis of a refusal
         self.labels = labels if labels is not None else {}  # collection to create -> its name (shared by the target)
         # url_key of every collection the plan saw listed -> its name (shared by the target): never created
         self.listed = listed if listed is not None else {}
@@ -99,7 +108,8 @@ class DavSession(TargetSession):
     def plan_folders(self, folders: list[SourceFolder]) -> dict[str, FolderPlan]:
         """Each source folder goes to an existing collection when there is one for it (choose_collection: the
         default folder of the source to the default collection of the target, the others to the collection of the
-        same name), else to a new one of its name (created by ensure_folder; refused: to the default collection).
+        same name), else to a new one of its name (created by ensure_folder when it has items; refused: its items
+        are in error, never mixed into another collection).
         A name the target already has is never created a second time. `notes`: the plan, said in the job's log."""
         from ..server.runner import folder_key
         from .exchange_base import is_default_folder
@@ -125,7 +135,7 @@ class DavSession(TargetSession):
             else:
                 url = home + collection_slug(self.dav_kind, self.component, label)
                 self.labels[url] = label
-                out[fk] = FolderPlan(url, label=label, fallback=default)
+                out[fk] = FolderPlan(url, label=label)
                 self.notes.append(f"'{label}' -> new collection '{label}' ({url})")
         return out
 
@@ -157,7 +167,10 @@ class DavSession(TargetSession):
                 if url_key(url) != url_key(name) and norm_name(other) == norm_name(want):
                     raise ConnectorError(f"the target already has a collection named '{other}' ({url}): a second "
                                          f"one is not created", ConnectorError.REJECTED)
+            c.last_display = want
             c.ensure_collection(self.dav_kind, name, self.component, want)
+            if getattr(c, "last_display", want) != want:
+                self.renamed[name] = c.last_display
         except DavError as e:
             if e.status == 403:  # signed in already: a refused creation (MDaemon, shared homes), not a bad password
                 raise ConnectorError(str(e), ConnectorError.REJECTED) from e
@@ -168,29 +181,163 @@ class DavSession(TargetSession):
         rows may be gone, its namespace new, while the resources it wrote are still on the target). The first PUT
         says If-None-Match: *, so that a write over an existing resource is known: it then goes with If-Match on
         the etag just read, and is marked "!" in written_version(): its owner is not proven, and the mirror never
-        deletes nor updates it on that ground."""
+        deletes nor updates it on that ground.
+
+        A 500 is not taken for a server in trouble at once (SmarterMail gives it for some objects, every time): see
+        _after_500. Items a collection keeps refusing while it answers trip the breaker of the target: the next ones
+        of that collection are not sent (NOT_SENT), one in Breaker.PROBE still is."""
         name = item.name or ""
         text = item.raw.decode("utf-8", "replace")
+        self.last_note = ""
+        held = self.breaker.blocked(folder)
+        if held:
+            raise ConnectorError(held, ConnectorError.REJECTED)
+        try:
+            try:
+                self._write(folder, name, text)
+            except DavError as e:
+                if e.status != 500:
+                    raise self._converted(e) from e
+                self._after_500(folder, name, text, e)
+        except ConnectorError as e:
+            if e.kind == ConnectorError.REJECTED and not getattr(e, "explained", False):
+                if self.breaker.failed(folder, str(e)):
+                    e.args = (f"{e} (the {Breaker.LIMIT} last items sent to this collection were all refused: its "
+                              "next items are not sent)",)
+            raise
+        self.breaker.ok(folder)
+        return item.name
+
+    @staticmethod
+    def _converted(e: DavError) -> ConnectorError:
+        if e.status in (404, 409):  # collection gone since the discovery: recreated then retried by the runner
+            return ConnectorError(str(e), ConnectorError.FOLDER_MISSING)
+        return convert(e)
+
+    def _write(self, folder: str, name: str, text: str) -> None:
         c = self._c()
         mark = ""
         try:
             c.put(folder, name, text, self.dav_kind, if_none_match=True)
         except DavError as e:
-            if e.status in (404, 409):  # collection gone since the discovery: recreated then retried by the runner
-                raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
             if e.status != 412:
-                raise convert(e) from e
+                raise
             mine = self._written.get((folder, name))
             mark = "" if mine and not mine.startswith("!") else "!"  # written by this very session: still ours
-            try:
-                old = c.etag_of(folder, name)
-                c.put(folder, name, text, self.dav_kind, if_match=old or None)
-            except DavError as e2:
-                if e2.status in (404, 409):
-                    raise ConnectorError(str(e2), ConnectorError.FOLDER_MISSING) from e2
-                raise convert(e2) from e2
+            old = c.etag_of(folder, name)
+            c.put(folder, name, text, self.dav_kind, if_match=old or None)
         self._remember(folder, name, mark)
-        return item.name
+
+    def _after_500(self, folder: str, name: str, text: str, first: DavError) -> None:
+        """The server answered 500 to this object. One retry a moment later (without If-None-Match when the resource
+        is not there: some servers answer 500 to the condition; with If-Match over it when it is, as after a 412).
+        500 again: when the collection does not answer either, the server is in trouble (TRANSIENT: the runner
+        retries as usual); when it does, the object is the problem: an object of the same UID elsewhere in the
+        account is looked for (a clear reason, REJECTED), else the object is written in a plainer form (davfix:
+        `last_note` says which), else REJECTED at once instead of the long retries of a server in trouble."""
+        c = self._c()
+        what = self._what()
+        time.sleep(self.ITEM_RETRY_DELAY)
+        try:
+            state = c.state_of(folder, name)
+        except DavError as e:
+            raise ConnectorError(f"{first} (then PROPFIND of the item -> {e})", ConnectorError.TRANSIENT) from e
+        mine = self._written.get((folder, name))
+        mark = "!" if state is not None and not (mine and not mine.startswith("!")) else ""
+
+        def attempt(body: str) -> bool:
+            try:
+                if state is None:
+                    c.put(folder, name, body, self.dav_kind)
+                else:
+                    c.put(folder, name, body, self.dav_kind, if_match=state or None)
+            except DavError as e:
+                if e.status != 500:
+                    raise self._converted(e) from e
+                return False
+            self._remember(folder, name, mark)
+            return True
+
+        if attempt(text):
+            return
+        status = c._probe(self.dav_kind, folder)
+        if status is not None:
+            if status == 404:
+                raise ConnectorError(f"{first} (the collection is gone)", ConnectorError.FOLDER_MISSING)
+            raise ConnectorError(f"{first}, twice; the collection does not answer either (PROPFIND -> "
+                                 f"{f'HTTP {status}' if status else 'no answer'}): the server is in trouble",
+                                 ConnectorError.TRANSIENT)
+        why = self._uid_conflict(folder, name, text)
+        if why:
+            err = ConnectorError(f"{first}: {why}", ConnectorError.REJECTED)
+            err.explained = True  # type: ignore[attr-defined]  # a reason of its own: not the collection's fault
+            raise err
+        forms = davfix.forms(self.dav_kind, text)
+        for label, body, notes in forms:
+            if attempt(body):
+                self.last_note = (f"the server answered HTTP 500 to this {what} as it is: written in a {label} form"
+                                  + (f" ({'; '.join(notes)})" if notes else ""))
+                return
+        raise ConnectorError(f"{first}: the server refuses this {what} (HTTP 500 again a moment later"
+                             + (f", and for its {' and '.join(f[0] for f in forms)} form" if forms else "")
+                             + ") while the collection answers", ConnectorError.REJECTED)
+
+    def _what(self) -> str:
+        return "contact" if self.dav_kind == "carddav" else "task" if self.component == "VTODO" else "event"
+
+    def _uid_conflict(self, folder: str, name: str, text: str) -> str | None:
+        """Why the server may refuse this object: one of the same UID already in the account (SmarterMail keeps one
+        per UID: the copies an earlier run made in a second "Contacts"), None when none is found. Best effort: a
+        request that fails says nothing."""
+        uid = davfix.object_uid(text)
+        c = self._c()
+        what = self._what()
+        here = url_key(folder)
+        word = "address book" if self.dav_kind == "carddav" else "calendar"
+        if self._diag is None:
+            try:
+                default, home = self._discovery()
+                rows = c.listing(self.dav_kind, default, home)
+            except (ConnectorError, DavError):
+                rows = []
+            self._diag = {"colls": [(u, label) for u, label, _c, _w in rows], "names": {}, "query": True}
+        diag = self._diag
+        mine = self.listed.get(here) or self.labels.get(folder) or ""
+
+        def said(url: str, label: str, ref: str) -> str:
+            twin = made_by_mccb(url) or (mine and norm_name(label) == norm_name(mine))
+            return (f"a {what} with the UID '{uid or name}' already exists in the {word} '{label}' ({ref}): the server "
+                    f"keeps one {what} per UID in the account. "
+                    + (f"'{label}' looks like a copy an earlier run made: check it, delete that {word} in the webmail, "
+                       "then rerun" if twin else
+                       f"Delete that copy (or '{label}' if it is a duplicate {word}) in the webmail, then rerun"))
+
+        others = [(u, label) for u, label in diag["colls"] if url_key(u) != here]
+        for url, label in others:  # the same resource name (mccb names an object after its UID)
+            names = diag["names"].get(url)
+            if names is None:
+                try:
+                    names = {n.casefold() for n in c.names(url)}
+                except DavError:
+                    names = set()
+                diag["names"][url] = names
+            if name.casefold() in names:
+                return said(url, label, url + name)
+        if not uid or not diag["query"]:
+            return None
+        for url, label in [(folder, mine or folder), *others]:  # the same UID under another name
+            try:
+                hrefs = c.find_uid(self.dav_kind, url, uid, self.component)
+            except DavError:
+                diag["query"] = False  # the server does not do it: not asked again for every item
+                return None
+            hrefs = [h for h in hrefs if not (url_key(url) == here and _last(h).casefold() == name.casefold())]
+            if hrefs:
+                if url_key(url) == here:
+                    return (f"a {what} with the UID '{uid}' is already in this {word} under another name ({hrefs[0]}): "
+                            "the server keeps one per UID. Delete that copy in the webmail, then rerun")
+                return said(url, label, hrefs[0])
+        return None
 
     def _remember(self, folder: str, name: str, mark: str = "") -> None:
         """Keeps the etag of a write. Without one in the answer, it is read (PROPFIND) only for the mirror
@@ -221,10 +368,19 @@ class DavSession(TargetSession):
             raise convert(e) from e
 
     def count_ours(self, folder: str, namespace: str, names: set[str] | None = None) -> int:
-        try:  # only OUR resources count, not pre-existing content
-            return len(self._c().names(folder) & (names or set()))
+        try:  # only OUR resources count, not pre-existing content; some servers do not keep the case of a name
+            there = {n.casefold() for n in self._c().names(folder)}
         except DavError as e:
             raise convert(e) from e
+        return len(there & {n.casefold() for n in names or ()})
+
+    def missing_ours(self, folder: str, names: set[str]) -> set[str]:
+        """Those of `names` the collection does not list (the check says which items are missing)."""
+        try:
+            there = {n.casefold() for n in self._c().names(folder)}
+        except DavError as e:
+            raise convert(e) from e
+        return {n for n in names if n.casefold() not in there}
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
         try:
@@ -278,6 +434,61 @@ class DavSession(TargetSession):
             raise convert(e) from e
         self._remember(folder, ref)  # the etag of the inventory stays: a second write without one gets 412
         return ref
+
+
+class Breaker:
+    """Items a collection refuses one after the other while it answers (the server is up, the PUTs fail): after
+    LIMIT of them in a row, the next items of that collection are not sent, their error says why (NOT_SENT); one in
+    PROBE still is, and a success closes the breaker. A server in trouble never trips it: its errors are temporary,
+    retried as usual. Shared by the sessions of a target, for one run."""
+    LIMIT = 20
+    PROBE = 25
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state: dict[str, dict] = {}
+
+    def blocked(self, folder: str) -> str | None:
+        with self.lock:
+            st = self.state.get(url_key(folder))
+            if st is None or st["streak"] < self.LIMIT:
+                return None
+            st["held"] += 1
+            if st["held"] % self.PROBE == 0:
+                return None  # one still goes: the cause may be gone
+            st["skipped"] += 1
+            return (f"{NOT_SENT}not sent: the {st['streak']} items before it in this collection were all refused while "
+                    f"it answers; rerun once the cause is fixed (last refusal: {st['why']})")
+
+    def failed(self, folder: str, why: str) -> bool:
+        """One more refusal; True when it trips the breaker."""
+        with self.lock:
+            st = self.state.setdefault(url_key(folder), {"streak": 0, "held": 0, "skipped": 0, "reported": 0,
+                                                         "why": ""})
+            st["streak"] += 1
+            st["why"] = why[:400]
+            return st["streak"] == self.LIMIT
+
+    def ok(self, folder: str) -> None:
+        with self.lock:
+            st = self.state.get(url_key(folder))
+            if st is not None:
+                st["streak"] = st["held"] = 0
+
+    def summary(self) -> list[tuple[str, int, str]]:
+        """[(collection, items not sent since the last summary, last refusal)]."""
+        out = []
+        with self.lock:
+            for k, st in self.state.items():
+                n = st["skipped"] - st["reported"]
+                if n > 0:
+                    st["reported"] = st["skipped"]
+                    out.append((k, n, st["why"]))
+        return out
+
+
+def _last(href: str) -> str:
+    return unquote(href.rstrip("/").rsplit("/", 1)[-1])
 
 
 def collection_slug(dav_kind: str, component: str, label: str) -> str:
@@ -439,9 +650,11 @@ class DavTarget(Target):
         self.secrets = secrets
         self.labels: dict[str, str] = {}
         self.listed: dict[str, str] = {}
+        self.breaker = Breaker()
 
     def session(self) -> DavSession:
-        session = DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels, self.listed)
+        session = DavSession(self.dav_kind, self.config, self.secrets, self.component, self.labels, self.listed,
+                             self.breaker)
         session.keep_versions = self.keep_versions
         return session
 
@@ -467,6 +680,45 @@ class CalDavTarget(DavTarget):
 
 
 # ------------------------------------------------------------------ source
+# how SmarterMail names the collections other accounts share with this one, and the public ones of the domain
+_SHARED_NAME = re.compile(r"^\[([^\]\s@]+@[^\]\s]+)\]\s*-\s*\S")
+_PUBLIC_NAME = re.compile(r"^\[(?:public|public folders?|öffentlich|publique?s?|pubblic[oa]|público)\]\s*-\s*(.*)$",
+                          re.I)
+
+
+def foreign_collections(rows: list[tuple[str, str, list[str]]], owners: dict, email: str) -> dict[str, str]:
+    """{url: why} of the collections of a source this account does not own. What the server says first (a
+    calendarserver.org "shared" mark, a DAV:owner other than the account's principal), then the names SmarterMail
+    gives them ("[compta@kmy.ch] - Calendrier", "[Public] - kmy.ch/Contacts"). The owners are believed only when
+    the server gives the account's own principal as the owner of at least one collection, and never when they
+    would leave none of the collections to the account: a server that says it another way loses nothing."""
+    cols = owners.get("collections") or {}
+    me = {url_key(p) for p in owners.get("principals") or ()}
+    comparable = any(url_key(c["owner"]) in me for c in cols.values() if c.get("owner"))
+    by_server: dict[str, str] = {}
+    for url, _label, _comps in rows:
+        c = cols.get(url) or cols.get(url.rstrip("/") + "/") or {}
+        if c.get("shared"):
+            by_server[url] = "shared with this mailbox by another account: migrated with its owner's mailbox"
+        elif comparable and c.get("owner") and url_key(c["owner"]) not in me:
+            by_server[url] = f"owned by another account ({c['owner']}): migrated with its owner's mailbox"
+    if len(by_server) == len(rows):
+        by_server = {}
+    out: dict[str, str] = {}
+    for url, label, _comps in rows:
+        m = _SHARED_NAME.match(label or "")
+        p = _PUBLIC_NAME.match(label or "")
+        if m and m.group(1).casefold() != (email or "").casefold():
+            out[url] = f"shared from {m.group(1)}: migrated with that mailbox"
+        elif p:
+            where = p.group(1).split("/")[0].strip()
+            out[url] = (f"public folder{f' of {where}' if where else ''}: it belongs to the domain, not to this "
+                        "mailbox")
+        elif url in by_server:
+            out[url] = by_server[url]
+    return out
+
+
 _SUMMARY = re.compile(rb"^(?:SUMMARY|FN)[^:\r\n]*:(.*)$", re.M)
 
 
@@ -494,22 +746,29 @@ class DavSource(Source):
         return self.client
 
     def folders(self) -> list[SourceFolder]:
+        """Every collection, each once per kind it holds. One this account does not own (shared with it by another
+        mailbox, a public folder of the domain) is listed with `skip`: it is migrated with its owner's mailbox, not
+        a second time with each mailbox it is shared with (DAV_INCLUDE_SHARED=1: migrated as the others)."""
+        from ..server.config import settings
         cfg = self.config
+        email = cfg.get("email") or cfg.get("login") or ""
         try:
-            rows = self._c().collections(self.dav_kind, cfg.get("url") or None, cfg.get("email") or cfg.get("login") or "",
-                                         cfg.get("discovery_host") or "")
+            rows, owners = self._c().source_collections(self.dav_kind, cfg.get("url") or None, email,
+                                                        cfg.get("discovery_host") or "")
         except DavError as e:
             raise convert(e) from e
+        foreign = foreign_collections(rows, owners, email)
         out: list[SourceFolder] = []
         for url, label, comps in rows:
             kinds = [CONTACTS] if self.dav_kind == "carddav" else [
                 k for k, c in ((CALENDAR, "VEVENT"), (TASKS, "VTODO")) if not comps or c in comps]
+            why = None if settings.dav_include_shared else foreign.get(url)
             for kind in kinds:
-                out.append(SourceFolder(path=[label], kind=kind, ref=url))
+                out.append(SourceFolder(path=[label], kind=kind, ref=url, skip=why))
         # the default one of each kind: by its name, else the first (default_index); never a list such as
-        # "Allowed Senders" because the server lists it first
+        # "Allowed Senders" because the server lists it first, nor a collection of another account
         for kind in (CALENDAR, TASKS, CONTACTS):
-            mine = [f for f in out if f.kind == kind]
+            mine = [f for f in out if f.kind == kind and not f.skip]
             i = default_index(kind, [f.path[0] for f in mine])
             if i is not None:
                 mine[i].special = "default"

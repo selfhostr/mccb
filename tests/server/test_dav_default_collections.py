@@ -46,6 +46,9 @@ def test_dav_source_marks_its_default_collection_by_name(monkeypatch):
             return [(H + "proj/", "Projets", ["VEVENT"]), (H + "cal/", "Calendrier", ["VEVENT", "VTODO"]),
                     (H + "todo/", "Courses", ["VTODO"])]
 
+        def source_collections(self, kind, *a):
+            return self.collections(kind), {}
+
     for kind, cls in (("carddav", cdav.CardDavSource), ("caldav", cdav.CalDavSource)):
         src = cls({"url": H, "login": "u"}, {"password": "p"})
         src.client = Fake()

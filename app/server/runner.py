@@ -185,6 +185,7 @@ class AppendResult:
     uid: str | None = None
     size: int = 0
     version: str | None = None  # TargetSession.written_version() of the write (items.target_etag)
+    note: str = ""              # what the target had to do to get it written (a second form of a DAV object...)
 
 
 class AppendPool:
@@ -1942,6 +1943,9 @@ class JobRunner:
                         return f"[{'temp' if ce.temporary else 'perm'}] {ce}"
                     self.log(f"{kind.upper()}: collection {url} missing, recreated", "warning")
                     continue
+                if e.status == 500 and attempt >= 1 and dav._probe(kind, url) is None:
+                    # 500 again while the collection answers: this object, not a server in trouble (SmarterMail)
+                    return f"[perm] {e} again while the collection answers: the server refuses this object"
                 if not e.temporary or attempt >= settings.max_retries:
                     return f"[{'temp' if e.temporary else 'perm'}] {e}"
                 # the server's own Retry-After (429, 503) when it gives one
