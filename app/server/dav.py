@@ -647,6 +647,21 @@ class DavClient:
         raise DavError(f"DELETE {url} -> HTTP {sc}", temporary=(sc >= 500 or sc == 429), status=sc,
                        retry_after=_retry_after(resp))
 
+    def delete_collection(self, collection_url: str) -> int:
+        """DELETE of a whole collection and what it holds (RFC 4918: always Depth infinity). The HTTP status: 2xx
+        (207 included: a multistatus may name members it could not delete, the caller checks the collection is gone),
+        404 gone already; any other answer raises."""
+        url = _slash(collection_url)
+        try:
+            resp = self._send("DELETE", url)
+        except httpx.HTTPError as e:
+            raise DavError(f"DELETE {url}: {e.__class__.__name__}: {e}", temporary=True) from e
+        sc = resp.status_code
+        if 200 <= sc < 300 or sc == 404:
+            return sc
+        raise DavError(f"DELETE {url} -> HTTP {sc}", temporary=(sc >= 500 or sc == 429), status=sc,
+                       retry_after=_retry_after(resp))
+
     # ---- duplicate search (dedup_runs.py) -------------------------------
     def etags(self, collection_url: str, strict: bool = False) -> dict[str, str]:
         """{absolute href: etag ('' when the server gives none)} of the non-collection resources. `strict`: see

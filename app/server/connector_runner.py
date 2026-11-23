@@ -16,10 +16,11 @@ from urllib.parse import unquote
 
 from ..connectors import registry, wiring
 from ..connectors import davfix
+from ..connectors.dav import SHARED
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
                                CAP_UPDATE, CALENDAR, CONTACTS, DELETE_HARD, MAIL, NOT_SENT, TASKS, ConnectorError,
                                MailboxSize, OutgoingItem, Target, TargetSession, stamp_import_id)
-from . import crash, db, foldermap, mailbox_size, ordering
+from . import crash, davcleanup, db, foldermap, mailbox_size, ordering
 from . import mirror as mm
 from . import policy as pol
 from .config import settings
@@ -174,6 +175,7 @@ class ConnectorJobRunner(JobRunner):
         self._src_flags: dict[str, dict[str, list[str]]] = {}  # folder key -> {item key: flags} of a full listing
         self._sizing: list[int] | None = None    # [bytes, messages] of the mail listing in progress (source size)
         self._uids: dict[tuple[str, str], tuple[str, str]] = {}  # DAV: (collection, UID) -> (resource name, subject)
+        self.shared_skipped: list[tuple[str, str, str]] = []  # (items kind, folder key, legacy key) of shared folders
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -280,6 +282,8 @@ class ConnectorJobRunner(JobRunner):
                     self.log(f"Folder '{folder_key(f.path)}' ({f.kind}) not migrated: {f.skip}")
                     self.report.setdefault("folders_skipped", []).append(
                         {"folder": folder_key(f.path), "kind": f.kind, "reason": f.skip})
+                    if f.special == SHARED:  # the copies an earlier version made of it go (davcleanup)
+                        self.shared_skipped.append((CARRIED[f.kind], folder_key(f.path), legacy_folder_key(f.path)))
                     # items of an earlier run are no longer part of the migration (nor of its checks)
                     db.ex("UPDATE items SET status='skipped', error=? WHERE account_id=? AND pst_key=? AND kind=? "
                           "AND folder IN (?, ?)", (f"not migrated: {f.skip}"[:2000], self.account_id, self.pst_key,
@@ -313,6 +317,7 @@ class ConnectorJobRunner(JobRunner):
             if MAIL in phases:
                 self._repair_flags()
             self.verify_targets(phases)
+            davcleanup.clean(self, phases)  # the collections earlier versions left on a DAV target
             if TASKS in phases:
                 self.report[TASKS] = dict(self.progress.get(TASKS) or {})
         finally:
@@ -416,8 +421,9 @@ class ConnectorJobRunner(JobRunner):
     def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str], plan_name: str) -> None:
         """DAV: the items an earlier run copied into another collection than the one the plan now gives their folder
         (the second "Contacts" an earlier version created) go to this one. Each is first looked up there by its
-        resource name: one already there is left as it is, never written over; the others are copied. The earlier
-        copies are never deleted: the log and the report name that collection, to delete by hand once checked."""
+        resource name: one already there is left as it is, never written over; the others are copied. That the items
+        were in the other collection is kept (davcleanup.record_moved): the end of the run deletes it once each of
+        them is in the new one, if mccb created it and nothing else is in it."""
         target = self.targets.get(PHASE_OF_KIND.get(kind, ""))
         if self.mode == "errors" or kind == MAIL or not getattr(target, "names_resources", False):
             return
@@ -428,15 +434,19 @@ class ConnectorJobRunner(JobRunner):
         was: dict[str, int] = {}
         for r in moved:
             was[r["target"]] = was.get(r["target"], 0) + 1
+        names = getattr(target, "listed", None) or {}
+        for old in was:  # before the rows forget it
+            davcleanup.record_moved(self.account_id, self.pst_key, old, names.get(_ukey(old)), {fkey})
+        for r in moved:
             db.ex("UPDATE items SET status='inflight', target=?, target_etag=NULL WHERE id=?", (plan_name, r["id"]))
             r["status"], r["target"] = "inflight", plan_name
-        names = getattr(target, "listed", None) or {}
         for old, n in was.items():
             name = names.get(_ukey(old))
             w = (f"collection_changed: {n} item(s) of '{fkey}' were copied by an earlier run into "
                  f"{f'{name!r} ' if name else ''}({old}); this folder now goes to {plan_name}: they are copied there "
-                 f"too (those already there are left as they are). The earlier copies are not deleted: once checked, "
-                 f"that collection can be deleted by hand if nothing else is in it")
+                 f"too (those already there are left as they are). At the end of the run, that collection is deleted "
+                 f"if mccb created it, each of them is then in {plan_name} and nothing else is in it; otherwise the log "
+                 f"says why it is kept")
             self.log(w, "warning")
             self.report["warnings"].append(w)
             self.report.setdefault("dav_moved", []).append(

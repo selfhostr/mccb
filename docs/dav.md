@@ -38,10 +38,34 @@ collection, still puts everything in that collection. The job log says where eac
 (`Target for contacts: 'Contacts' -> existing 'Contacts' (...)`).
 
 When the plan of a folder changed since an earlier run (an earlier version made a second "Contacts"), the next run
-copies its items into the collection it now goes to: an item already there (same resource name) is left as it is, the
-earlier copies are never deleted, and the log and the report name that collection (`collection_changed`, `dav_moved`)
-so that it can be deleted by hand once checked. The collection chosen is then kept for the next runs of the job. A
-mirror pass keeps updating and deleting each item where mccb wrote it.
+copies its items into the collection it now goes to: an item already there (same resource name) is left as it is, and
+the log and the report name the earlier collection (`collection_changed`, `dav_moved`). The collection chosen is then
+kept for the next runs of the job. A mirror pass keeps updating and deleting each item where mccb wrote it.
+
+### Collections earlier versions left behind
+
+At the end of a full run or of a final resync (never a mirror pass, never a rerun of the errors only), mccb deletes the
+collections earlier versions left on the target: that second "Contacts" (calendar, task list), and the copies of the
+collections shared by another mailbox or public, which are now left to their owner (see below; not with
+`DAV_INCLUDE_SHARED=1`). A collection is deleted only when:
+
+- mccb created it (an URL of its own, `mccb-...` or `import-pst-...`), no folder of the run goes to it, and no migrated
+  item of any mailbox is recorded in it;
+- every object in it, as the server lists it then, is a copy mccb made for this mailbox and no longer needs there: an
+  item recorded as moved out of it (by this version, or the `dav_moved` of an earlier report of the mailbox) that the
+  collection its folder now goes to lists, or an item of a shared folder that is no longer migrated.
+
+On a server that keeps one object per UID in the account (SmarterMail), the copy in the earlier collection is what
+keeps an item out of the new one (its error names that collection): such an item is moved first, deleted there then
+written into the new one, and written back where it was if the new one still refuses it.
+
+Anything else keeps the collection, with a `collection_kept` line in the log (and `dav_kept` in the report) saying why:
+an object added in the webmail, an item not yet in its new collection, an item gone from the source that only that
+collection still holds, a listing that failed. A collection the server or the user made is never touched. A copy of
+every object is kept under `mirror-trash/` before anything is deleted (purged after `MIRROR_TRASH_DAYS` days); the log
+names each deleted collection with its number of items, the report lists them (`dav_removed`: url, name, items,
+reason `moved` or `shared`, moved, backup), and the items rows and the choices of earlier runs that pointed at it are
+forgotten. The source is only read.
 
 Calendars that Outlook or Google generate and that cannot be edited (holidays, birthdays built from the contacts,
 internet subscriptions) are not migrated: the log names them.
@@ -69,8 +93,9 @@ some servers answer 500 to the condition; over it with `If-Match` when it is). I
 
 - an object of the same UID elsewhere in the account (same resource name in another collection, or an
   `addressbook-query` / `calendar-query` on the UID): SmarterMail keeps one per UID for the whole account. The log
-  names that collection, e.g. the second "Contacts" an earlier version made: delete it in the webmail once checked,
-  then rerun;
+  names that collection, e.g. the second "Contacts" an earlier version made. When mccb created it and it holds
+  only copies of this mailbox, the end of the run moves those items and deletes it (see above); otherwise delete it in
+  the webmail once checked, then rerun;
 - otherwise the object is written in a plainer form: a vCard 3.0 (a 4.0 card converted, FN and N added when
   missing, CRLF, lines folded at 75 octets, a photo over 256 KB left out), an iCalendar object with VERSION, PRODID
   and a DTSTAMP in each component; then without its X- and binary properties. The form that was written is logged and

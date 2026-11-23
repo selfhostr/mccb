@@ -45,7 +45,8 @@ class FakeSmarterMail:
     Like SmarterMail as seen in a real migration: one object per UID in the whole account (a second one, even in
     another collection, gets 500); 500 to If-None-Match over an existing resource (`inm_500`); 500 to a vCard 4.0 and
     to a "X-BOOM" property; 500 to "POISON" whatever its form; 409 to a collection name with "/" in it. `down`: every
-    request gets 500. `collapse`: a second object of a UID in one calendar replaces the first (kept once)."""
+    request gets 500. `collapse`: a second object of a UID in one calendar replaces the first (kept once). `refuse`:
+    paths whose PUT gets 500. DELETE of an object or of a collection."""
 
     HOME = "/dav/me/"
 
@@ -57,6 +58,7 @@ class FakeSmarterMail:
         self.collapse = False
         self.methods: list[tuple[str, str]] = []
         self.etag = 0
+        self.refuse: set[str] = set()  # paths whose PUT gets 500, whatever is sent
 
     def add(self, slug, name, kind="card", comp=None, owner=ME, shared=False, items=None):
         path = self.HOME + slug + "/"
@@ -156,6 +158,14 @@ class FakeSmarterMail:
                                  for n, b in col["items"].items() if _uid(b) == uid])
             folder, _, name = path.rpartition("/")
             col = self.cols.get(folder + "/")
+            if req.method == "DELETE":
+                if path in self.cols:
+                    del self.cols[path]
+                    return httpx.Response(204)
+                if col and name in col["items"]:
+                    del col["items"][name]
+                    return httpx.Response(204)
+                return httpx.Response(404)
             if req.method == "GET":
                 body = col["items"].get(name) if col else None
                 return httpx.Response(200, content=body) if body is not None else httpx.Response(404)
@@ -163,6 +173,8 @@ class FakeSmarterMail:
                 if col is None:
                     return httpx.Response(409)
                 body = req.content
+                if path in self.refuse:
+                    return httpx.Response(500)
                 if req.headers.get("if-none-match") == "*" and name in col["items"]:
                     return httpx.Response(500 if self.inm_500 else 412)
                 if b"POISON" in body or b"VERSION:4.0" in body or b"X-BOOM" in body:

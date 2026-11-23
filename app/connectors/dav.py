@@ -435,6 +435,84 @@ class DavSession(TargetSession):
         self._remember(folder, ref)  # the etag of the inventory stays: a second write without one gets 412
         return ref
 
+    # ---- collections an earlier run left behind (app/server/davcleanup.py)
+    def collections_now(self) -> list[tuple[str, str]]:
+        """[(url, display name)] of every collection of this kind of the account, as the server lists them now ([]
+        when the URL names one collection: there is no home to list)."""
+        default, home = self._discovery()
+        if home is None:
+            return []
+        try:
+            rows = self._c().listing(self.dav_kind, default, home)
+        except DavError as e:
+            raise convert(e) from e
+        return [(url, label) for url, label, _comps, _w in rows]
+
+    def resources(self, folder: str) -> dict[str, str]:
+        """{name: etag} of every resource of the collection, whoever wrote it. Complete or an error: a listing the
+        server says it cut short raises. The etags are kept: delete() of one of them goes with If-Match."""
+        try:
+            found = self._c().names_etags(folder, strict=True)
+        except DavError as e:
+            raise convert(e) from e
+        for name, et in found.items():
+            if et:
+                self._etags[(folder, name)] = et
+        return found
+
+    def contents(self, folder: str, names: list[str]) -> dict[str, bytes]:
+        """{name: object as the server gives it} of these resources (one GET each: the exact bytes). A resource gone
+        since its listing is left out."""
+        c = self._c()
+        out: dict[str, bytes] = {}
+        try:
+            for n in names:
+                text = c.get(folder, n)
+                if text is not None:
+                    out[n] = text.encode("utf-8")
+        except DavError as e:
+            raise convert(e) from e
+        return out
+
+    def restore(self, folder: str, name: str, raw: bytes) -> None:
+        """Writes an object back where it was (after a move that failed), without condition: it was just deleted."""
+        try:
+            self._c().put(folder, name, raw.decode("utf-8", "replace"), self.dav_kind)
+        except DavError as e:
+            raise convert(e) from e
+
+    def delete_collection(self, url: str) -> str:
+        """Deletes the collection `url` with everything in it. "deleted", or "gone" when it was not there (404). A
+        500 is tried once more a moment later, unless the collection went anyway (SmarterMail answers 500 to some
+        requests it carried out). Gone is checked afterwards: a 2xx that leaves the collection there (a multistatus
+        naming members it could not delete) is an error, never taken for done."""
+        c = self._c()
+        try:
+            try:
+                sc = c.delete_collection(url)
+            except DavError as e:
+                if e.status != 500:
+                    raise
+                time.sleep(self.ITEM_RETRY_DELAY)
+                if c._probe(self.dav_kind, url) in (404, 410):
+                    return "deleted"
+                sc = c.delete_collection(url)
+        except DavError as e:
+            if e.status in (403, 405, 409):  # signed in already: a refusal of this deletion, not a bad password
+                raise ConnectorError(f"the server refuses to delete it ({e})", ConnectorError.REJECTED) from e
+            raise convert(e) from e
+        if sc == 404:
+            return "gone"
+        state = c._probe(self.dav_kind, url)
+        if state is None:
+            raise ConnectorError(f"DELETE {url} -> HTTP {sc}, but the collection is still there",
+                                 ConnectorError.REJECTED)
+        if state in (404, 410, 207):  # 207: what answers there is no such collection any more
+            return "deleted"
+        raise ConnectorError(f"DELETE {url} -> HTTP {sc}, then the collection does not answer (PROPFIND -> "
+                             f"{f'HTTP {state}' if state else 'no answer'}): not known whether it is gone",
+                             ConnectorError.TRANSIENT)
+
 
 class Breaker:
     """Items a collection refuses one after the other while it answers (the server is up, the PUTs fail): after
@@ -681,6 +759,7 @@ class CalDavTarget(DavTarget):
 
 # ------------------------------------------------------------------ source
 # how SmarterMail names the collections other accounts share with this one, and the public ones of the domain
+SHARED = "shared"  # SourceFolder.special of a collection the account does not own (skipped)
 _SHARED_NAME = re.compile(r"^\[([^\]\s@]+@[^\]\s]+)\]\s*-\s*\S")
 _PUBLIC_NAME = re.compile(r"^\[(?:public|public folders?|öffentlich|publique?s?|pubblic[oa]|público)\]\s*-\s*(.*)$",
                           re.I)
@@ -763,8 +842,8 @@ class DavSource(Source):
             kinds = [CONTACTS] if self.dav_kind == "carddav" else [
                 k for k, c in ((CALENDAR, "VEVENT"), (TASKS, "VTODO")) if not comps or c in comps]
             why = None if settings.dav_include_shared else foreign.get(url)
-            for kind in kinds:
-                out.append(SourceFolder(path=[label], kind=kind, ref=url, skip=why))
+            for kind in kinds:  # special "shared": the copies an earlier version made of it are removed (davcleanup)
+                out.append(SourceFolder(path=[label], kind=kind, ref=url, skip=why, special=SHARED if why else None))
         # the default one of each kind: by its name, else the first (default_index); never a list such as
         # "Allowed Senders" because the server lists it first, nor a collection of another account
         for kind in (CALENDAR, TASKS, CONTACTS):
