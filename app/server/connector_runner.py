@@ -15,9 +15,10 @@ from datetime import timezone
 from urllib.parse import unquote
 
 from ..connectors import registry, wiring
+from ..connectors import davfix
 from ..connectors.base import (CAP_DELETE, CAP_INCREMENTAL, CAP_MOVE, CAP_PARALLEL, CAP_READBACK, CAP_SET_FLAGS,
-                               CAP_UPDATE, CALENDAR, DELETE_HARD, MAIL, TASKS, ConnectorError, FolderPlan, MailboxSize,
-                               OutgoingItem, Target, TargetSession, stamp_import_id)
+                               CAP_UPDATE, CALENDAR, CONTACTS, DELETE_HARD, MAIL, NOT_SENT, TASKS, ConnectorError,
+                               MailboxSize, OutgoingItem, Target, TargetSession, stamp_import_id)
 from . import crash, db, foldermap, mailbox_size, ordering
 from . import mirror as mm
 from . import policy as pol
@@ -32,6 +33,8 @@ DAV_EXT = {"calendar": "ics", "contacts": "vcf", TASKS: "ics"}
 # tasks only exist on this route: the historical path, its progress and its reports know three kinds
 CARRIED = {**KIND_OF_PHASE, TASKS: "task"}
 PHASE_OF_KIND = {kind: phase for phase, kind in CARRIED.items()}
+COLLECTIONS = {CALENDAR: "calendars", CONTACTS: "address books", TASKS: "task lists"}
+SAME_UID = "same_uid: "  # first words of the warning of an item whose UID another item of its collection has
 
 
 def _pin_key(account_id: int, pst_key: str, phase: str) -> str:
@@ -109,7 +112,8 @@ class TargetPool(AppendPool):
                         return AppendResult(t.item_id, True, uid=found[0], size=t.size, msg="already present")
                 uid = session.put(t.target, item)
                 return AppendResult(t.item_id, True, uid=uid, size=t.size,
-                                    version=session.written_version(t.target, uid) if uid else None)
+                                    version=session.written_version(t.target, uid) if uid else None,
+                                    note=getattr(session, "last_note", "") or "")
             except Exception as e:  # noqa: BLE001 - classified, reported per item
                 err = as_connector_error(e)
                 if err.kind != ConnectorError.FOLDER_MISSING:
@@ -169,6 +173,7 @@ class ConnectorJobRunner(JobRunner):
         self._deferring = False
         self._src_flags: dict[str, dict[str, list[str]]] = {}  # folder key -> {item key: flags} of a full listing
         self._sizing: list[int] | None = None    # [bytes, messages] of the mail listing in progress (source size)
+        self._uids: dict[tuple[str, str], tuple[str, str]] = {}  # DAV: (collection, UID) -> (resource name, subject)
         if not self.acc:
             return
         self.source_kind = wiring.source_kind(self.acc)
@@ -273,6 +278,8 @@ class ConnectorJobRunner(JobRunner):
             for f in self.folders:
                 if f.skip and f.kind in CARRIED and self._wanted(f.kind):
                     self.log(f"Folder '{folder_key(f.path)}' ({f.kind}) not migrated: {f.skip}")
+                    self.report.setdefault("folders_skipped", []).append(
+                        {"folder": folder_key(f.path), "kind": f.kind, "reason": f.skip})
                     # items of an earlier run are no longer part of the migration (nor of its checks)
                     db.ex("UPDATE items SET status='skipped', error=? WHERE account_id=? AND pst_key=? AND kind=? "
                           "AND folder IN (?, ?)", (f"not migrated: {f.skip}"[:2000], self.account_id, self.pst_key,
@@ -516,25 +523,13 @@ class ConnectorJobRunner(JobRunner):
         pool = None
         try:
             folders = [f for f in self.folders if f.kind == phase]
+            uncreated: set[str] = set()  # DAV collections still to create: only once their folder has items
             for f in folders:
                 fk = folder_key(f.path)
-                p = plan[fk]
-                try:
-                    if p.label:  # a DAV collection to create under the name of the source folder
-                        self._on_session(session, lambda: session.ensure_folder(p.name, p.flag, label=p.label))
-                    else:
-                        self._on_session(session, lambda: session.ensure_folder(p.name, p.flag))
-                except ConnectorError as e:
-                    if e.kind != ConnectorError.REJECTED:
-                        raise JobFailed(f"Target ({phase}): {e}") from e
-                    if p.fallback:
-                        plan[fk] = FolderPlan(p.fallback)
-                        self.log(f"Folder '{fk}': the target refused to create '{p.label or p.name}' ({e}): its "
-                                 f"items go to {p.fallback}", "warning")
-                        continue
-                    # refused: only the items of this folder are in error, the mailbox continues
-                    self.folder_errors[fk] = f"folder '{plan[fk].name}' not created: {e}"
-                    self.log(f"Folder '{fk}': {self.folder_errors[fk]}", "error")
+                if plan[fk].label:
+                    uncreated.add(fk)
+                else:
+                    self._ensure_folder(session, phase, plan, fk)
             parallel = CAP_PARALLEL in target.capabilities
             pool = TargetPool(target, self.connections if parallel else 1, self._should_stop)
             pool.limiter = self._limiter
@@ -550,6 +545,11 @@ class ConnectorJobRunner(JobRunner):
                     listed = self._list_folder(session, f, kind, self._folder_index(f), plan[fk].name)
                 except ConnectorError as e:
                     raise JobFailed(f"Source ({self.source_kind}): {e}") from e
+                if fk in uncreated and listed:
+                    uncreated.discard(fk)
+                    self._ensure_folder(session, phase, plan, fk)
+                elif fk in uncreated and not f.count:
+                    self.log(f"Folder '{fk}': nothing to copy, the collection '{plan[fk].label}' is not created")
                 if fk in self.folder_errors:
                     for _sv, key, _fi, it in listed:
                         self.upsert_item(kind, key, fk, "error", target=plan[fk].name, error=self.folder_errors[fk],
@@ -572,6 +572,7 @@ class ConnectorJobRunner(JobRunner):
                 self._tune_tick(pool)
                 self._migrate_item(self.folders[fi], kind, phase, key, it, plan, pool)
             self._wait_pool(pool)
+            self._say_not_sent(target)
             if self._deferred:  # items waiting for the write of another item of the same resource name
                 waiting, self._deferred = self._deferred, []
                 self._deferring = True
@@ -582,17 +583,18 @@ class ConnectorJobRunner(JobRunner):
                     self._wait_pool(pool)
                 finally:
                     self._deferring = False
+                self._say_not_sent(target)
             self._mark()
             self.check()
             # everything listed is now recorded: the next delta pass may start from these cursors
             for ckey, cursor in self._cursors.items():
                 db.kv_set(ckey, cursor)
             self._cursors.clear()
-            # one check per target folder: several source folders may share it (e.g. DAV fallback)
+            # one check per target folder: several source folders may share it (e.g. one default collection)
             shared: dict[str, list[str]] = {}
             for f in folders:
                 fk = folder_key(f.path)
-                if fk not in self.folder_errors:
+                if fk not in self.folder_errors and not (fk in uncreated and not f.count):  # empty, never created
                     shared.setdefault(plan[fk].name, []).append(fk)
             for target_name, fks in shared.items():
                 self._check_target(session, phase, fks, target_name)
@@ -609,6 +611,58 @@ class ConnectorJobRunner(JobRunner):
             session.close()
         self.current_folder = None
         self.flush(force=True)
+
+    def _ensure_folder(self, session, phase: str, plan: dict, fk: str) -> None:
+        """The target folder of `fk` exists (created when it has to be). Refused: a folder error, said once, and its
+        items are in error with that reason; never put in another collection (the separation of the source is
+        kept). Any other failure ends the job."""
+        p = plan[fk]
+        try:
+            if p.label:  # a DAV collection to create under the name of the source folder
+                self._on_session(session, lambda: session.ensure_folder(p.name, p.flag, label=p.label))
+            else:
+                self._on_session(session, lambda: session.ensure_folder(p.name, p.flag))
+        except ConnectorError as e:
+            if e.kind != ConnectorError.REJECTED:
+                raise JobFailed(f"Target ({phase}): {e}") from e
+            if p.label:
+                what = COLLECTIONS.get(phase, "collections")
+                self.folder_errors[fk] = (f"the target refuses to create {what}: create '{p.label}' in the webmail "
+                                          f"then rerun ({e})")
+            else:  # refused: only the items of this folder are in error, the mailbox continues
+                self.folder_errors[fk] = f"folder '{p.name}' not created: {e}"
+            self.log(f"Folder '{fk}': {self.folder_errors[fk]}", "error")
+            return
+        renamed = (getattr(session, "renamed", None) or {}).get(p.name)
+        if renamed:
+            self.log(f"Folder '{fk}': the target refused the name '{p.label}', the collection is named '{renamed}'",
+                     "warning")
+
+    def _say_not_sent(self, target) -> None:
+        """One line per collection whose items were not sent because it refused every one before them."""
+        breaker = getattr(target, "breaker", None)
+        for coll, n, why in breaker.summary() if breaker is not None else []:
+            msg = (f"{n} item(s) for {coll} not sent: the collection refused every item in a row while it answers "
+                   f"(last refusal: {why}). They are in error: rerun once the cause is fixed")
+            self.log(msg, "error")
+            self.report["warnings"].append(msg)
+
+    def _handle_results(self, results) -> None:
+        """Items a DAV target did not send (NOT_SENT): in error without a line each (_say_not_sent says it once).
+        Written with a note (a second form of the object): the note is logged and kept with the item."""
+        rest = []
+        for r in results:
+            if not r.ok and r.msg.startswith(NOT_SENT):
+                self._inflight_bytes.pop(r.item_id, None)
+                self.set_item(r.item_id, "error", f"[{r.kind}] {r.msg[len(NOT_SENT):]}")
+                continue
+            if r.ok and r.note:
+                row = db.q1("SELECT warnings, subject FROM items WHERE id=?", (r.item_id,))
+                notes = (db.jload(row["warnings"], []) or []) if row else []
+                db.ex("UPDATE items SET warnings=? WHERE id=?", (db.jdump([*notes, r.note]), r.item_id))
+                self._item_log(f"Item {r.item_id} ('{row['subject'] if row else ''}'): {r.note}", "warning")
+            rest.append(r)
+        super()._handle_results(rest)
 
     def _warn_quota(self, phase: str, entries: list) -> None:
         free = getattr(self, "_free_bytes", None)
@@ -686,9 +740,17 @@ class ConnectorJobRunner(JobRunner):
                 return
         if self._size_gate(kind, key, fkey, len(raw), got.subject, target, it.alt_key):
             return
-        warnings = db.jdump(got.warnings) if got.warnings else None
-        if got.warnings:
-            self.log(f"Warning '{got.subject}': {', '.join(got.warnings)}", "warning")
+        notes = list(got.warnings or [])
+        if kind != MAIL and getattr(self.targets[phase], "names_resources", False):
+            uid = davfix.object_uid(raw)
+            seen = self._uids.setdefault((_ukey(target), uid), (name, got.subject)) if uid else None
+            if seen is not None and seen[0].casefold() != name.casefold():
+                # two objects of one UID under two names: a server that keeps one per UID keeps only one of them
+                notes.append(f"{SAME_UID}UID '{uid}' also has '{seen[1]}' ({seen[0]}) in this collection: the "
+                             "server may keep only one of them")
+        warnings = db.jdump(notes) if notes else None
+        if notes:
+            self.log(f"Warning '{got.subject}': {', '.join(notes)}", "warning")
         item_id = self.upsert_item(kind, key, fkey, "inflight", target=target, subject=got.subject, hash=mark,
                                    size=len(raw), warnings=warnings, source_ref=it.alt_key,
                                    version=mm.version_of(phase, it), src_ref=mm.ref_json(it.ref))
@@ -1052,18 +1114,21 @@ class ConnectorJobRunner(JobRunner):
         n_ok = db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind=? AND target=? AND "
                      "status='ok'", where)["n"]
         names = None
+        rows = []
         if kind != MAIL:
-            named = [r["hash"] for r in db.q("SELECT hash FROM items WHERE account_id=? AND pst_key=? AND kind=? AND "
-                                             "target=? AND status='ok' AND hash IS NOT NULL", where)]
-            names = set(named)
+            rows = db.q("SELECT hash, subject, warnings FROM items WHERE account_id=? AND pst_key=? AND kind=? AND "
+                        "target=? AND status='ok' AND hash IS NOT NULL", where)
+            names = {r["hash"] for r in rows}
             # one resource per name: the same UID in two source folders sent to one collection is one item there
-            n_ok -= len(named) - len(names)
+            n_ok -= len(rows) - len({n.casefold() for n in names})
         try:
             present = self._on_session(session, lambda: session.count_ours(target, self.pst_key, names))
         except ConnectorError as e:
             present = None
-            self.log(f"Cannot count {target}: {e}", "warning")
-        ok = present is not None and present >= n_ok
+            self.log(f"Cannot count {target}: {e}", "warning" if n_ok else "info")
+        ok = (present is not None and present >= n_ok) or (present is None and n_ok == 0)  # nothing sent: nothing due
+        if not ok and present is not None and names and hasattr(session, "missing_ours"):
+            ok = self._explain_missing(session, label, target, rows, names, present, n_ok)
         entry = {"path": self._path_of(fkey), "folder": fkey, "target": target, "sent": n_ok, "present": present,
                  "ok": ok}
         if len(fkeys) > 1:
@@ -1083,6 +1148,30 @@ class ConnectorJobRunner(JobRunner):
             where = "" if phase == MAIL else f" -> {target}"
             self.log(f"Folder check {label}{where}: {present} present < {n_ok} sent", "error")
         return entry
+
+    def _explain_missing(self, session, label: str, target: str, rows: list, names: set[str], present: int,
+                         n_ok: int) -> bool:
+        """A DAV collection holds fewer of our objects than were sent: which ones are missing, said in the log. When
+        no more are missing than objects were sent there with the UID of another one (SAME_UID: a server that keeps
+        one per UID keeps one of the two, either), the count is right for that server: True (said, not a
+        verification problem)."""
+        try:
+            missing = self._on_session(session, lambda: session.missing_ours(target, names))
+        except ConnectorError:
+            return False
+        if not missing:
+            return False
+        same = [w[len(SAME_UID):] for r in rows for w in (db.jload(r["warnings"], []) or [])
+                if isinstance(w, str) and w.startswith(SAME_UID)]
+        if same and len(missing) <= len(same) and present + len(same) >= n_ok:
+            self.log(f"Folder check {label} -> {target}: {present} present for {n_ok} sent: {len(same)} object(s) "
+                     f"share their UID with another one and the server keeps one per UID ({'; '.join(same[:5])})")
+            return True
+        by_name = {r["hash"]: r for r in rows}
+        shown = ", ".join(f"'{by_name[n]['subject'] if n in by_name else ''}' ({n})" for n in sorted(missing)[:10])
+        self.log(f"Folder check {label} -> {target}: missing on the target: {shown}"
+                 + (f" and {len(missing) - 10} more" if len(missing) > 10 else ""), "warning")
+        return False
 
     def verify_targets(self, phases: list[str]) -> None:
         self.set_phase("verify")

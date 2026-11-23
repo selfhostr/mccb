@@ -47,6 +47,9 @@ class Settings:
         self.mirror_trash_days = max(0, _int("MIRROR_TRASH_DAYS", 30))
         # mirror: max_delete_percent applies only above this many deletions of a kind in one pass
         self.mirror_min_delete_count = max(0, _int("MIRROR_MIN_DELETE_COUNT", 10))
+        # 1 = a CalDAV/CardDAV source also brings the collections other accounts share with it and the public ones
+        # (default: left out, each is migrated with the mailbox that owns it)
+        self.dav_include_shared = os.environ.get("DAV_INCLUDE_SHARED", "0") == "1"
 
     @property
     def db_path(self) -> Path:

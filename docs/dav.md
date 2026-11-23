@@ -27,9 +27,13 @@ to an existing collection when there is one for it:
 - the lists some servers keep as address books (SmarterMail "Allowed Senders" and "Blocked Senders") go to the list of
   the same role under the target's language ("Expéditeurs autorisés", "Erlaubte Absender"...).
 
-With none, a collection named after the source folder is created; if the server refuses, the log says so and its
-items go to the default collection. A name the target already has is never created a second time, and a collection
-the server listed is never created over itself. A PST written to the DAV of its server, or a URL that names one
+With none, a collection named after the source folder is created, only when that folder has something to copy (an
+empty one is neither created nor checked). CalDAV tries MKCALENDAR then an extended MKCOL (RFC 5689), CardDAV an
+extended MKCOL; a name with "/" in it (a sub-list at the source, `Tâches/24me`), which SmarterMail reads as a path and
+refuses (409), is tried again as `Tâches - 24me`, and the log says so. If the server still refuses, the log says it
+once for the folder (`the target refuses to create task lists: create 'Tâches/24me' in the webmail then rerun`) and
+its items are in error with that reason: they never go into another collection. A name the target already has is
+never created a second time, and a collection the server listed is never created over itself. A PST written to the DAV of its server, or a URL that names one
 collection, still puts everything in that collection. The job log says where each folder goes
 (`Target for contacts: 'Contacts' -> existing 'Contacts' (...)`).
 
@@ -49,4 +53,33 @@ are written as `mailto:` members, as `EMAIL` lines and in the note, so that clie
 Objects are written as `<UID>.ics` or `<UID>.vcf` when their UID is safe as a file name, as some servers (MDaemon)
 store them under that name whatever the URL of the write.
 
-As a source, the `caldav` and `carddav` connectors read every collection of the mailbox, each object as it is on the server.
+As a source, the `caldav` and `carddav` connectors read every collection of the mailbox, each object as it is on the
+server. A collection the mailbox does not own is left out, with a line in the log and an entry in the report
+(`folders_skipped`): it is migrated with the mailbox that owns it, not once more with every mailbox it is shared with.
+That is what the server says (a calendarserver.org `shared` mark, a `DAV:owner` other than the account's principal),
+then the names SmarterMail gives them: `[compta@kmy.ch] - Calendrier` (shared by another mailbox) and
+`[Public] - kmy.ch/Contacts` (public folders of the domain). `DAV_INCLUDE_SHARED=1` migrates them as the others.
+
+## Errors of the target
+
+A server that answers 500 to one object is not taken for a server in trouble at once (SmarterMail does it every time
+for some objects). The object is tried once more a moment later (without `If-None-Match` when it is not there, as
+some servers answer 500 to the condition; over it with `If-Match` when it is). If the collection still answers
+(PROPFIND) the problem is that object, and it fails in a few seconds instead of a minute of retries, with a reason:
+
+- an object of the same UID elsewhere in the account (same resource name in another collection, or an
+  `addressbook-query` / `calendar-query` on the UID): SmarterMail keeps one per UID for the whole account. The log
+  names that collection, e.g. the second "Contacts" an earlier version made: delete it in the webmail once checked,
+  then rerun;
+- otherwise the object is written in a plainer form: a vCard 3.0 (a 4.0 card converted, FN and N added when
+  missing, CRLF, lines folded at 75 octets, a photo over 256 KB left out), an iCalendar object with VERSION, PRODID
+  and a DTSTAMP in each component; then without its X- and binary properties. The form that was written is logged and
+  kept in the warnings of the item.
+
+A server that does not answer the PROPFIND either is in trouble: its errors are retried as before. When 20 objects in
+a row are refused by a collection that answers, the next ones of that collection are not sent (one in 25 still is: a
+success sends the rest again): they are in error, with one line in the log for the collection.
+
+Two objects of one UID under two resource names (a UID not safe as a file name), in one collection, are said in the
+log when they are written; a server that keeps only one of them is not a verification problem. A collection that
+holds fewer of our objects than were sent names the missing ones in the log.

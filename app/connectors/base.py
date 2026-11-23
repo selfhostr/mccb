@@ -16,6 +16,9 @@ from typing import Any, Iterator
 IMPORT_HEADER = "X-PST-Import-Id"
 
 MAIL, CALENDAR, CONTACTS, TASKS = "mail", "calendar", "contacts", "tasks"
+# first words of the error of an item a target did not even send (a collection refusing every item in a row): the
+# runner records it on the item without a log line of its own, and says it once for the collection
+NOT_SENT = "not_sent: "
 ITEM_KINDS = (MAIL, CALENDAR, CONTACTS, TASKS)
 
 # capabilities (declared in the catalogue, read by the runner and the UI; unknown ones are simply displayed)
@@ -132,7 +135,6 @@ class FolderPlan:
     name: str                     # target folder identifier (IMAP mailbox name, DAV collection URL...)
     flag: str | None = None       # special-use flag to ask for when creating it
     label: str | None = None      # display name to give the folder when it is created (DAV collections)
-    fallback: str | None = None   # where its items go if the target refuses to create it (DAV: the default collection)
 
 
 @dataclass
