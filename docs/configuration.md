@@ -33,6 +33,7 @@ All variables are optional. Set them in `.env` (see [`.env.example`](https://git
 | `FETCH_PARALLEL` | `2` | Simultaneous server-side transfers (drop folder registrations and downloads). |
 | `MIRROR_MIN_DELETE_COUNT` | `10` | Mirror: `max_delete_percent` applies only above this many deletions of a kind in one pass (the `min_delete_count` of a request overrides it). |
 | `DAV_INCLUDE_SHARED` | `0` | `1` = a CalDAV/CardDAV source also brings the calendars and address books other accounts share with the mailbox and the public ones of the domain. By default they are left out (the log says so): each is migrated with the mailbox that owns it. See [Calendars and contacts](dav.md). |
+| `IMAP_INCLUDE_SHARED` | `0` | `1` = an IMAP source also brings the folders other mailboxes share with it (other users' namespace, e.g. SmarterMail `Shared Folders/<owner>/...`) and its public folders, copied into the mailbox as its own folders. By default they are left out (the log says so): each is migrated with the mailbox that owns it. |
 | `MIRROR_TRASH_DAYS` | `30` | Days the copies kept by the mirror before a final deletion stay in `DATA_DIR/mirror-trash/` (removed by the worker, never while a job runs). `0` keeps them for ever. |
 | `FETCH_BLOCK_PRIVATE` | `0` | `1` = also refuse private ranges and loopback as fetch sources. Link-local and metadata addresses are always refused. |
 | `FETCH_ALLOW_LINK_LOCAL` | `0` | `1` = allow link-local addresses as fetch sources. Not recommended. |

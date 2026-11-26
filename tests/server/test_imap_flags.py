@@ -316,5 +316,69 @@ def test_a_target_that_keeps_no_flag_at_all_is_reported(client, env, dropping_ap
     j = run_inproc(client, jid)
     assert j["status"] == "done", _log(client, jid)
     rep = client.get(f"/api/jobs/{jid}/report").json()
-    assert rep["flags"] == {"checked": 10, "fixed": 10, "not_kept": 10}
+    assert rep["flags"] == {"checked": 10, "fixed": 10, "not_kept": 10, "not_found": 0, "folders": 2}
     assert any("did not keep the flags" in w for w in rep["warnings"])
+
+
+def test_a_target_whose_header_search_finds_nothing_is_repaired(client, env, dropping_append, monkeypatch):
+    """A server that does not index X-PST-Import-Id (SEARCH HEADER: no hit): every header of the folder is read and
+    compared here instead, and the copies still get their flags; a mail of the owner is still never touched."""
+    aid, src, dst = setup_route(client)
+    seed(src)
+    c = imap_conn(dst)
+    try:
+        c.append("INBOX", msg("native unread"), [], WHEN)
+    finally:
+        c.close()
+    dropping_append.add(dst)
+    real_search, real_add = ImapConn.search_header, ImapConn.add_missing_flags
+
+    def add(self, *a):
+        self.blind = self.p.login == dst
+        try:
+            return real_add(self, *a)
+        finally:
+            self.blind = False
+    monkeypatch.setattr(ImapConn, "add_missing_flags", add)
+    monkeypatch.setattr(ImapConn, "search_header", lambda self, name, header, value: (
+        [] if getattr(self, "blind", False) else real_search(self, name, header, value)))
+    jid = run(client, aid)
+    j = run_inproc(client, jid)
+    assert j["status"] == "done", _log(client, jid)
+    assert_flags(dst, expected(), keywords=False)
+    assert flags_of(dst)["INBOX"]["native unread"] == set()
+    rep = client.get(f"/api/jobs/{jid}/report").json()
+    assert rep["flags"]["fixed"] == 10 and rep["flags"]["not_found"] == 0
+    assert "Read, answered and starred state: 10 of our mail(s) checked" in _log(client, jid)
+
+
+def test_a_mail_read_at_the_source_during_the_pass_arrives_read(client, env, monkeypatch, guarded_source):
+    """The listing is taken when the pass starts; a long pass reads the flags of the source again before the
+    repair: a mail read at the source meanwhile arrives read."""
+    from app.server import connector_runner as cr
+    aid, src, dst = setup_route(client)
+    seed(src)
+    monkeypatch.setattr(cr, "FLAGS_FRESH_SECONDS", -1)  # every listing counts as old
+    real = cr.ConnectorJobRunner._repair_flags
+
+    def repair(self):
+        store(src, "INBOX", "new", "+", "\\Seen")  # read in the webmail of the source while the job ran
+        return real(self)
+    monkeypatch.setattr(cr.ConnectorJobRunner, "_repair_flags", repair)
+    jid = run(client, aid)
+    j = run_inproc(client, jid)
+    assert j["status"] == "done", _log(client, jid)
+    assert flags_of(dst)["INBOX"]["new"] == {"\\Seen"}
+
+
+def test_rerun_logs_the_flag_check_even_when_nothing_is_missing(client, env):
+    aid, src, dst = setup_route(client)
+    seed(src)
+    jid = run(client, aid)
+    assert run_inproc(client, jid)["status"] == "done"
+    assert client.post(f"/api/jobs/{jid}/retry").status_code == 200
+    j = run_inproc(client, jid)
+    assert j["status"] == "done", _log(client, jid)
+    rep = client.get(f"/api/jobs/{jid}/report").json()
+    assert rep["flags"] == {"checked": 10, "fixed": 0, "not_kept": 0, "not_found": 0, "folders": 2}
+    assert "10 of our mail(s) checked against the source in 2 target folder(s), 0 given" in _log(client, jid)

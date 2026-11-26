@@ -50,6 +50,10 @@ class Settings:
         # 1 = a CalDAV/CardDAV source also brings the collections other accounts share with it and the public ones
         # (default: left out, each is migrated with the mailbox that owns it)
         self.dav_include_shared = os.environ.get("DAV_INCLUDE_SHARED", "0") == "1"
+        # 1 = an IMAP source also brings the folders other mailboxes share with it (other users' namespace, e.g.
+        # SmarterMail "Shared Folders/<owner>/...") and the public ones, copied into it as its own folders
+        # (default: left out, each is migrated with the mailbox that owns it)
+        self.imap_include_shared = os.environ.get("IMAP_INCLUDE_SHARED", "0") == "1"
 
     @property
     def db_path(self) -> Path:
