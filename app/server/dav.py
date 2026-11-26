@@ -1,6 +1,7 @@
 """Minimal CalDAV / CardDAV client (sync, httpx + xml.etree)."""
 from __future__ import annotations
 
+import codecs
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import quote, unquote, urljoin
@@ -53,6 +54,55 @@ def expand_template(template: str, email: str, login: str) -> str:
         .replace("{domain}", domain)
         .replace("{login}", login)
     )
+
+
+_CHARSET_PARAM = re.compile(rb";\s*CHARSET=\"?([A-Za-z0-9_.:-]+)\"?", re.I)
+_QP_PARAM = re.compile(rb";\s*(?:ENCODING=)?QUOTED-PRINTABLE\b", re.I)
+
+
+def _codec(name: bytes) -> str | None:
+    try:
+        return codecs.lookup(name.decode("ascii")).name
+    except (LookupError, UnicodeDecodeError):
+        return None
+
+
+def _cp1252(raw: bytes) -> str:
+    """cp1252, its 5 undefined bytes kept as latin-1 (nothing is lost)."""
+    return "".join(chr(b) if b in (0x81, 0x8D, 0x8F, 0x90, 0x9D) else bytes((b,)).decode("cp1252") for b in raw)
+
+
+def decode_object(raw: bytes) -> str:
+    """The text of a vCard or an iCalendar object from its bytes, whatever the Content-Type of the answer says (a
+    charset there is often wrong or missing, and a default such as ISO-8859-1 turns "é" into "Ã©"). UTF-8 when it is
+    valid UTF-8 (RFC 6350 / 5545: the only charset of these formats). Otherwise each line that is not, in its own
+    CHARSET parameter (vCard 2.1; the parameter is then dropped: the text goes on in UTF-8), else in cp1252, the
+    charset older Windows clients wrote these objects in. A quoted-printable value is ASCII: left as it is, with its
+    CHARSET (it says what its bytes are)."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    out = []
+    for line in raw.splitlines(keepends=True):
+        try:
+            out.append(line.decode("utf-8"))
+            continue
+        except UnicodeDecodeError:
+            pass
+        head = line.split(b":", 1)[0]
+        m = _CHARSET_PARAM.search(head)
+        codec = _codec(m.group(1)) if m else None
+        if codec is not None and not _QP_PARAM.search(head):
+            try:
+                out.append(line.decode(codec).replace(m.group(0).decode("ascii"), "", 1))
+                continue
+            except UnicodeDecodeError:
+                pass
+        out.append(_cp1252(line))
+    return "".join(out)
 
 
 def _retry_after(resp: httpx.Response) -> float | None:
@@ -573,6 +623,13 @@ class DavClient:
         return self.get(collection_url, filename) is not None
 
     def get(self, collection_url: str, filename: str) -> str | None:
+        """The text of one resource (decode_object of its bytes: never the charset its Content-Type says), None when
+        there is no such resource."""
+        raw = self.get_bytes(collection_url, filename)
+        return decode_object(raw) if raw is not None else None
+
+    def get_bytes(self, collection_url: str, filename: str) -> bytes | None:
+        """One resource exactly as the server gives it, None when there is no such resource."""
         try:
             # with credentials (like all other requests): otherwise 401 on an authenticated server
             resp = self._send("GET", self._item_url(collection_url, filename))
@@ -584,7 +641,7 @@ class DavClient:
             sc = resp.status_code
             raise DavError(f"GET -> HTTP {sc}", temporary=(sc >= 500 or sc == 429),
                            status=sc)
-        return resp.text
+        return resp.content
 
     def count(self, collection_url: str) -> int:
         url = _slash(collection_url)

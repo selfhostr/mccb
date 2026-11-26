@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from ..server.dav import decode_object
+
 BIG = 256 * 1024  # characters of an inline value (base64) above which a photo or an attachment is left out
 _LINE = re.compile(r'^((?:[^:"]|"[^"]*")*):(.*)$')
 _BINARY = frozenset({"PHOTO", "LOGO", "SOUND", "KEY"})
@@ -50,7 +52,7 @@ def _join(name: str, params: list[str], value: str) -> str:
 
 
 def object_uid(raw: bytes | str) -> str | None:
-    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    text = decode_object(raw) if isinstance(raw, bytes) else raw
     for line in unfold(text):
         name, _p, value = _split(line)
         if name == "UID" and value.strip():
