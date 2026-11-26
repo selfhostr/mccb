@@ -12,7 +12,7 @@ from email.parser import BytesHeaderParser
 from typing import Iterator
 
 from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, find_special,
-                           parse_list, personal_prefix, quote, wrap_exc)
+                           namespaces, parse_list, personal_prefix, quote, utf7_decode, wrap_exc)
 from . import oauth, registry
 from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
                    CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, DELETE_SOFT, DELETE_TRASH,
@@ -179,9 +179,41 @@ def item_keys(path: list[str], uidvalidity: int, recs: list[dict]) -> list[str]:
     return keys
 
 
-def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFolder]:
+def foreign_reason(raw: str, foreign: dict[str, str]) -> str | None:
+    """Why a mailbox (raw name) is not the account's own: it is under one of the `foreign` namespace prefixes
+    {prefix: reason} (other users', shared), or is the root of one. None: the account's own."""
+    for pre, why in foreign.items():
+        if pre and (raw.startswith(pre) or raw == pre.rstrip("/.")):
+            return why
+    return None
+
+
+def foreign_namespaces(other: list[str], shared: list[str]) -> dict[str, str]:
+    """{namespace prefix: why its folders are left out} for the other users' and shared namespaces of NAMESPACE."""
+    out: dict[str, str] = {}
+    for pre in shared:
+        if pre:
+            out[pre] = (f"public or shared folder (namespace '{utf7_decode_safe(pre)}'), not this mailbox's own: "
+                        "left out (IMAP_INCLUDE_SHARED=1 copies it into this mailbox)")
+    for pre in other:
+        if pre:
+            out[pre] = (f"folder of another mailbox shared with this one (namespace '{utf7_decode_safe(pre)}'): "
+                        "migrated with its owner's mailbox, not copied into this one (IMAP_INCLUDE_SHARED=1 does)")
+    return out
+
+
+def utf7_decode_safe(raw: str) -> str:
+    try:
+        return utf7_decode(raw)
+    except Exception:  # noqa: BLE001 - a label only
+        return raw
+
+
+def folders_of(boxes: list[Mailbox], delim: str, prefix: str, foreign: dict[str, str] | None = None
+               ) -> list[SourceFolder]:
     """Source folders of a LIST: namespace prefix removed, virtual and unselectable folders dropped, special
-    folders from SPECIAL-USE, then from the usual names for servers that do not have it."""
+    folders from SPECIAL-USE, then from the usual names for servers that do not have it. A folder under a
+    `foreign` namespace (foreign_namespaces: shared by another mailbox, public) is listed with `skip`, no role."""
     out: list[SourceFolder] = []
     taken: set[str] = set()
     seen: set[str] = set()
@@ -198,8 +230,10 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
             if prefix and name.startswith(prefix):
                 name = name[len(prefix):]
             path = [p for p in (name.split(d) if d else [name]) if p] or [name]
-        f = SourceFolder(path=path, kind=MAIL, ref=b.name)
-        if path == ["INBOX"]:
+        f = SourceFolder(path=path, kind=MAIL, ref=b.name, skip=foreign_reason(b.name, foreign or {}))
+        if f.skip:
+            pass
+        elif path == ["INBOX"]:
             f.special = "inbox"
         else:
             for sp, flag in SPECIAL_FLAGS.items():
@@ -211,7 +245,8 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
                 taken.add(f.special)
         out.append(f)
     for f in out:  # no SPECIAL-USE: by name, without stealing a role a flag already gave
-        if f.special is not None or (len(f.path) > 1 and not (len(f.path) == 2 and f.path[0].upper() == "INBOX")):
+        nested = len(f.path) > 1 and not (len(f.path) == 2 and f.path[0].upper() == "INBOX")
+        if f.special is not None or f.skip or nested:
             continue
         low = f.path[-1].lower()
         for sp, names in SPECIAL_NAMES.items():
@@ -269,9 +304,14 @@ class ImapSource(Source):
         with _guard():
             boxes = self._list_boxes()
             delim = c.delimiter()
-            prefix = personal_prefix(c)
-            out = folders_of(boxes, delim, prefix if prefix.endswith(delim) else "")
+            personal, other, shared = namespaces(c)
+            prefix = personal[0]
+            from ..server.config import settings
+            foreign = {} if settings.imap_include_shared else foreign_namespaces(other, shared)
+            out = folders_of(boxes, delim, prefix if prefix.endswith(delim) else "", foreign)
             for f in out:
+                if f.skip:
+                    continue
                 try:
                     f.count = c.status_messages(f.ref)
                 except ImapError as e:

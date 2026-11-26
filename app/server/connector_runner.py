@@ -29,6 +29,10 @@ from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFai
                      StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
 from .tuner import ErrorNote, classify_error
 
+# error of the rows of a mail folder now left out that an earlier run had copied (see _left_copies)
+LEFT_ON_TARGET = "not migrated, copied by an earlier run and left on the target: "
+FLAGS_FRESH_SECONDS = 300  # a listing older than this is read again (flags only) before the flags are repaired
+
 MAX_SOURCE_ERRORS = 5  # items in a row whose fetch fails after its retries: the source is down, not the items
 DAV_EXT = {"calendar": "ics", "contacts": "vcf", TASKS: "ics"}
 # tasks only exist on this route: the historical path, its progress and its reports know three kinds
@@ -173,6 +177,7 @@ class ConnectorJobRunner(JobRunner):
         self._deferred: list = []                 # items waiting for another write of their resource name
         self._deferring = False
         self._src_flags: dict[str, dict[str, list[str]]] = {}  # folder key -> {item key: flags} of a full listing
+        self._src_flags_at: dict[str, float] = {}  # folder key -> time.monotonic() of that listing
         self._sizing: list[int] | None = None    # [bytes, messages] of the mail listing in progress (source size)
         self._uids: dict[tuple[str, str], tuple[str, str]] = {}  # DAV: (collection, UID) -> (resource name, subject)
         self.shared_skipped: list[tuple[str, str, str]] = []  # (items kind, folder key, legacy key) of shared folders
@@ -284,11 +289,20 @@ class ConnectorJobRunner(JobRunner):
                         {"folder": folder_key(f.path), "kind": f.kind, "reason": f.skip})
                     if f.special == SHARED:  # the copies an earlier version made of it go (davcleanup)
                         self.shared_skipped.append((CARRIED[f.kind], folder_key(f.path), legacy_folder_key(f.path)))
+                    if f.kind == MAIL:
+                        self._left_copies(f)
                     # items of an earlier run are no longer part of the migration (nor of its checks)
                     db.ex("UPDATE items SET status='skipped', error=? WHERE account_id=? AND pst_key=? AND kind=? "
-                          "AND folder IN (?, ?)", (f"not migrated: {f.skip}"[:2000], self.account_id, self.pst_key,
-                                                   CARRIED[f.kind], folder_key(f.path), legacy_folder_key(f.path)))
+                          "AND folder IN (?, ?) AND (error IS NULL OR error NOT LIKE ?)",
+                          (f"not migrated: {f.skip}"[:2000], self.account_id, self.pst_key, CARRIED[f.kind],
+                           folder_key(f.path), legacy_folder_key(f.path), LEFT_ON_TARGET + "%"))
             self.folders = [f for f in self.folders if not f.skip]
+            for f in self.folders:  # migrated again (IMAP_INCLUDE_SHARED=1): its copies left earlier are ours again
+                if f.kind == MAIL:
+                    db.ex("UPDATE items SET status='ok', error=NULL WHERE account_id=? AND pst_key=? AND kind='mail' "
+                          "AND status='skipped' AND error LIKE ? AND folder IN (?, ?)",
+                          (self.account_id, self.pst_key, LEFT_ON_TARGET + "%", folder_key(f.path),
+                           legacy_folder_key(f.path)))
             if self.mode == "delta":
                 try:
                     self._incremental = CAP_INCREMENTAL in registry.role_of(self.source_kind, "source").capabilities
@@ -478,6 +492,7 @@ class ConnectorJobRunner(JobRunner):
             f.count = len(listing)
             if kind == MAIL:  # the flags of the whole folder, for the copies already on the target (_repair_flags)
                 self._src_flags[fkey] = {it.key: it.flags for it in listing if flags_to_add(it.flags, ())}
+                self._src_flags_at[fkey] = time.monotonic()
         if self._sizing is not None:  # size of the mail at the source, from this listing (see _run_phase)
             if partial or any(it.size is None for it in listing):
                 self._sizing = None
@@ -1043,6 +1058,26 @@ class ConnectorJobRunner(JobRunner):
                               f"({session.delete_mode(a.row['target'])})")
                 st["deleted"] += 1
 
+    def _left_copies(self, f) -> None:
+        """A mail folder now left out (skip) that an earlier run copied: its copies stay on the target, where they are
+        not this mailbox's own (e.g. the shared inbox of another mailbox, unread for this one). Said with the target
+        folder and the count, never deleted here: whoever runs the migration removes them."""
+        keys = (folder_key(f.path), legacy_folder_key(f.path))
+        # out of the migration and its checks, still said at every pass (until the folder is migrated again)
+        db.ex("UPDATE items SET status='skipped', error=? WHERE account_id=? AND pst_key=? AND kind='mail' AND "
+              "status='ok' AND folder IN (?, ?) AND target IS NOT NULL",
+              (f"{LEFT_ON_TARGET}{f.skip}"[:2000], self.account_id, self.pst_key, *keys))
+        for r in db.q("SELECT target, COUNT(*) n FROM items WHERE account_id=? AND pst_key=? AND kind='mail' AND "
+                      "status='skipped' AND error LIKE ? AND folder IN (?, ?) AND target IS NOT NULL GROUP BY target",
+                      (self.account_id, self.pst_key, LEFT_ON_TARGET + "%", *keys)):
+            w = (f"Folder '{keys[0]}' is no longer migrated ({f.skip}), but an earlier run copied {r['n']} of its "
+                 f"mail(s) into '{r['target']}' on the target: they are not this mailbox's own (their read state is "
+                 "the owner's). mccb leaves them there: delete that folder at the target if they are not wanted")
+            self.log(w, "warning")
+            self.report["warnings"].append(w)
+            self.report.setdefault("mail_left_on_target", []).append(
+                {"folder": keys[0], "target": r["target"], "items": r["n"], "reason": f.skip})
+
     # ------------------------------------------------------------ flags
     def _repair_flags(self) -> None:
         """Every copy of ours on the target is given the read, answered and starred flags its source has and it
@@ -1055,9 +1090,8 @@ class ConnectorJobRunner(JobRunner):
             return  # this target does not do it (its flags are those written): the source is not read for it
         try:
             wanted = self._flags_wanted()
-            totals = {"checked": 0, "fixed": 0, "not_kept": 0}
-            if wanted:
-                self.report["flags"] = totals
+            totals = {"checked": 0, "fixed": 0, "not_kept": 0, "not_found": 0, "folders": len(wanted)}
+            self.report["flags"] = totals
             for name, want in wanted.items():
                 self.check()
                 self.current_folder = f"Flags {name}"
@@ -1072,6 +1106,10 @@ class ConnectorJobRunner(JobRunner):
                 totals["checked"] += checked
                 totals["fixed"] += fixed
                 totals["not_kept"] += lacking
+                if checked < len(want):  # deleted or moved at the target since, or not findable there
+                    totals["not_found"] += len(want) - checked
+                    self.log(f"Folder '{name}': {len(want) - checked} of our {len(want)} mail(s) read, answered or "
+                             "starred at the source not found there (deleted or moved at the target?)")
                 if fixed:
                     self.log(f"Folder '{name}': flags of the source added to {fixed} of our {checked} mail(s) that "
                              "lacked them (read, answered, starred)")
@@ -1080,6 +1118,11 @@ class ConnectorJobRunner(JobRunner):
                          "state may differ from the source")
                     self.log(w, "warning")
                     self.report["warnings"].append(w)
+            self.log(f"Read, answered and starred state: {totals['checked']} of our mail(s) checked against the "
+                     f"source in {len(wanted)} target folder(s), {totals['fixed']} given the flags they lacked"
+                     + (f", {totals['not_kept']} not kept by the target" if totals["not_kept"] else "")
+                     + (f", {totals['not_found']} not found" if totals["not_found"] else "")
+                     + " (flags are only added: a mail read at the target stays read)")
         finally:
             session.close()
             self.current_folder = None
@@ -1091,13 +1134,19 @@ class ConnectorJobRunner(JobRunner):
         for f in folders:
             fk = folder_key(f.path)
             got = self._src_flags.get(fk)
-            if got is None and self.mode != "mirror":  # mirror: its analysis has just recorded them (version)
+            # read again when the listing is old: a mail read at the source during a long pass counts too
+            stale = got is None or time.monotonic() - self._src_flags_at.get(fk, 0.0) > FLAGS_FRESH_SECONDS
+            if stale and self.mode != "mirror":  # mirror: its analysis has just recorded them (version)
                 self.check()
                 try:
-                    got = self._on_source(lambda: self.source.flags_of(f))
+                    fresh = self._on_source(lambda: self.source.flags_of(f))
                 except ConnectorError as e:
-                    self.log(f"Flags of '{fk}' unreadable at the source ({e}): those it was written with are used",
-                             "warning")
+                    fresh = None
+                    self.log(f"Flags of '{fk}' unreadable at the source ({e}): "
+                             + ("those of its listing are used" if got is not None else
+                                "those it was written with are used"), "warning")
+                if fresh is not None:
+                    got = fresh
             current[fk] = got
         for f in folders:  # rows of earlier imports may carry the old key; a folder key always wins
             current.setdefault(legacy_folder_key(f.path), current[folder_key(f.path)])

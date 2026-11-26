@@ -665,13 +665,18 @@ class ImapConn:
     def add_missing_flags(self, name: str, header: str, prefix: str, wanted: dict[str, list[str]]
                           ) -> tuple[int, int, int]:
         """Gives our copies in `name` the system flags they lack: `wanted` is {bare import id: flags its copy must
-        carry}. Our copies only: SEARCH HEADER for `prefix`, then the header of each candidate compared exactly (a
-        message of the owner, or of another import, is never touched). UID STORE +FLAGS.SILENT, grouped by flags;
+        carry}. Our copies only: SEARCH HEADER for `prefix` (every message of the folder when it finds fewer than
+        `wanted`), then the header of each candidate compared exactly (a message of the owner, or of another import,
+        is never touched). UID STORE +FLAGS.SILENT, grouped by flags;
         nothing is ever removed. Some servers ignore the flags of APPEND: this is how they end up right. The flags
         are read again after the STORE. Returns (copies checked, copies fixed, copies still lacking them)."""
         if not wanted:
             return 0, 0, 0
         cands = self.search_header(name, header, prefix)
+        if len(cands) < len(wanted):
+            # fewer hits than copies expected: a server whose SEARCH HEADER misses headers (not indexed, or not
+            # indexed yet) is not trusted, every message of the folder is read (headers only) and compared here
+            cands = self.uids(name)
         todo: dict[tuple[str, ...], list[str]] = {}
         checked = 0
         for uid, (flags, vals) in self.flags_and_header(name, cands, header).items():
@@ -808,15 +813,43 @@ def with_retry(fn, conn: ImapConn, retries: int = 5, base_delay: float = 1.0, sh
                     raise
 
 
-def personal_prefix(conn: ImapConn) -> str:
-    """Personal namespace prefix (e.g. "INBOX." on Courier/Cyrus), otherwise ''."""
+def parse_namespace(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Prefixes (raw, modified UTF-7) of the personal, other users' and shared namespaces of a NAMESPACE response
+    (RFC 2342), e.g. `(("" "/")) (("Dossiers partag&AOk-s/" "/")) (("Dossiers publics/" "/"))` on SmarterMail."""
+    toks = re.findall(r'"(?:[^"\\]|\\.)*"|\(|\)|[^\s()"]+', text)
+    groups: list[list[str]] = []
+    depth = 0
+    for i, t in enumerate(toks):
+        if t == "(":
+            depth += 1
+            if depth == 1:
+                groups.append([])
+            elif depth == 2 and i + 1 < len(toks) and toks[i + 1].startswith('"'):
+                groups[-1].append(re.sub(r"\\(.)", r"\1", toks[i + 1][1:-1]))  # the prefix of a descriptor
+        elif t == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and t.upper() == "NIL":
+            groups.append([])
+        if len(groups) > 3:
+            break
+    groups = (groups + [[], [], []])[:3]
+    return groups[0], groups[1], groups[2]
+
+
+def namespaces(conn: ImapConn) -> tuple[list[str], list[str], list[str]]:
+    """parse_namespace() of the server's NAMESPACE, ([""], [], []) without it."""
     if "NAMESPACE" not in conn.caps:
-        return ""
+        return [""], [], []
     try:
         typ, data = conn._m().namespace()
     except Exception:
-        return ""
+        return [""], [], []
     if typ != "OK":
-        return ""
-    m = re.match(r'\s*\(\("((?:[^"\\]|\\.)*)"', _text(data))
-    return m.group(1) if m else ""
+        return [""], [], []
+    personal, other, shared = parse_namespace(_text(data))
+    return personal or [""], other, shared
+
+
+def personal_prefix(conn: ImapConn) -> str:
+    """Personal namespace prefix (e.g. "INBOX." on Courier/Cyrus), otherwise ''."""
+    return namespaces(conn)[0][0]
