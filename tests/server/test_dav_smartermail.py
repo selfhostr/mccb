@@ -46,7 +46,7 @@ class FakeSmarterMail:
     another collection, gets 500); 500 to If-None-Match over an existing resource (`inm_500`); 500 to a vCard 4.0 and
     to a "X-BOOM" property; 500 to "POISON" whatever its form; 409 to a collection name with "/" in it. `down`: every
     request gets 500. `collapse`: a second object of a UID in one calendar replaces the first (kept once). `refuse`:
-    paths whose PUT gets 500. DELETE of an object or of a collection."""
+    paths whose PUT gets 500. `ctype`: the Content-Type of a GET of an object. DELETE of an object or of a collection."""
 
     HOME = "/dav/me/"
 
@@ -59,6 +59,7 @@ class FakeSmarterMail:
         self.methods: list[tuple[str, str]] = []
         self.etag = 0
         self.refuse: set[str] = set()  # paths whose PUT gets 500, whatever is sent
+        self.ctype: str | None = None  # Content-Type of a GET of an object (None: none, as SmarterMail may do)
 
     def add(self, slug, name, kind="card", comp=None, owner=ME, shared=False, items=None):
         path = self.HOME + slug + "/"
@@ -168,7 +169,9 @@ class FakeSmarterMail:
                 return httpx.Response(404)
             if req.method == "GET":
                 body = col["items"].get(name) if col else None
-                return httpx.Response(200, content=body) if body is not None else httpx.Response(404)
+                if body is None:
+                    return httpx.Response(404)
+                return httpx.Response(200, content=body, headers={"Content-Type": self.ctype} if self.ctype else {})
             if req.method == "PUT":
                 if col is None:
                     return httpx.Response(409)
