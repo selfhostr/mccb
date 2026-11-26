@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Iterator
 from urllib.parse import unquote
 
-from ..server.dav import DavClient, DavError, DavIncomplete
+from ..server.dav import DavClient, DavError, DavIncomplete, decode_object
 from . import davfix, registry
 from .base import (CALENDAR, CAP_DELETE, CAP_FOLDERS, CAP_INVENTORY, CAP_MIRROR, CAP_READBACK, CAP_UPDATE, CONTACTS,
                    DELETE_HARD, NOT_SENT, TASKS, ConnectorError, FetchedItem, FolderPlan, Listing, OutgoingItem,
@@ -187,7 +187,7 @@ class DavSession(TargetSession):
         _after_500. Items a collection keeps refusing while it answers trip the breaker of the target: the next ones
         of that collection are not sent (NOT_SENT), one in Breaker.PROBE still is."""
         name = item.name or ""
-        text = item.raw.decode("utf-8", "replace")
+        text = decode_object(item.raw)
         self.last_note = ""
         held = self.breaker.blocked(folder)
         if held:
@@ -384,10 +384,9 @@ class DavSession(TargetSession):
 
     def read(self, folder: str, remote_id: str) -> bytes | None:
         try:
-            text = self._c().get(folder, remote_id)
+            return self._c().get_bytes(folder, remote_id)
         except DavError as e:
             raise convert(e) from e
-        return text.encode("utf-8") if text is not None else None
 
     # ---- mirror: only the resources named in `names` (ours), with If-Match on what the inventory saw
     def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
@@ -427,7 +426,7 @@ class DavSession(TargetSession):
         it is not overwritten (a temporary error: the next pass sees it again)."""
         etag = self._etags.get((folder, ref))
         try:
-            self._c().put(folder, ref, item.raw.decode("utf-8", "replace"), self.dav_kind, if_match=etag or None)
+            self._c().put(folder, ref, decode_object(item.raw), self.dav_kind, if_match=etag or None)
         except DavError as e:
             if e.status in (404, 409):
                 raise ConnectorError(str(e), ConnectorError.FOLDER_MISSING) from e
@@ -467,9 +466,9 @@ class DavSession(TargetSession):
         out: dict[str, bytes] = {}
         try:
             for n in names:
-                text = c.get(folder, n)
-                if text is not None:
-                    out[n] = text.encode("utf-8")
+                raw = c.get_bytes(folder, n)
+                if raw is not None:
+                    out[n] = raw
         except DavError as e:
             raise convert(e) from e
         return out
@@ -477,7 +476,7 @@ class DavSession(TargetSession):
     def restore(self, folder: str, name: str, raw: bytes) -> None:
         """Writes an object back where it was (after a move that failed), without condition: it was just deleted."""
         try:
-            self._c().put(folder, name, raw.decode("utf-8", "replace"), self.dav_kind)
+            self._c().put(folder, name, decode_object(raw), self.dav_kind)
         except DavError as e:
             raise convert(e) from e
 

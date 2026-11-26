@@ -225,3 +225,51 @@ def test_source_listing_keys_and_incremental(env):
         assert not new.reset and [i.date is not None for i in new.items] == [True]
         stale = s.changed_since(inbox, '{"uv": 1, "uid": 1}')
         assert stale.reset and len(stale.items) == 3
+
+
+def test_accented_folders_and_raw_bytes_go_through_untouched(client, env):
+    """Folder names in modified UTF-7 come out with the same name ("Courrier indésirable" is the junk folder: it goes
+    to the target's own); each mail is the very bytes of the source with the import id header added on top, whatever
+    its charset (8-bit latin-1, UTF-8 headers without encoded-words)."""
+    aid, src, dst = setup_route(client)
+    latin1 = (b"From: =?utf-8?q?H=C3=A9l=C3=A8ne?= <h@example.test>\r\nTo: b@example.test\r\n"
+              b"Subject: =?iso-8859-1?q?R=E9union_=E0_Gen=E8ve?=\r\nMessage-ID: <lat1@example.test>\r\n"
+              b"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=iso-8859-1\r\n"
+              b"Content-Transfer-Encoding: 8bit\r\n\r\nD\xe9j\xe0 vu, \xe0 bient\xf4t\r\n")
+
+    def utf8(mid):
+        return (f"From: Zoë <z@example.test>\r\nTo: b@example.test\r\nSubject: Noël à Zürich\r\n"
+                f"Message-ID: <{mid}@example.test>\r\nMIME-Version: 1.0\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                "Crème brûlée – 20 €\r\n").encode("utf-8")
+
+    raw = {"Boîte d'envoi": latin1, "Réclamations clients": utf8("u1"), "Courrier indésirable": utf8("u2")}
+    c = imap_conn(src)
+    try:
+        for name, body in raw.items():
+            c.create(utf7_encode(name))
+            c.append(utf7_encode(name), body, [], datetime(2023, 5, 17, 8, 30, tzinfo=timezone.utc))
+        assert {b.decoded for b in c.list()} >= set(raw)
+    finally:
+        c.close()
+    jid = run(client, aid)
+    assert run_inproc(client, jid)["status"] == "done", _log(client, jid)
+    c = imap_conn(dst)
+    try:
+        got = {}  # Message-ID -> (decoded folder, raw name, bytes)
+        for b in c.list():
+            if "\\Noselect" in b.flags or not c.select(b.name):
+                continue
+            _typ, data = c.M.fetch("1:*", "(BODY.PEEK[])")
+            for d in data:
+                if isinstance(d, tuple):
+                    mid = re.search(rb"Message-ID: <([^>]+)>", d[1]).group(1).decode()
+                    got[mid] = (b.decoded, b.name, d[1])
+        assert got["lat1@example.test"][:2] == ("Boîte d'envoi", "Bo&AO4-te d'envoi")
+        assert got["u1@example.test"][:2] == ("Réclamations clients", "R&AOk-clamations clients")
+        assert got["u2@example.test"][0] in ("Courrier indésirable", "Junk"), got["u2@example.test"][0]
+        for mid, body in (("lat1@example.test", latin1), ("u1@example.test", utf8("u1")), ("u2@example.test", utf8("u2"))):
+            head, _, rest = got[mid][2].partition(b"\r\n")
+            assert head.startswith(b"X-PST-Import-Id: ") and rest == body, mid
+    finally:
+        c.close()
