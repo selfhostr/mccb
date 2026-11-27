@@ -621,6 +621,7 @@ def _target_modified(an: Analysis, owners: set[str], log) -> None:
             continue
         out = []
         modified = unverified = 0
+        unv_verbs: dict[str, int] = {}
         for a in acts:
             mine = (a.row or {}).get("target_etag")
             seen = a.refs[0].version if a.refs else None
@@ -628,8 +629,10 @@ def _target_modified(an: Analysis, owners: set[str], log) -> None:
             if a.action in ("delete", "update") and a.refs and phase in owners:
                 if not mine or mine.startswith("!") or not seen:
                     unverified += 1
+                    unv_verbs[verb] = unv_verbs.get(verb, 0) + 1
+                    # one line per item only at debug level: the summary below says it once per kind
                     log(f"Mirror: {phase} key={a.row['item_key']}: mccb cannot show the item on the target is the "
-                        f"one it wrote (no etag of its write): not {verb}", "warning")
+                        f"one it wrote (no etag of its write): not {verb}", "debug")
                     continue
                 if _norm_etag(seen) != _norm_etag(mine):
                     modified += 1
@@ -640,6 +643,13 @@ def _target_modified(an: Analysis, owners: set[str], log) -> None:
         an.actions[phase] = out
         an.hold(phase, TARGET_MODIFIED, modified)
         an.hold(phase, UNVERIFIED_OWNER, unverified)
+        if unverified:
+            what = " and ".join(f"{n} not {v}" for v, n in sorted(unv_verbs.items()))
+            log(f"Mirror {phase}: {unverified} item(s) changed or gone at the source are left as they are on the "
+                f"target ({what}): mccb cannot show the copy there is the one it wrote (no etag of its write, "
+                "typically copied by an earlier run and not identical to the source version). The mirror never "
+                "overwrites or deletes what it cannot prove it wrote; delete or fix them by hand on the target, or "
+                "rerun a normal copy", "info")
         if modified:
             an.note(TARGET_MODIFIED, f"{phase}: {modified} item(s) were changed on the target since mccb wrote them "
                     "(by someone, or by the server itself): they are neither deleted nor overwritten")
