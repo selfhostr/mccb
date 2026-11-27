@@ -12,6 +12,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import timezone
+from pathlib import Path
 from urllib.parse import unquote
 
 from ..connectors import registry, wiring
@@ -26,7 +27,7 @@ from . import policy as pol
 from .config import settings
 from .imap import flags_to_add
 from .runner import (KIND_OF_PHASE, AppendPool, AppendResult, AppendTask, JobFailed, JobRunner, PauseRequested,
-                     StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
+                     GONE_AT_SOURCE, StopRequested, folder_key, import_id_of, legacy_folder_key, norm_hash)
 from .tuner import ErrorNote, classify_error
 
 # error of the rows of a mail folder now left out that an earlier run had copied (see _left_copies)
@@ -40,6 +41,14 @@ CARRIED = {**KIND_OF_PHASE, TASKS: "task"}
 PHASE_OF_KIND = {kind: phase for phase, kind in CARRIED.items()}
 COLLECTIONS = {CALENDAR: "calendars", CONTACTS: "address books", TASKS: "task lists"}
 SAME_UID = "same_uid: "  # first words of the warning of an item whose UID another item of its collection has
+
+
+MOVED_WORD = {"contact": "card(s)", "event": "event(s)", "task": "task(s)"}
+
+
+def _etag(v: str | None) -> str:
+    v = (v or "").strip()
+    return v[2:] if v.startswith("W/") else v
 
 
 def _pin_key(account_id: int, pst_key: str, phase: str) -> str:
@@ -466,18 +475,33 @@ class ConnectorJobRunner(JobRunner):
                      f"(dropped by the server or deleted there), sent again: {shown}"
                      + (f" and {len(again) - 10} more" if len(again) > 10 else ""), "warning")
 
-    def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str], plan_name: str) -> None:
+    def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str] | None, plan_name: str,
+                  folder=None, listing=None, only_misplaced: bool = False) -> None:
         """DAV: the items an earlier run copied into another collection than the one the plan now gives their folder
-        (the second "Contacts" an earlier version created) go to this one. Each is first looked up there by its
-        resource name: one already there is left as it is, never written over; the others are copied. That the items
-        were in the other collection is kept (davcleanup.record_moved): the end of the run deletes it once each of
-        them is in the new one, if mccb created it and nothing else is in it."""
+        go to this one. `seen`: the keys the source lists (None: every row of the folder).
+
+        In a collection the plan gives to ANOTHER folder of the source (the cards of "Contacts" in "Contacts
+        suggérés"): moved (_move_misplaced), never left there, since no clean-up ever looks at a collection in use.
+
+        In a collection no folder goes to any more (the second "Contacts" an earlier version created): each is first
+        looked up in the new one by its resource name: one already there is left as it is, never written over; the
+        others are copied. That the items were in the other collection is kept (davcleanup.record_moved): the end of
+        the run deletes it once each of them is in the new one, if mccb created it and nothing else is in it.
+        `only_misplaced` (the mirror): only the first case."""
         target = self.targets.get(PHASE_OF_KIND.get(kind, ""))
         if self.mode == "errors" or kind == MAIL or not getattr(target, "names_resources", False):
             return
-        moved = [r for r in rows.values() if r["item_key"] in seen and r["status"] == "ok" and r["target"]
-                 and _ukey(r["target"]) != _ukey(plan_name)]
+        moved = [r for r in rows.values() if (seen is None or r["item_key"] in seen) and r["status"] == "ok"
+                 and r["target"] and _ukey(r["target"]) != _ukey(plan_name)]
         if not moved:
+            return
+        plan = self.plans.get(PHASE_OF_KIND[kind]) or {}
+        elsewhere = {_ukey(p.name) for fk, p in plan.items() if fk != fkey}
+        misplaced = [r for r in moved if _ukey(r["target"]) in elsewhere]
+        moved = [r for r in moved if _ukey(r["target"]) not in elsewhere]
+        if misplaced:
+            self._move_misplaced(session, kind, fkey, misplaced, plan_name, folder, listing)
+        if not moved or only_misplaced:
             return
         was: dict[str, int] = {}
         for r in moved:
@@ -500,6 +524,221 @@ class ConnectorJobRunner(JobRunner):
             self.report.setdefault("dav_moved", []).append(
                 {"folder": fkey, "from": old, "from_name": name, "to": plan_name, "items": n})
         self._resolve(session, kind, {r["item_key"]: r for r in moved})
+
+    def _move_misplaced(self, session, kind: str, fkey: str, rows: list[dict], plan_name: str, folder=None,
+                        listing=None) -> None:
+        """The items of folder `fkey` recorded in a collection the plan gives to another folder (an earlier plan sent
+        the default "Contacts" into the collection of "Contacts suggérés"): each goes where it belongs. It is written
+        into `plan_name` (never over a resource of that name already there: one holding the same UID is taken as
+        it), read back there, then deleted from the other collection, a copy of it kept under mirror-trash/ first,
+        but only when mccb can show that copy is its own (_ours) and no item of the other collection's own folders
+        uses the same resource. Otherwise it stays there too, said in the log. A server keeping one object per UID
+        in the account (SmarterMail) refuses the write while the other copy is there: such a proven copy is moved
+        as davcleanup does, deleted then written, and written back where it was if the new collection still
+        refuses it. An item its collection no longer holds is sent again where it belongs. One line per
+        collection."""
+        phase = PHASE_OF_KIND[kind]
+        target = self.targets[phase]
+        listed = getattr(target, "listed", None) or {}
+        word = MOVED_WORD.get(kind, "item(s)")
+        to_name = listed.get(_ukey(plan_name)) or plan_name
+        etags = {}
+        ids = [r["id"] for r in rows]
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for x in db.q(f"SELECT id, target_etag FROM items WHERE id IN ({','.join('?' * len(chunk))})",
+                          tuple(chunk)):
+                etags[x["id"]] = x["target_etag"]
+        try:
+            here = {n.casefold() for n in self._on_session(session, lambda: session.resources(plan_name))}
+        except ConnectorError as e:
+            if e.kind != ConnectorError.FOLDER_MISSING and "404" not in str(e):
+                w = (f"misplaced: {len(rows)} {word} of '{fkey}' are in another collection than {plan_name}, which "
+                     f"cannot be listed ({e}): not moved in this run")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+                return
+            here = set()
+        by_old: dict[str, list[dict]] = {}
+        for r in rows:
+            by_old.setdefault(r["target"], []).append(r)
+        backup_dir = None
+        for old, group in by_old.items():
+            self.check()
+            from_name = listed.get(_ukey(old)) or old
+            try:
+                res = self._on_session(session, lambda: session.resources(old))
+            except ConnectorError as e:
+                w = (f"misplaced: {len(group)} {word} of '{fkey}' are recorded in '{from_name}' ({old}), which "
+                     f"cannot be listed ({e}): not moved in this run")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+                continue
+            in_old = {n.casefold(): n for n in res}
+            # resources of that collection the items of its own folders use too (same UID): never deleted
+            mine = {r["id"] for r in group}
+            shared = {x["hash"].casefold() for x in db.q(
+                "SELECT id, hash, target FROM items WHERE account_id=? AND pst_key=? AND kind=? AND hash IS NOT NULL "
+                "AND status IN ('ok','inflight','pending','error')", (self.account_id, self.pst_key, kind))
+                if x["id"] not in mine and _ukey(x["target"] or "") == _ukey(old)}
+            n = {"moved": 0, "copied": 0, "resent": 0, "failed": 0}
+            why_kept: list[str] = []
+            failed: list[str] = []
+            for r in group:
+                self.check()
+                name = r["hash"]
+                src = in_old.get(name.casefold())
+                raw = None
+                if src is not None:
+                    try:
+                        raw = self._on_session(session, lambda: session.read(old, src))
+                    except ConnectorError as e:
+                        n["failed"] += 1
+                        failed.append(f"'{name}' could not be read ({e})")
+                        continue
+                if raw is None:  # not there (any more): written where it belongs by this run
+                    db.ex("UPDATE items SET target=?, target_etag=NULL, status='pending', error=NULL WHERE id=?",
+                          (plan_name, r["id"]))
+                    r["status"], r["target"] = "pending", plan_name
+                    n["resent"] += 1
+                    continue
+                proof = self._ours(phase, r, etags.get(r["id"]), old, src, res.get(src), raw, folder, listing)
+                if proof and name.casefold() in shared:
+                    proof = None
+                    why_kept.append(f"'{name}' is also the copy of an item of that collection")
+                elif not proof:
+                    why_kept.append(f"'{name}' cannot be shown to be mccb's copy")
+                uid = davfix.object_uid(raw)
+                if name.casefold() in here:  # never written over: the same UID there is the same item
+                    try:
+                        have, err = self._on_session(session, lambda: session.read(plan_name, name)), None
+                    except ConnectorError as e:
+                        have, err = None, e
+                    if have is None or davfix.object_uid(have) != uid:
+                        n["failed"] += 1
+                        failed.append(f"{plan_name} already holds another object named '{name}'"
+                                      + (f" ({err})" if err else ""))
+                        continue
+                elif not proof:  # what is in the other collection may not be the item: sent from the source
+                    db.ex("UPDATE items SET target=?, target_etag=NULL, status='pending', error=NULL WHERE id=?",
+                          (plan_name, r["id"]))
+                    r["status"], r["target"] = "pending", plan_name
+                    n["copied"] += 1
+                    continue
+                deleted = False
+                if name.casefold() not in here:
+                    try:
+                        self._on_session(session, lambda: session.put(plan_name, OutgoingItem(phase, raw, "",
+                                                                                              name=name)))
+                    except ConnectorError as e:
+                        if e.kind != ConnectorError.REJECTED:
+                            n["failed"] += 1
+                            failed.append(f"'{name}' refused by {plan_name} ({e})")
+                            continue
+                        # one object per UID in the account (SmarterMail): its copy in `old` keeps it out
+                        backup_dir = self._backup_misplaced(phase, old, src, raw) or backup_dir
+                        why = self._swap(session, phase, old, src, plan_name, name, raw)
+                        if why:
+                            n["failed"] += 1
+                            failed.append(why)
+                            continue
+                        deleted = True
+                    try:
+                        back, err = self._on_session(session, lambda: session.read(plan_name, name)), None
+                    except ConnectorError as e:
+                        back, err = None, e
+                    if back is None or davfix.object_uid(back) != uid:
+                        n["failed"] += 1
+                        failed.append(f"'{name}' written into {plan_name} but not read back there"
+                                      + (f" ({err})" if err else "") + ": left where it was too")
+                        continue
+                    here.add(name.casefold())
+                if proof and not deleted:
+                    backup_dir = self._backup_misplaced(phase, old, src, raw) or backup_dir
+                    try:
+                        self._on_session(session, lambda: session.delete(old, src))
+                        deleted = True
+                    except ConnectorError as e:
+                        why_kept.append(f"'{name}' could not be deleted from it ({e})")
+                db.ex("UPDATE items SET target=?, target_etag=?, status='ok', error=NULL, job_id=?, updated_at=? "
+                      "WHERE id=?", (plan_name, session.written_version(plan_name, name), self.job_id, time.time(),
+                                     r["id"]))
+                r["status"], r["target"] = "ok", plan_name
+                n["moved" if deleted else "copied"] += 1
+            if n["moved"]:
+                self.log(f"{fkey}: {n['moved']} {word} moved from '{from_name}' to '{to_name}' where they belong"
+                         + (f" (a copy of each is kept in {backup_dir})" if backup_dir else ""))
+            if n["resent"]:
+                self.log(f"{fkey}: {n['resent']} {word} recorded in '{from_name}' are not there: sent to "
+                         f"'{to_name}' where they belong")
+            if n["copied"]:
+                shown = "; ".join(why_kept[:5]) + (f"; and {len(why_kept) - 5} more" if len(why_kept) > 5 else "")
+                w = (f"misplaced: {n['copied']} {word} of '{fkey}' recorded in '{from_name}' ({old}) now go to "
+                     f"'{to_name}' where they belong, and their copy in '{from_name}' is left as it is: {shown}. "
+                     "Delete them there by hand if they are not wanted in it")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+            if n["failed"]:
+                shown = "; ".join(failed[:5]) + (f"; and {len(failed) - 5} more" if len(failed) > 5 else "")
+                w = (f"misplaced: {n['failed']} {word} of '{fkey}' recorded in '{from_name}' ({old}) not moved to "
+                     f"'{to_name}': {shown}")
+                self.log(w, "warning")
+                self.report["warnings"].append(w)
+            self.report.setdefault("dav_misplaced", []).append(
+                {"folder": fkey, "from": old, "from_name": listed.get(_ukey(old)), "to": plan_name,
+                 "to_name": listed.get(_ukey(plan_name)), **n})
+
+    def _ours(self, phase: str, row: dict, recorded: str | None, old: str, name: str, etag: str | None, raw: bytes,
+              folder, listing) -> str | None:
+        """How mccb knows the object `name` of collection `old` is the copy it wrote for this row (None: it cannot):
+        the etag of its write is still the object's; or mccb created that collection and named the object after
+        its UID (dav.uid_name); or the object is the very one the source holds."""
+        from ..connectors.dav import made_by_mccb, uid_name
+        if recorded and not recorded.startswith("!") and etag and _etag(recorded) == _etag(etag):
+            return "etag"
+        if made_by_mccb(old) and (uid_name(raw, DAV_EXT[phase]) or "").casefold() == name.casefold():
+            return "uid"
+        it = (listing or {}).get(row["item_key"])
+        if folder is not None and it is not None:
+            try:
+                got = self._on_source(lambda: self.source.fetch(folder, it,
+                                                                import_id_of(self.pst_key, row["item_key"])))
+            except ConnectorError:
+                got = None
+            if got is not None and mm.same_object(got.raw, raw):
+                return "same"
+        return None
+
+    def _backup_misplaced(self, phase: str, old: str, name: str, raw: bytes) -> str | None:
+        try:
+            return str(Path(mm.backup_copy(self.job_id, phase, _ukey(old) + name, raw)).parent)
+        except OSError as e:
+            self.log(f"No copy of '{name}' of {old} could be kept ({e})", "warning")
+            return None
+
+    def _swap(self, session, phase: str, old: str, src: str, dst: str, name: str, raw: bytes) -> str | None:
+        """davcleanup's move: deleted from `old`, written into `dst`, written back into `old` when `dst` still
+        refuses it. None when moved, else why not."""
+        try:
+            self._on_session(session, lambda: session.delete(old, src))
+        except ConnectorError as e:
+            return f"'{name}' could not be deleted from {old} to be written into {dst} ({e})"
+        breaker = getattr(self.targets[phase], "breaker", None)
+        if breaker is not None:
+            breaker.ok(dst)  # its refusal was caused by the copy just deleted
+        try:
+            session.ensure()
+            session.put(dst, OutgoingItem(phase, raw, "", name=name))
+        except ConnectorError as e:
+            try:
+                self._on_session(session, lambda: session.restore(old, src, raw))
+            except ConnectorError as e2:
+                msg = f"'{name}' could not be written into {dst} ({e}) nor back into {old} ({e2})"
+                self.log(msg, "error")
+                self.problems.append(msg)
+                return msg
+            return f"{dst} still refuses '{name}' once its copy in {old} is deleted ({e}): written back there"
+        return None
 
     def _list_folder(self, session, f, kind: str, fi: int, plan_name: str) -> list:
         """Entries (sort value, key, folder index, item) of a folder still to migrate."""
@@ -539,7 +778,7 @@ class ConnectorJobRunner(JobRunner):
         for r in rows.values():
             if not partial and r["item_key"] not in seen and r["source_ref"]:
                 orphans.setdefault(r["source_ref"], []).append(r)
-        self._relocate(session, kind, fkey, rows, seen, plan_name)
+        self._relocate(session, kind, fkey, rows, seen, plan_name, f, {it.key: it for it in listing})
         if not partial:
             self._recheck_sent(session, kind, fkey, rows, seen)
         entries = []
@@ -567,10 +806,10 @@ class ConnectorJobRunner(JobRunner):
             for group in orphans.values():
                 for r in group:
                     if r["status"] in ("pending", "inflight"):
-                        self.set_item(r["id"], "skipped", "no longer at the source")
+                        self.set_item(r["id"], "skipped", GONE_AT_SOURCE)
             for r in rows.values():
                 if r["item_key"] not in seen and not r["source_ref"] and r["status"] in ("pending", "inflight"):
-                    self.set_item(r["id"], "skipped", "no longer at the source")
+                    self.set_item(r["id"], "skipped", GONE_AT_SOURCE)
         self.log(f"Folder '{fkey}' -> {plan_name}: {len(listing)} item(s)"
                  + (" changed since the previous pass" if partial else "") + f", {len(entries)} to migrate")
         return entries
@@ -841,6 +1080,13 @@ class ConnectorJobRunner(JobRunner):
                 kind = CARRIED[p]
                 for f in [f for f in self.folders if f.kind == p]:
                     self._resolve(sessions[p], kind, self._rows(kind, folder_key(f.path), f.path))
+            for p in phases:  # items an earlier plan put in the collection of another folder: where they belong
+                kind, plan = CARRIED[p], self.plans.get(p) or {}
+                for f in [f for f in self.folders if f.kind == p]:
+                    fk = folder_key(f.path)
+                    if fk in plan:
+                        self._relocate(sessions[p], kind, fk, self._rows(kind, fk, f.path), None, plan[fk].name,
+                                       only_misplaced=True)
             an = mm.analyze(self.source, [f for f in self.folders if f.kind in phases], self._known_folders, sessions,
                             {p: self.targets[p].capabilities for p in phases}, self.account_id, self.pst_key,
                             self.policy, opts, retry=self._on_source,

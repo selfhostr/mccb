@@ -52,6 +52,9 @@ FILTERED_ROW = {"id": None, "item_key": None, "status": pol.FILTERED, "target": 
 UNCONVERTED = "item cannot be converted"
 
 
+# items.error of an item given up before it was written because the source no longer listed it
+GONE_AT_SOURCE = "no longer at the source"
+
 UPSERT_ITEM = (
     "INSERT INTO items(account_id,pst_id,pst_key,kind,item_key,folder,status,target,error,warnings,subject,hash,size,source_ref,job_id,updated_at,version,src_ref) "
     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
@@ -843,6 +846,8 @@ class JobRunner:
             return self.mode == "errors"  # refused for its size: sent again only when the administrator asks
         if st == "skipped" and r.get("id") is not None and (r.get("error") or "").startswith(UNCONVERTED):
             return self.mode != "errors"  # converted by a newer engine maybe: built again (cheap) on a normal run
+        if st == "skipped" and (r.get("error") or "") == GONE_AT_SOURCE:
+            return self.mode != "errors"  # given up while it was not listed, listed again: it was never written
         if self.mode == "errors":
             return st in ("error", "inflight", "pending")
         return st not in ("ok", "skipped")
