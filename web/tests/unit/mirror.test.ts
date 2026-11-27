@@ -5,19 +5,23 @@ import {
 	BLOCK_CODES,
 	blockCodes,
 	blockedBy,
+	blockedPlan,
 	blockInfo,
 	canApply,
 	canMirrorResync,
 	clampCount,
 	clampPercent,
+	comparedInOrder,
 	DEFAULT_MAX_DELETE_PERCENT,
 	DEFAULT_MIN_DELETE_COUNT,
 	describeNote,
+	eachLimited,
 	type EmptyFolder,
 	emptyFolderCount,
 	emptyFolderOf,
 	hasWarningNote,
 	MAX_MIN_DELETE_COUNT,
+	MIRROR_COMPARE_PARALLEL,
 	mergeEmptyFolders,
 	mirrorReport,
 	mirrorReportRows,
@@ -333,5 +337,55 @@ describe('notes', () => {
 		const report = { mirror: { notes: [{ code: 'soft_delete', message: 'm' }] } };
 		expect(noteLines(mirrorReport(report)?.notes, labels).map((n) => n.code)).toEqual(['soft_delete']);
 		expect(noteLines(mirrorReport({ mirror: { blocked: [] } })?.notes, labels)).toEqual([]);
+	});
+});
+
+describe('the comparison, one mailbox per request', () => {
+	it('runs every task, never more than the limit at once, and in the order given', async () => {
+		let running = 0;
+		let most = 0;
+		const started: number[] = [];
+		await eachLimited([1, 2, 3, 4, 5, 6, 7, 8, 9], 4, async (id) => {
+			started.push(id);
+			running++;
+			most = Math.max(most, running);
+			await new Promise((resolve) => setTimeout(resolve, id % 3));
+			running--;
+		});
+		expect(started).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+		expect(most).toBe(4);
+		expect(MIRROR_COMPARE_PARALLEL).toBe(4);
+	});
+
+	it('goes on after a failed task, and stops starting new ones once stopped', async () => {
+		const seen: number[] = [];
+		await eachLimited([1, 2, 3], 1, async (id) => {
+			seen.push(id);
+			if (id === 1) throw new Error('boom');
+		});
+		expect(seen).toEqual([1, 2, 3]);
+		const after: number[] = [];
+		let stop = false;
+		await eachLimited([1, 2, 3, 4], 2, async (id) => {
+			after.push(id);
+			await Promise.resolve();
+			stop = true;
+		}, () => stop);
+		expect(after).toEqual([1, 2]);
+		await eachLimited([], 4, async () => undefined);
+	});
+
+	it('shows the answers in the order of the selection, whatever their arrival', () => {
+		const a = plan(1);
+		const b = plan(2);
+		expect(comparedInOrder([1, 2, 3], new Map([[2, b], [1, a]])).map((p) => p.account_id)).toEqual([1, 2]);
+		expect(comparedInOrder([], new Map([[1, a]]))).toEqual([]);
+	});
+
+	it('a mailbox that did not start is shown blocked, with nothing counted', () => {
+		const p = blockedPlan({ account_id: 7, email: null, blocked: [{ code: 'mirror_off', message: 'off' }] });
+		expect(p).toMatchObject({ account_id: 7, email: '', ready: false, sample: [] });
+		expect(accountTotals(p)).toEqual({ add: 0, update: 0, delete: 0 });
+		expect(mirrorState([p])).toBe('blocked');
 	});
 });

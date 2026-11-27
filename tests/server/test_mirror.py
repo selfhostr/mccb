@@ -105,6 +105,47 @@ def test_no_prior_run_is_blocked(client, box):
     assert acc["ready"] is False and "no_prior_run" in codes(acc)
 
 
+def test_a_copy_that_did_not_end_well_still_counts_as_a_prior_run(client, box):
+    """A first copy stopped or failed half-way wrote items: the mirror may run on them (it copies the rest first)."""
+    from app.server import db
+    aid, src, dst = make(client)
+    job = full(client, aid)
+    db.ex("UPDATE jobs SET status='stopped' WHERE id=?", (job["id"],))
+    assert "no_prior_run" not in codes(preview(client, aid))
+    src.add("INBOX", "late@x")
+    src.remove("in0@x")
+    job, rep = mirror(client, aid)
+    assert rep["mirror"]["mail"]["added"] == 1 and rep["mirror"]["mail"]["deleted"] == 1
+
+
+def test_preview_of_several_mailboxes_keeps_the_order_asked(client, box):
+    from app.server import mirror as mm
+    aid, _, _ = make(client)
+    full(client, aid)
+    out = mm.preview_accounts([aid, 999999, aid], mm.Options(), parallel=3)
+    assert [a["account_id"] for a in out] == [aid, 999999, aid]
+    assert out[0]["ready"] is True and out[2]["ready"] is True
+    assert "unknown_account" in codes(out[1])
+    r = client.post("/api/runs", json={"account_ids": [aid, 999999], "mode": "mirror"})
+    assert [a["account_id"] for a in r.json()["accounts"]] == [aid, 999999]
+
+
+def test_a_job_over_the_limit_deletes_nothing_and_says_why(client, box):
+    """Started without a comparison first: the job checks the limit itself."""
+    aid, src, dst = make(client)
+    full(client, aid)
+    for i in range(4):
+        src.remove(f"in{i}@x")
+    src.add("INBOX", "new@x")
+    job, rep = mirror(client, aid, min_delete_count=0)
+    assert rep["mirror"]["mail"]["deleted"] == 0 and rep["mirror"]["mail"]["skipped_by_safety"] == 4
+    assert rep["mirror"]["mail"]["added"] == 1           # the catch-up is done all the same
+    assert "too_many_deletes" in {b["code"] for b in rep["mirror"]["blocked"]}
+    assert job["status"] == "done_with_errors", job
+    log = client.get(f"/api/jobs/{job['id']}/log").text
+    assert "deletions held back" in log
+
+
 # ------------------------------------------------------------------ dry run
 def test_dry_run_counts_and_writes_nothing(client, box):
     aid, src, dst = make(client)

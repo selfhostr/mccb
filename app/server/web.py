@@ -610,7 +610,9 @@ def create_runs(body: RunIn, request: Request):
         opts = mirror.Options(body.max_delete_percent, body.allow_large_delete, body.min_delete_count,
                               body.allow_empty_folders)
         if body.dry_run:
-            return {"accounts": [mirror.preview_account(aid, opts) for aid in body.account_ids]}
+            # one comparison per mailbox, a few at a time: each lists its source and its target in full (the
+            # interface asks one mailbox per request, and shows each as it comes)
+            return {"accounts": mirror.preview_accounts(body.account_ids, opts)}
         # audit trail of every real mirror request (it deletes on the targets), written BEFORE it runs: who, which
         # mailboxes, which options. The client address is the one the rest of the app uses (uvicorn's proxy
         # headers, see main()); the job log of each job created gets the same line.

@@ -282,6 +282,10 @@ def preflight(acc) -> list[dict]:
                     "message": f"the source '{kind}' cannot be listed completely: the mirror does not support it"})
     done = db.q1("SELECT 1 FROM jobs WHERE account_id=? AND status IN ('done','done_with_errors') LIMIT 1", (acc["id"],))
     if done is None:
+        # a copy that never ended well (stopped, failed, interrupted) still wrote items: the mirror only ever touches
+        # those (status ok), and a mirror job copies what is missing first, as a rerun does
+        done = db.q1("SELECT 1 FROM items WHERE account_id=? AND status='ok' LIMIT 1", (acc["id"],))
+    if done is None:
         out.append({"code": NO_PRIOR_RUN, "message": "never migrated: run a first full pass before mirroring"})
     return out
 
@@ -852,6 +856,20 @@ def preview_account(account_id: int, opts: Options) -> dict:
         out["held"] = an.held
     out["ready"] = not out["blocked"]
     return out
+
+
+PREVIEW_PARALLEL = 4  # mailboxes compared at once by one dry-run request of several mailboxes
+
+
+def preview_accounts(account_ids: list[int], opts: Options, parallel: int = PREVIEW_PARALLEL) -> list[dict]:
+    """preview_account() of each mailbox, a few in parallel (threads: each waits on its servers), in the order asked.
+    The database connection is per thread (db.conn)."""
+    ids = list(account_ids)
+    if len(ids) <= 1 or parallel <= 1:
+        return [preview_account(aid, opts) for aid in ids]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(parallel, len(ids)), thread_name_prefix="mirror-preview") as pool:
+        return list(pool.map(lambda aid: preview_account(aid, opts), ids))
 
 
 def start(account_ids: list[int], opts: Options, name: str | None = None, priority: int = 0,
