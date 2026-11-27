@@ -42,3 +42,17 @@ def test_plan_folders():
 
 def test_norm_hash_line_endings():
     assert norm_hash(b"a\r\nb\r\n") == norm_hash(b"a\nb\n") == norm_hash(b"a\r\nb")
+
+
+def test_uid_sets_are_exact_runs_in_bounded_chunks():
+    from app.server.imap import uid_sets
+    assert list(uid_sets([])) == []
+    assert list(uid_sets(["10", "9", "1", "2", "3", "7", "3"])) == [([1, 2, 3, 7, 9, 10], "1:3,7,9:10")]
+    chunks = list(uid_sets(range(1, 12001)))
+    assert [c[1] for c in chunks] == ["1:5000", "5001:10000", "10001:12000"]
+    sparse = list(range(1, 20000, 2))
+    out = list(uid_sets(sparse, width=100))
+    assert all(len(s) <= 100 for _c, s in out)
+    assert [u for c, _s in out for u in c] == sparse
+    for c, s in out:
+        assert [int(x) for x in s.split(",")] == c  # never a UID that was not asked

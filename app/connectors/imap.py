@@ -12,14 +12,13 @@ from email.parser import BytesHeaderParser
 from typing import Iterator
 
 from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, find_special,
-                           namespaces, parse_list, personal_prefix, quote, utf7_decode, wrap_exc)
+                           namespaces, parse_list, personal_prefix, quote, uid_sets, utf7_decode, wrap_exc)
 from . import oauth, registry
 from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
                    CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, DELETE_SOFT, DELETE_TRASH,
                    IMPORT_HEADER, MAIL, MIRROR_DELETED_FLAG, Changes, ConnectorError, FetchedItem, FolderPlan, Listing,
                    MailboxSize, OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
 
-FETCH_CHUNK = 500  # UIDs per listing FETCH
 SIZE_CHUNK = 5000  # messages per FETCH (RFC822.SIZE FLAGS) of mailbox_size: the deadline is checked between them
 SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.I)
 STATUS_SIZE_RE = re.compile(r"\bSIZE\s+(\d+)", re.I)
@@ -345,9 +344,8 @@ class ImapSource(Source):
     def _records(self, uids: list[int]) -> list[dict]:
         c = self._c()
         recs: list[dict] = []
-        for i in range(0, len(uids), FETCH_CHUNK):
-            chunk = ",".join(str(u) for u in uids[i:i + FETCH_CHUNK])
-            typ, data = c._m().uid("FETCH", chunk, LIST_ITEMS)
+        for _chunk, uset in uid_sets(uids):
+            typ, data = c._m().uid("FETCH", uset, LIST_ITEMS)
             recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
         asked = set(uids)  # an unsolicited FETCH may name another message
         return [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
@@ -452,8 +450,8 @@ class ImapSource(Source):
                 recs = self._records(uids)
             else:
                 c, recs = self._c(), []
-                for i in range(0, len(uids), FETCH_CHUNK):
-                    typ, data = c._m().uid("FETCH", ",".join(str(u) for u in uids[i:i + FETCH_CHUNK]), "(UID FLAGS)")
+                for _chunk, uset in uid_sets(uids):
+                    typ, data = c._m().uid("FETCH", uset, "(UID FLAGS)")
                     recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
                 asked = set(uids)
                 recs = [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
@@ -501,9 +499,8 @@ class ImapSource(Source):
                 m = KEY_RE.match(k)
                 if m and uv and int(m.group(1)) == uv and k.split("-", 1)[0] == fh:
                     wanted[int(m.group(2))] = k
-            for i in range(0, len(wanted), FETCH_CHUNK):
-                chunk = sorted(wanted)[i:i + FETCH_CHUNK]
-                found = set(self._uids(("UID", ",".join(str(u) for u in chunk), "UNDELETED")))
+            for chunk, uset in uid_sets(wanted):
+                found = set(self._uids(("UID", uset, "UNDELETED")))
                 for u in chunk:
                     out[wanted[u]] = u in found
         return out
