@@ -286,3 +286,40 @@ export const mirrorSkipped = (report: MirrorReport): number => MIRROR_KINDS.redu
 
 /** A mirror resync is offered when there is no job or the last one is over: a queued, running or paused one is left alone. */
 export const canMirrorResync = (job: Pick<Job, 'status'> | undefined): boolean => !job || ['done', 'done_with_errors', 'stopped', 'failed'].includes(job.status);
+
+/** Mailboxes compared at once by the dialog, one request each: every comparison lists a source and a destination in full. */
+export const MIRROR_COMPARE_PARALLEL = 4;
+
+/**
+ * Runs `task` on every item, at most `limit` at a time, in the order given; `stopped()` is asked before each start
+ * (a closed dialog, a newer comparison) and stops the ones not started yet. A task that throws does not stop the others.
+ */
+export async function eachLimited<T>(items: readonly T[], limit: number, task: (item: T) => Promise<unknown>, stopped: () => boolean = () => false): Promise<void> {
+	let next = 0;
+	const lane = async () => {
+		while (next < items.length && !stopped()) {
+			const item = items[next++];
+			try {
+				await task(item);
+			} catch {
+				// the task reports its own failure
+			}
+		}
+	};
+	await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
+}
+
+/** The comparisons answered so far, in the order of the selection (not of their arrival). */
+export function comparedInOrder(ids: readonly number[], plans: ReadonlyMap<number, MirrorAccountPlan>): MirrorAccountPlan[] {
+	const out: MirrorAccountPlan[] = [];
+	for (const id of ids) {
+		const plan = plans.get(id);
+		if (plan) out.push(plan);
+	}
+	return out;
+}
+
+/** The answer of a run for a mailbox that did not start, shown as its comparison would be: blocked, nothing counted. */
+export function blockedPlan(start: Pick<MirrorAccountPlan, 'account_id' | 'blocked'> & { email: string | null }): MirrorAccountPlan {
+	return { account_id: start.account_id, email: start.email ?? '', ready: false, to_add: {}, to_update: {}, to_delete: {}, blocked: start.blocked ?? [], sample: [] };
+}

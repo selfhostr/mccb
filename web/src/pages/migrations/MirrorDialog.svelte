@@ -1,16 +1,21 @@
 <script lang="ts">
 	/**
-	 * A mirror resync: first a comparison that writes nothing (dry run), then, once the reader has seen what
-	 * would be added, changed and deleted, the run itself. A deletion is confirmed with its number.
-	 * The mailboxes the server blocks are told why and how to fix it, and are left out of the run.
+	 * A mirror resync. Two ways in:
+	 * - start now: one job per mailbox at once, each compares its own mailbox and keeps to the safety limit by itself
+	 *   (a job over the limit makes no deletion and says why in its log); nothing to wait for here;
+	 * - compare first: a comparison that writes nothing (dry run), one request per mailbox, a few at a time, each
+	 *   mailbox shown as it is answered; Apply runs the mailboxes compared and ready so far. A deletion is confirmed
+	 *   with its number. The mailboxes the server blocks are told why and how to fix it, and are left out of the run.
 	 */
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import GitCompareArrows from '@lucide/svelte/icons/git-compare-arrows';
 	import Pencil from '@lucide/svelte/icons/pencil';
+	import Play from '@lucide/svelte/icons/play';
 	import Plus from '@lucide/svelte/icons/plus';
 	import ScanSearch from '@lucide/svelte/icons/scan-search';
 	import ShieldCheck from '@lucide/svelte/icons/shield-check';
+	import Hourglass from '@lucide/svelte/icons/hourglass';
 	import ToggleRight from '@lucide/svelte/icons/toggle-right';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
@@ -20,7 +25,7 @@
 	import { errorText, post } from '../../lib/api/client.ts';
 	import type { MirrorAccountPlan, MirrorAction, MirrorKind, MirrorPlan, MirrorRun, RunInput } from '../../lib/api/types.ts';
 	import { fmtAbsolute, fmtNum, toDate } from '../../lib/format.ts';
-	import { accountTotals, blockedBy, type BlockCode, blockCodes, blockInfo, canApply, clampCount, clampPercent, DEFAULT_MAX_DELETE_PERCENT, DEFAULT_MIN_DELETE_COUNT, type EmptyFolder, emptyFolderOf, hasWarningNote, mergeEmptyFolders, MAX_MIN_DELETE_COUNT, mirrorRows, mirrorState, mirrorTotals, neededPercent, offersLargeDelete, readyIds, sampleLines, startedJobs, toggleEmptyFolder } from '../../lib/logic/mirror.ts';
+	import { accountTotals, blockedBy, blockedPlan, comparedInOrder, eachLimited, MIRROR_COMPARE_PARALLEL, type BlockCode, blockCodes, blockInfo, canApply, clampCount, clampPercent, DEFAULT_MAX_DELETE_PERCENT, DEFAULT_MIN_DELETE_COUNT, type EmptyFolder, emptyFolderOf, hasWarningNote, mergeEmptyFolders, MAX_MIN_DELETE_COUNT, mirrorRows, mirrorState, mirrorTotals, neededPercent, offersLargeDelete, readyIds, sampleLines, startedJobs, toggleEmptyFolder } from '../../lib/logic/mirror.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { data } from '../../lib/stores/data.svelte.ts';
 	import Button from '../../lib/ui/Button.svelte';
@@ -31,6 +36,7 @@
 	import Field from '../../lib/ui/Field.svelte';
 	import Notice from '../../lib/ui/Notice.svelte';
 	import Plate from '../../lib/ui/Plate.svelte';
+	import Progress from '../../lib/ui/Progress.svelte';
 	import { toast } from '../../lib/ui/toast.svelte.ts';
 	import MirrorNotes from './MirrorNotes.svelte';
 
@@ -42,9 +48,10 @@
 
 	let { ids, onclose, ondone }: Props = $props();
 
-	let plan = $state.raw<MirrorPlan | null>(null);
-	let loading = $state(false);
-	let error = $state<string | null>(null);
+	// One comparison per mailbox: its answer, its failure, or still on its way (by account id).
+	let plans = $state.raw<ReadonlyMap<number, MirrorAccountPlan>>(new Map());
+	let failures = $state.raw<ReadonlyMap<number, string>>(new Map());
+	let pending = $state.raw<ReadonlySet<number>>(new Set());
 	let percent = $state(DEFAULT_MAX_DELETE_PERCENT);
 	let percentText = $state(String(DEFAULT_MAX_DELETE_PERCENT));
 	let minCount = $state(DEFAULT_MIN_DELETE_COUNT);
@@ -55,14 +62,22 @@
 	let emptyFolders = $state.raw<ReadonlyMap<string, EmptyFolder>>(new Map());
 	let limitOpen = $state(false);
 	let confirming = $state(false);
+	let confirmingStart = $state(false);
 	let applying = $state(false);
+	let starting = $state(false);
 	let applyError = $state<string | null>(null);
 	let gone = false;
-	let asked = 0;
+	// A new comparison of every mailbox (or a start) ends the round before it: its answers are no longer shown.
+	let round = 0;
 	onDestroy(() => (gone = true));
 
-	const accounts = $derived(plan?.accounts ?? []);
+	const accounts = $derived(comparedInOrder(ids, plans));
+	const comparing = $derived(pending.size > 0);
+	const comparedCount = $derived(ids.length - pending.size);
+	const busy = $derived(applying || starting);
 	const verdict = $derived(mirrorState(accounts));
+	// Start now is the next thing to do while there is nothing to apply yet; Apply once the comparison has something.
+	const startFirst = $derived(comparing || !canApply(verdict));
 	const totals = $derived(mirrorTotals(accounts));
 	const runIds = $derived(readyIds(accounts));
 	const codes = $derived(blockCodes(accounts));
@@ -98,35 +113,62 @@
 
 	/** Why Apply is off, in words: shown next to the button, and as its tooltip. */
 	const reason = $derived(
-		loading || (!plan && !error)
-			? m.migrations_mirror_apply_loading()
-			: error
-				? m.migrations_mirror_compare_failed()
-				: verdict === 'blocked'
-					? m.migrations_mirror_apply_blocked()
-					: verdict === 'uptodate'
-						? m.migrations_mirror_apply_nothing()
-						: ''
+		canApply(verdict)
+			? ''
+			: comparing || (!accounts.length && !failures.size)
+				? m.migrations_mirror_apply_loading()
+				: !accounts.length
+					? m.migrations_mirror_compare_failed()
+					: verdict === 'blocked'
+						? m.migrations_mirror_apply_blocked()
+						: verdict === 'uptodate'
+							? m.migrations_mirror_apply_nothing()
+							: ''
 	);
 
-	const body = (dry: boolean): RunInput => ({ account_ids: dry ? ids : runIds, mode: 'mirror', dry_run: dry, max_delete_percent: percent, min_delete_count: minCount, allow_large_delete: allowLarge, allow_empty_folders: [...allowedEmpty] });
+	const body = (dry: boolean, accountIds: readonly number[]): RunInput => ({ account_ids: [...accountIds], mode: 'mirror', dry_run: dry, max_delete_percent: percent, min_delete_count: minCount, allow_large_delete: allowLarge, allow_empty_folders: [...allowedEmpty] });
 
-	async function compare() {
-		const mine = ++asked;
-		loading = true;
-		error = null;
-		try {
-			const answer = await post<MirrorPlan>('/runs', body(true));
-			if (gone || mine !== asked) return;
-			plan = answer;
-			emptyFolders = mergeEmptyFolders(emptyFolders, answer.accounts ?? [], allowedEmpty);
-		} catch (e) {
-			if (gone || mine !== asked) return;
-			plan = null;
-			error = errorText(e);
-		} finally {
-			if (mine === asked) loading = false;
+	const without = <T,>(set: ReadonlySet<T>, item: T) => {
+		const next = new Set(set);
+		next.delete(item);
+		return next;
+	};
+
+	/** Compares the mailboxes `only` names (a retry), or every one of them again (a new round: the options changed). */
+	async function compare(only?: readonly number[]) {
+		if (!only) {
+			round++;
+			plans = new Map();
+			failures = new Map();
+			pending = new Set();
 		}
+		const mine = round;
+		const todo = (only ?? ids).filter((id) => !pending.has(id));
+		if (!todo.length) return;
+		pending = new Set([...pending, ...todo]);
+		const left = new Map(failures);
+		for (const id of todo) left.delete(id);
+		failures = left;
+		const stale = () => gone || mine !== round;
+		await eachLimited(
+			todo,
+			MIRROR_COMPARE_PARALLEL,
+			async (id) => {
+				try {
+					const answer = await post<MirrorPlan>('/runs', body(true, [id]));
+					if (stale()) return;
+					const own = answer.accounts?.find((a) => a.account_id === id) ?? answer.accounts?.[0];
+					if (own) plans = new Map(plans).set(id, own);
+					emptyFolders = mergeEmptyFolders(emptyFolders, comparedInOrder(ids, plans), allowedEmpty);
+				} catch (e) {
+					if (stale()) return;
+					failures = new Map(failures).set(id, errorText(e));
+				} finally {
+					if (!stale()) pending = without(pending, id);
+				}
+			},
+			stale
+		);
 	}
 
 	onMount(() => void compare());
@@ -168,12 +210,40 @@
 		else void run();
 	}
 
+	/** Every selected mailbox, without waiting for the comparison: each job checks its own mailbox and keeps to the limits. */
+	async function startAll() {
+		starting = true;
+		applyError = null;
+		try {
+			const { accounts: answered, jobs: created } = await post<MirrorRun>('/runs', body(false, ids));
+			const jobs = startedJobs(created);
+			for (const job of jobs) data.upsertJob(job);
+			const started = new Set(jobs.map((job) => job.account_id));
+			const left = (answered ?? []).filter((a) => !started.has(a.account_id));
+			if (!jobs.length) {
+				// Nothing started: the comparison stops, and each mailbox shows what blocked it.
+				round++;
+				pending = new Set();
+				failures = new Map();
+				plans = new Map(left.map((a) => [a.account_id, blockedPlan(a)]));
+				return;
+			}
+			toast(m.migrations_mirror_queued({ count: jobs.length }), 'signal');
+			if (left.length) toast(m.migrations_mirror_start_skipped({ count: left.length }), 'warning');
+			ondone(jobs.map((job) => job.account_id));
+		} catch (e) {
+			applyError = errorText(e);
+		} finally {
+			starting = false;
+		}
+	}
+
 	async function run() {
 		applying = true;
 		applyError = null;
 		try {
 			// The server answers 200 with a job per mailbox that may run; the others come back with their blocks and no job.
-			const { jobs: answered } = await post<MirrorRun>('/runs', body(false));
+			const { jobs: answered } = await post<MirrorRun>('/runs', body(false, runIds));
 			const jobs = startedJobs(answered);
 			for (const job of jobs) data.upsertJob(job);
 			if (!jobs.length) {
@@ -208,10 +278,17 @@
 			{m.migrations_mirror_never_writes()}
 		</p>
 
-		{#if error}<ErrorNotice title={m.migrations_mirror_compare_failed()} message={error} onretry={compare} />{/if}
-		{#if loading}<p class="m-0 text-ink-2" role="status" data-testid="mirror-loading">{m.migrations_mirror_comparing()}</p>{/if}
+		{#if comparing}
+			<div class="flex flex-col gap-1.5" role="status" data-testid="mirror-loading">
+				<p class="m-0 flex flex-wrap items-baseline justify-between gap-x-3 text-ink-2">
+					<span>{m.migrations_mirror_comparing()}</span>
+					<span class="font-mono text-xs tabular-nums" data-testid="mirror-progress">{m.migrations_mirror_progress({ done: count(comparedCount), total: count(ids.length) })}</span>
+				</p>
+				<Progress value={ids.length ? (comparedCount / ids.length) * 100 : 0} label={m.migrations_mirror_comparing()} />
+			</div>
+		{/if}
 
-		{#if plan && !loading}
+		{#if accounts.length}
 			<div class="flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="mirror-summary">
 				<p class="m-0 font-medium" data-testid="mirror-totals">{@render totalsText(totals)}</p>
 				{#if verdict === 'uptodate'}
@@ -225,17 +302,37 @@
 				<div><Button icon={ToggleRight} onclick={enableAll} data-testid="mirror-enable">{m.migrations_mirror_enable()}</Button></div>
 			{/if}
 
+		{/if}
+
+		{#if ids.length}
 			<ul class="m-0 flex list-none flex-col p-0" data-testid="mirror-accounts">
-				{#each accounts as account (account.account_id)}
+				{#each ids as id (id)}
+					{@const account = plans.get(id)}
+					{@const failure = failures.get(id)}
+					{#if !account}
+						<li class="border-b border-line" data-testid={failure ? 'mirror-account-failed' : 'mirror-account-pending'}>
+							<div class="flex min-h-10 flex-wrap items-center gap-x-2 py-1">
+								<span class="min-w-0 truncate font-mono text-xs font-medium">{prefs.email(data.accounts.get(id)?.email || `#${id}`)}</span>
+								{#if failure}
+									<Plate tone="warning" icon={TriangleAlert} label={m.migrations_mirror_compare_failed()} />
+								{:else if pending.has(id)}
+									<Plate icon={Hourglass} busy label={m.migrations_mirror_comparing_one()} />
+								{/if}
+							</div>
+							{#if failure}
+								<div class="pb-3 pl-4"><ErrorNotice title={m.migrations_mirror_compare_failed()} message={failure} onretry={() => compare([id])} /></div>
+							{/if}
+						</li>
+					{:else}
 					{@const own = accountTotals(account)}
 					{@const rows = mirrorRows(account)}
 					{@const lines = sampleLines(account)}
 					<li class="border-b border-line" data-testid="mirror-account">
-						<details open={accounts.length <= 3 || !account.ready || hasWarningNote(account.notes)}>
+						<details open={ids.length <= 3 || !account.ready || hasWarningNote(account.notes)}>
 							<summary class="flex min-h-10 cursor-pointer flex-wrap items-center gap-x-2 py-1">
 								<span class="min-w-0 truncate font-mono text-xs font-medium">{email(account)}</span>
 								<Plate tone={account.ready ? 'signal' : 'warning'} icon={account.ready ? CircleCheck : TriangleAlert} label={account.ready ? m.migrations_mirror_ready() : m.migrations_mirror_blocked()} />
-								{#if accounts.length > 1}<span class="text-xs text-ink-2">{@render totalsText(own)}</span>{/if}
+								{#if ids.length > 1}<span class="text-xs text-ink-2">{@render totalsText(own)}</span>{/if}
 							</summary>
 							<div class="flex flex-col gap-3 pb-3 pl-4 text-xs">
 								{#each account.blocked ?? [] as block, b (b)}
@@ -313,6 +410,7 @@
 							</div>
 						</details>
 					</li>
+					{/if}
 				{/each}
 			</ul>
 		{/if}
@@ -353,16 +451,19 @@
 		{/if}
 
 		{#if applyError}<ErrorNotice title={m.migrations_mirror_apply_failed()} message={applyError} />{/if}
-		{#if reason && !loading}<p class="m-0 text-xs text-ink-2" data-testid="mirror-apply-reason">{reason}</p>{/if}
+		<p class="m-0 text-xs text-ink-2" data-testid="mirror-start-hint">{m.migrations_mirror_start_hint()}</p>
+		{#if reason && !comparing}<p class="m-0 text-xs text-ink-2" data-testid="mirror-apply-reason">{reason}</p>{/if}
+		{#if comparing && canApply(verdict)}<p class="m-0 text-xs text-ink-2" data-testid="mirror-apply-partial">{m.migrations_mirror_apply_partial({ count: count(runIds.length) })}</p>{/if}
 	</div>
 	{#snippet actions()}
 		<Button variant="ghost" onclick={onclose}>{m.common_cancel()}</Button>
-		<Button icon={ScanSearch} loading={loading} disabled={applying} onclick={compare} data-testid="mirror-compare">{m.migrations_mirror_compare_again()}</Button>
+		<Button icon={ScanSearch} loading={comparing} disabled={busy} onclick={() => compare()} data-testid="mirror-compare">{m.migrations_mirror_compare_again()}</Button>
+		<Button variant={startFirst ? 'primary' : 'secondary'} icon={Play} loading={starting} disabled={applying} onclick={() => (confirmingStart = true)} data-testid="mirror-start">{m.migrations_mirror_start_now({ count: count(ids.length) })}</Button>
 		<Button
-			variant={totals.delete > 0 ? 'danger' : 'primary'}
+			variant={totals.delete > 0 ? 'danger' : startFirst ? 'secondary' : 'primary'}
 			icon={GitCompareArrows}
 			loading={applying}
-			disabled={loading || !canApply(verdict)}
+			disabled={starting || !canApply(verdict)}
 			{reason}
 			onclick={apply}
 			data-testid="mirror-apply"
@@ -371,6 +472,16 @@
 		</Button>
 	{/snippet}
 </Dialog>
+
+{#if confirmingStart}
+	<Confirm
+		title={m.migrations_mirror_start_confirm_title({ count: count(ids.length) })}
+		text={m.migrations_mirror_start_confirm_text({ percent, min: count(minCount) })}
+		confirm={m.migrations_mirror_start_confirm_action({ count: count(ids.length) })}
+		onconfirm={startAll}
+		onclose={() => (confirmingStart = false)}
+	/>
+{/if}
 
 {#if confirming}
 	<Confirm

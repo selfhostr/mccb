@@ -528,7 +528,7 @@
 {:else if dialog?.kind === 'details'}
 	<TestDialog accountId={dialog.id} onclose={closeDialog} />
 {:else if dialog?.kind === 'import'}
-	<ImportDialog plan={dialog.plan} onclose={closeDialog} ondone={imported} />
+	<ImportDialog plan={dialog.plan} onclose={closeDialog} ondone={imported} onpreview={openMirror} />
 {:else if dialog?.kind === 'mirror'}
 	<MirrorDialog ids={dialog.ids} onclose={closeDialog} ondone={imported} />
 {:else if dialog?.kind === 'bulk-edit'}

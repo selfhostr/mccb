@@ -473,6 +473,60 @@ test.describe('mirror mode', () => {
 		await expect(dialog.getByTestId('mirror-notes')).toHaveCount(1);
 	});
 
+	test('each mailbox is compared by its own request, and Start now runs them all without waiting', async ({ page }) => {
+		await migrated(page, 1);
+		await ready(page);
+		const dialog = await openDialog(page, ALICE, BOB);
+		// One dry run per mailbox, not one for the whole selection.
+		const dry = (await state(page)).mirrorCalls.filter((b: { dry_run?: boolean }) => b.dry_run !== false);
+		expect(dry.map((b: { account_ids: number[] }) => b.account_ids).sort()).toEqual([[1], [2]]);
+		await expect(dialog.getByTestId('mirror-account')).toHaveCount(2);
+		await expect(dialog.getByTestId('mirror-start-hint')).toContainText('No need to wait for the comparison');
+
+		await dialog.getByTestId('mirror-start').click();
+		const confirm = page.getByRole('dialog', { name: 'Start the mirror for 2 mailboxes' });
+		await expect(confirm).toContainText('more than 20%');
+		await confirm.getByRole('button', { name: 'Start 2 jobs' }).click();
+		await expect(page.getByTestId('toast').first()).toContainText('Mirror queued for 1 mailboxes');
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		// Every selected mailbox, with the safety options: the server and each job decide the rest.
+		expect((await mirrorRuns(page)).at(-1)).toMatchObject({ account_ids: [1, 2], mode: 'mirror', dry_run: false, max_delete_percent: 20, min_delete_count: 10, allow_large_delete: false });
+	});
+
+	test('the Start dialog offers the mirror after a first run, with its safety limit, and turns the mirror on', async ({ page }) => {
+		await migrated(page, 1, false);
+		await ready(page);
+		await row(page, ALICE).getByRole('checkbox').check();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
+		const toggle = page.getByTestId('import-mirror-toggle');
+		await expect(toggle).not.toBeChecked();
+		await expect(page.getByTestId('import-mirror-options')).toHaveCount(0);
+		await toggle.check();
+		await expect(page.getByTestId('import-mode')).toBeDisabled();
+		const percent = page.getByTestId('import-mirror-percent');
+		await expect(percent).toHaveValue('20');
+		await percent.fill('35');
+		await page.getByTestId('import-mirror-min-count').fill('50');
+		await expect(page.getByTestId('import-confirm')).toHaveText('Start with mirror');
+		await page.getByTestId('import-confirm').click();
+		await expect(page.getByTestId('toast').first()).toContainText('Mirror queued for 1 mailboxes');
+		await expect(page.getByRole('dialog')).toHaveCount(0);
+		expect((await mirrorRuns(page)).at(-1)).toMatchObject({ account_ids: [1], mode: 'mirror', dry_run: false, max_delete_percent: 35, min_delete_count: 50 });
+		expect((await state(page)).accounts.find((a: { id: number }) => a.id === 1).options.mirror).toBe(true);
+	});
+
+	test('the Start dialog opens the mirror comparison on request', async ({ page }) => {
+		await migrated(page, 1);
+		await ready(page);
+		await row(page, ALICE).getByRole('checkbox').check();
+		await page.getByTestId('selection-bar').getByRole('button', { name: 'Start', exact: true }).click();
+		await page.getByTestId('import-mirror-toggle').check();
+		await page.getByTestId('import-mirror-preview').click();
+		const dialog = page.getByRole('dialog', { name: 'Resync in mirror mode' });
+		await expect(dialog.getByTestId('mirror-totals')).toBeVisible();
+		expect(await mirrorRuns(page)).toEqual([]);
+	});
+
 	test('narrow screen: the dialog does not overflow', async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await migrated(page, 1);

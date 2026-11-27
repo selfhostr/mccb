@@ -79,6 +79,36 @@ def quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+UID_SET_MOST = 5000   # messages per UID FETCH / SEARCH of a listing: few commands (a server may scan the folder per command)
+UID_SET_WIDTH = 4000  # characters of one UID set at most: well under the command line limit of any server
+
+
+def uid_sets(uids, most: int = UID_SET_MOST, width: int = UID_SET_WIDTH):
+    """(chunk, set) for UID commands: the UIDs in ascending order, cut in chunks of at most `most` UIDs, each written as
+    an exact IMAP sequence set ("5:900,903,910:2000": runs of consecutive UIDs, never a UID that was not asked) of at
+    most `width` characters. One command per chunk instead of one per few hundred messages."""
+    nums = sorted({int(u) for u in uids})
+    chunk: list[int] = []
+    parts: list[str] = []
+    size = 0
+    i = 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1 and j + 1 - i + len(chunk) < most:
+            j += 1
+        part = str(nums[i]) if i == j else f"{nums[i]}:{nums[j]}"
+        if chunk and (size + len(part) + 1 > width or len(chunk) + (j - i + 1) > most):
+            yield chunk, ",".join(parts)
+            chunk, parts, size = [], [], 0
+            continue  # the same run again, in a new chunk (it may now be longer)
+        chunk.extend(range(nums[i], nums[j] + 1))
+        parts.append(part)
+        size += len(part) + 1
+        i = j + 1
+    if chunk:
+        yield chunk, ",".join(parts)
+
+
 def _login(M: imaplib.IMAP4, login: str, password: str) -> None:
     """AUTHENTICATE PLAIN in UTF-8 if advertised, otherwise LOGIN with properly
     quoted strings (imaplib.login does not quote and forces ASCII)."""
@@ -453,10 +483,10 @@ class ImapConn:
             self.select(name, readonly=True)
         from email.parser import BytesHeaderParser
         out: dict[str, list[str]] = {}
-        for i in range(0, len(uids), 200):
-            chunk = uids[i:i + 200]
+        asked = {str(u) for u in uids}
+        for _chunk, uset in uid_sets(uids):
             try:
-                typ, data = self._m().uid("FETCH", ",".join(chunk), f"(UID BODY.PEEK[HEADER.FIELDS ({header})])")
+                typ, data = self._m().uid("FETCH", uset, f"(UID BODY.PEEK[HEADER.FIELDS ({header})])")
             except Exception as e:
                 raise wrap_exc(e) from e
             self._check(typ, data, "FETCH")
@@ -468,6 +498,8 @@ class ImapConn:
                 tail = data[i + 1] if i + 1 < len(data) and isinstance(data[i + 1], bytes) else b""
                 m = re.search(rb"UID\s+(\d+)", (d[0] or b"") + b" " + tail)
                 if not m:
+                    continue
+                if m.group(1).decode() not in asked:  # an unsolicited FETCH may name another message
                     continue
                 msg = BytesHeaderParser().parsebytes(d[1])
                 vals = [re.sub(r"\s+", "", str(v)) for v in (msg.get_all(header) or [])]
@@ -639,10 +671,10 @@ class ImapConn:
         self.ensure_selected(name, True)
         from email.parser import BytesHeaderParser
         out: dict[str, tuple[list[str], list[str]]] = {}
-        for i in range(0, len(uids), 200):
-            chunk = uids[i:i + 200]
+        asked = {str(u) for u in uids}
+        for _chunk, uset in uid_sets(uids):
             try:
-                typ, data = self._m().uid("FETCH", ",".join(chunk), f"(UID FLAGS BODY.PEEK[HEADER.FIELDS ({header})])")
+                typ, data = self._m().uid("FETCH", uset, f"(UID FLAGS BODY.PEEK[HEADER.FIELDS ({header})])")
             except Exception as e:
                 raise wrap_exc(e) from e
             self._check(typ, data, "FETCH")
@@ -654,6 +686,8 @@ class ImapConn:
                 meta = (d[0] or b"") + b" " + tail
                 mu = re.search(rb"UID\s+(\d+)", meta)
                 if not mu:
+                    continue
+                if mu.group(1).decode() not in asked:  # an unsolicited FETCH may name another message
                     continue
                 mf = re.search(rb"FLAGS\s+\(([^)]*)\)", meta)
                 flags = mf.group(1).decode("utf-8", "replace").split() if mf else []

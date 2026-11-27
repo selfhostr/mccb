@@ -128,6 +128,8 @@ Mirror today: IMAP to IMAP (mail), CalDAV to CalDAV (events and tasks), CardDAV 
 2. Look at what a pass would do: `POST /api/runs {account_ids, mode: "mirror"}`. This is a dry run, the default: it connects, lists and compares, and writes nothing anywhere and creates no job.
 3. Run it: the same request with `"dry_run": false`. One job per mailbox is created, with the mode `mirror`.
 
+In the interface: select the mailboxes, **Start**, then tick **Mirror: also carry over deletions and moves** (offered once the mailboxes have run). It turns the option on for them and starts one job per mailbox right away, with the safety limit set under the choice; each job copies what is new, then deletes and moves, and checks every rule itself (a mailbox over the limit deletes nothing and says why in its log). **Compare first, without writing** opens the comparison: one dry run per mailbox, four at a time, each shown as it is answered, with **Start now** to start them all without waiting. A dry run of several mailboxes in one request compares them in parallel too (4 at a time).
+
 | field | default | meaning |
 |---|---|---|
 | `dry_run` | `true` | compute only |
