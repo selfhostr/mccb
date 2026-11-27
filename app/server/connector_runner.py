@@ -859,7 +859,7 @@ class ConnectorJobRunner(JobRunner):
                 self.problems.append(f"mirror: {stats[p]['errors']} {p} action(s) failed")
             self.log(f"Mirror {p}: " + ", ".join(f"{k} {v}" for k, v in stats[p].items()))
 
-    def _mirror_adopt(self, phase: str, a, session) -> None:
+    def _mirror_adopt(self, phase: str, a, session, adopted: dict) -> None:
         """A row without the etag of mccb's write (migrated before they were kept): when the target holds the same
         object as the source (same lines, in any order: servers reorder them), the etag the inventory saw is kept,
         and the mirror may delete or update it from the next pass on. Different: left as it is, never touched."""
@@ -875,10 +875,13 @@ class ConnectorJobRunner(JobRunner):
             return
         if mm.same_object(got.raw, there):
             db.ex("UPDATE items SET target_etag=? WHERE id=? AND target_etag IS NULL", (a.refs[0].version, a.row["id"]))
-            self.log(f"Mirror adopt {phase} key={key} ref={a.refs[0].ref}: same object on both sides, its etag kept")
+            adopted["same"] += 1
+            self.log(f"Mirror adopt {phase} key={key} ref={a.refs[0].ref}: same object on both sides, its etag kept",
+                     "debug")
         else:
+            adopted["other"] += 1
             self.log(f"Mirror adopt {phase} key={key} ref={a.refs[0].ref}: the target holds another version, never "
-                     "touched by the mirror", "warning")
+                     "touched by the mirror", "debug")
 
     def _mirror_act(self, session, st: dict, what: str, key: str, fn):
         """(result, ok) of one write on the target; a failure is counted and logged, the pass goes on."""
@@ -1000,8 +1003,17 @@ class ConnectorJobRunner(JobRunner):
                       (etag, self.account_id, CARRIED[phase], target, a.row["hash"], a.row["id"]))
             st["updated"] += 1
             self.log(f"Mirror update {phase} key={key} ref={first} -> {new or first} in '{target}': ok")
+        adopted = {"same": 0, "other": 0}
         for a in an.of(phase, "adopt"):  # written before etags were kept: adopted when both sides hold the same
-            self._mirror_adopt(phase, a, session)
+            self._mirror_adopt(phase, a, session, adopted)
+        if adopted["same"]:
+            self.log(f"Mirror {phase}: {adopted['same']} item(s) copied by earlier runs adopted as they are on the "
+                     "target (first mirror pass): their etag is kept, the next pass may update or delete them")
+        if adopted["other"]:
+            self.log(f"Mirror {phase}: {adopted['other']} item(s) copied by earlier runs differ on the target from "
+                     "the source version (the server rewrote them, or they were edited there): left as they are, "
+                     "the mirror never overwrites or deletes what it cannot prove it wrote; delete or fix them by "
+                     "hand on the target if they must follow the source")
         for a in an.of(phase, "release"):  # its resource is also the copy of another item still at the source
             self.set_item(a.row["id"], "deleted", "mirror: deleted at the source; its resource on the target is "
                           "shared with another item still at the source: kept")

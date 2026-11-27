@@ -320,6 +320,14 @@ def test_mirror_adopts_legacy_rows_whose_content_matches(client, env, dav):
         c.close()
     job, rep = mirror(client, aid)                      # not verified yet: kept, the others are adopted
     assert find(contents(dst, "caldav"), "UID:e3")
+    logs = db.q("SELECT level, msg FROM job_logs WHERE job_id=? ORDER BY id", (job["id"],))
+    # adoption is the normal first pass: one INFO summary per kind, the per-item lines are debug, never a warning
+    summary = [r for r in logs if "adopted as they are on the target" in r["msg"]]
+    kinds = [r["msg"].split(":")[0] for r in summary]
+    assert "Mirror calendar" in kinds and len(kinds) == len(set(kinds)), kinds
+    assert all(r["level"] == "info" for r in summary), [dict(r) for r in logs]
+    assert not [r for r in logs if r["level"] == "warning" and "Mirror adopt" in r["msg"]], logs
+    assert all(r["level"] == "debug" for r in logs if r["msg"].startswith("Mirror adopt")), logs
     assert db.q1("SELECT COUNT(*) n FROM items WHERE account_id=? AND kind='event' AND status='ok' AND "
                  "target_etag IS NULL", (aid,))["n"] == 1   # e3 only: gone at the source, nothing to compare
     c = client_of(src)
