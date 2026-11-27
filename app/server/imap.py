@@ -23,6 +23,16 @@ SPECIAL_NAMES = {
     "junk": ["Junk", "Spam", "Junk E-mail", "Courrier indésirable", "INBOX.Junk", "INBOX.Spam"],
 }
 SPECIAL_DEFAULT = {"sent": "Sent", "drafts": "Drafts", "trash": "Trash", "junk": "Junk"}
+# flags a copy is given afterwards when it lacks them (read, answered, starred, draft): keywords are not, a server
+# without them would be asked again at every pass
+REPAIRED_FLAGS = {"\\seen": "\\Seen", "\\answered": "\\Answered", "\\flagged": "\\Flagged", "\\draft": "\\Draft"}
+
+
+def flags_to_add(want, have) -> list[str]:
+    """The system flags of `want` (REPAIRED_FLAGS, any case) that `have` lacks, sorted, in their usual case."""
+    got = {f.lower() for f in have or []}
+    return sorted({REPAIRED_FLAGS[f.lower()] for f in want or [] if f.lower() in REPAIRED_FLAGS} - {
+        REPAIRED_FLAGS[g] for g in got if g in REPAIRED_FLAGS})
 
 
 # ---------------------------------------------------------------- modified UTF-7 (RFC 3501 §5.1.3)
@@ -67,6 +77,36 @@ def utf7_decode(s: str) -> str:
 
 def quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+UID_SET_MOST = 5000   # messages per UID FETCH / SEARCH of a listing: few commands (a server may scan the folder per command)
+UID_SET_WIDTH = 4000  # characters of one UID set at most: well under the command line limit of any server
+
+
+def uid_sets(uids, most: int = UID_SET_MOST, width: int = UID_SET_WIDTH):
+    """(chunk, set) for UID commands: the UIDs in ascending order, cut in chunks of at most `most` UIDs, each written as
+    an exact IMAP sequence set ("5:900,903,910:2000": runs of consecutive UIDs, never a UID that was not asked) of at
+    most `width` characters. One command per chunk instead of one per few hundred messages."""
+    nums = sorted({int(u) for u in uids})
+    chunk: list[int] = []
+    parts: list[str] = []
+    size = 0
+    i = 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1 and j + 1 - i + len(chunk) < most:
+            j += 1
+        part = str(nums[i]) if i == j else f"{nums[i]}:{nums[j]}"
+        if chunk and (size + len(part) + 1 > width or len(chunk) + (j - i + 1) > most):
+            yield chunk, ",".join(parts)
+            chunk, parts, size = [], [], 0
+            continue  # the same run again, in a new chunk (it may now be longer)
+        chunk.extend(range(nums[i], nums[j] + 1))
+        parts.append(part)
+        size += len(part) + 1
+        i = j + 1
+    if chunk:
+        yield chunk, ",".join(parts)
 
 
 def _login(M: imaplib.IMAP4, login: str, password: str) -> None:
@@ -443,10 +483,10 @@ class ImapConn:
             self.select(name, readonly=True)
         from email.parser import BytesHeaderParser
         out: dict[str, list[str]] = {}
-        for i in range(0, len(uids), 200):
-            chunk = uids[i:i + 200]
+        asked = {str(u) for u in uids}
+        for _chunk, uset in uid_sets(uids):
             try:
-                typ, data = self._m().uid("FETCH", ",".join(chunk), f"(UID BODY.PEEK[HEADER.FIELDS ({header})])")
+                typ, data = self._m().uid("FETCH", uset, f"(UID BODY.PEEK[HEADER.FIELDS ({header})])")
             except Exception as e:
                 raise wrap_exc(e) from e
             self._check(typ, data, "FETCH")
@@ -458,6 +498,8 @@ class ImapConn:
                 tail = data[i + 1] if i + 1 < len(data) and isinstance(data[i + 1], bytes) else b""
                 m = re.search(rb"UID\s+(\d+)", (d[0] or b"") + b" " + tail)
                 if not m:
+                    continue
+                if m.group(1).decode() not in asked:  # an unsolicited FETCH may name another message
                     continue
                 msg = BytesHeaderParser().parsebytes(d[1])
                 vals = [re.sub(r"\s+", "", str(v)) for v in (msg.get_all(header) or [])]
@@ -621,6 +663,118 @@ class ImapConn:
         m = re.search(r"UIDVALIDITY\s+(\d+)", t, re.I)
         return m.group(1) if m else ""
 
+    # -- mirror mode on the TARGET (app/server/mirror.py): our own messages only, by UID
+    def flags_and_header(self, name: str, uids: list[str], header: str) -> dict[str, tuple[list[str], list[str]]]:
+        """{uid: (flags, [unfolded values of `header`])} in chunks of UID FETCH (BODY.PEEK: nothing marked read)."""
+        if not uids:
+            return {}
+        self.ensure_selected(name, True)
+        from email.parser import BytesHeaderParser
+        out: dict[str, tuple[list[str], list[str]]] = {}
+        asked = {str(u) for u in uids}
+        for _chunk, uset in uid_sets(uids):
+            try:
+                typ, data = self._m().uid("FETCH", uset, f"(UID FLAGS BODY.PEEK[HEADER.FIELDS ({header})])")
+            except Exception as e:
+                raise wrap_exc(e) from e
+            self._check(typ, data, "FETCH")
+            data = list(data or [])
+            for j, d in enumerate(data):
+                if not (isinstance(d, tuple) and len(d) >= 2 and isinstance(d[1], bytes)):
+                    continue
+                tail = data[j + 1] if j + 1 < len(data) and isinstance(data[j + 1], bytes) else b""
+                meta = (d[0] or b"") + b" " + tail
+                mu = re.search(rb"UID\s+(\d+)", meta)
+                if not mu:
+                    continue
+                if mu.group(1).decode() not in asked:  # an unsolicited FETCH may name another message
+                    continue
+                mf = re.search(rb"FLAGS\s+\(([^)]*)\)", meta)
+                flags = mf.group(1).decode("utf-8", "replace").split() if mf else []
+                msg = BytesHeaderParser().parsebytes(d[1])
+                vals = [re.sub(r"\s+", "", str(v)) for v in (msg.get_all(header) or [])]
+                out[mu.group(1).decode()] = (flags, vals)
+        return out
+
+    def add_missing_flags(self, name: str, header: str, prefix: str, wanted: dict[str, list[str]]
+                          ) -> tuple[int, int, int]:
+        """Gives our copies in `name` the system flags they lack: `wanted` is {bare import id: flags its copy must
+        carry}. Our copies only: SEARCH HEADER for `prefix` (every message of the folder when it finds fewer than
+        `wanted`), then the header of each candidate compared exactly (a message of the owner, or of another import,
+        is never touched). UID STORE +FLAGS.SILENT, grouped by flags;
+        nothing is ever removed. Some servers ignore the flags of APPEND: this is how they end up right. The flags
+        are read again after the STORE. Returns (copies checked, copies fixed, copies still lacking them)."""
+        if not wanted:
+            return 0, 0, 0
+        cands = self.search_header(name, header, prefix)
+        if len(cands) < len(wanted):
+            # fewer hits than copies expected: a server whose SEARCH HEADER misses headers (not indexed, or not
+            # indexed yet) is not trusted, every message of the folder is read (headers only) and compared here
+            cands = self.uids(name)
+        todo: dict[tuple[str, ...], list[str]] = {}
+        checked = 0
+        for uid, (flags, vals) in self.flags_and_header(name, cands, header).items():
+            if "\\deleted" in {f.lower() for f in flags}:
+                continue
+            want = None
+            for v in vals:
+                bare = v[1:-1] if v.startswith("<") and v.endswith(">") else v
+                if bare in wanted:
+                    want = wanted[bare]
+                    break
+            if want is None:
+                continue
+            checked += 1
+            add = flags_to_add(want, flags)
+            if add:
+                todo.setdefault(tuple(add), []).append(uid)
+        fixed: list[tuple[str, tuple[str, ...]]] = []
+        for add, uids in todo.items():
+            for i in range(0, len(uids), 200):
+                chunk = uids[i:i + 200]
+                self.uid_store(name, chunk, "+", list(add))
+                fixed.extend((u, add) for u in chunk)
+        again = self.flags_and_header(name, [u for u, _ in fixed], header) if fixed else {}
+        lacking = sum(1 for u, add in fixed if u in again and flags_to_add(add, again[u][0]))
+        return checked, len(fixed), lacking
+
+    def uid_store(self, name: str, uids: list[str], op: str, flags: list[str]) -> None:
+        """UID STORE <uids> +FLAGS.SILENT / -FLAGS.SILENT (flags), in a folder selected read-write."""
+        if not uids or not flags:
+            return
+        self.ensure_selected(name, False)
+        try:
+            typ, data = self._m().uid("STORE", ",".join(uids), f"{op}FLAGS.SILENT", "(" + " ".join(flags) + ")")
+        except Exception as e:
+            raise wrap_exc(e) from e
+        self._check(typ, data, "STORE")
+
+    def uid_move(self, name: str, uids: list[str], dest: str) -> str | None:
+        """Moves messages (MOVE, else COPY + \\Deleted + UID EXPUNGE of these UIDs only; without UIDPLUS they stay
+        flagged \\Deleted in `name`, never a plain EXPUNGE). Returns the new UID of the last one when told (COPYUID)."""
+        self.ensure_selected(name, False)
+        M = self._m()
+        seq = ",".join(uids)
+        try:
+            if "MOVE" in self.caps:
+                typ, data = M.uid("MOVE", seq, quote(dest))
+                self._check(typ, data, f"MOVE to {dest}")
+            else:
+                typ, data = M.uid("COPY", seq, quote(dest))
+                self._check(typ, data, f"COPY to {dest}")
+                typ, d2 = M.uid("STORE", seq, "+FLAGS.SILENT", "(\\Deleted)")
+                self._check(typ, d2, "STORE")
+                if "UIDPLUS" in self.caps:
+                    typ, d3 = M.uid("EXPUNGE", seq)
+                    self._check(typ, d3, "UID EXPUNGE")
+        except ImapError:
+            raise
+        except Exception as e:
+            raise wrap_exc(e) from e
+        text = _text(data) + " " + _text(M.untagged_responses.pop("COPYUID", []) or [])
+        m = re.search(r"COPYUID\s+\d+\s+\S+\s+(\d+(?:[:,]\d+)*)", text)
+        return re.split(r"[:,]", m.group(1))[-1] if m else None
+
     def uid_copy(self, name: str, uids: list[str], dest: str) -> None:
         self.ensure_selected(name, False)
         try:
@@ -693,15 +847,43 @@ def with_retry(fn, conn: ImapConn, retries: int = 5, base_delay: float = 1.0, sh
                     raise
 
 
-def personal_prefix(conn: ImapConn) -> str:
-    """Personal namespace prefix (e.g. "INBOX." on Courier/Cyrus), otherwise ''."""
+def parse_namespace(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Prefixes (raw, modified UTF-7) of the personal, other users' and shared namespaces of a NAMESPACE response
+    (RFC 2342), e.g. `(("" "/")) (("Dossiers partag&AOk-s/" "/")) (("Dossiers publics/" "/"))` on SmarterMail."""
+    toks = re.findall(r'"(?:[^"\\]|\\.)*"|\(|\)|[^\s()"]+', text)
+    groups: list[list[str]] = []
+    depth = 0
+    for i, t in enumerate(toks):
+        if t == "(":
+            depth += 1
+            if depth == 1:
+                groups.append([])
+            elif depth == 2 and i + 1 < len(toks) and toks[i + 1].startswith('"'):
+                groups[-1].append(re.sub(r"\\(.)", r"\1", toks[i + 1][1:-1]))  # the prefix of a descriptor
+        elif t == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and t.upper() == "NIL":
+            groups.append([])
+        if len(groups) > 3:
+            break
+    groups = (groups + [[], [], []])[:3]
+    return groups[0], groups[1], groups[2]
+
+
+def namespaces(conn: ImapConn) -> tuple[list[str], list[str], list[str]]:
+    """parse_namespace() of the server's NAMESPACE, ([""], [], []) without it."""
     if "NAMESPACE" not in conn.caps:
-        return ""
+        return [""], [], []
     try:
         typ, data = conn._m().namespace()
     except Exception:
-        return ""
+        return [""], [], []
     if typ != "OK":
-        return ""
-    m = re.match(r'\s*\(\("((?:[^"\\]|\\.)*)"', _text(data))
-    return m.group(1) if m else ""
+        return [""], [], []
+    personal, other, shared = parse_namespace(_text(data))
+    return personal or [""], other, shared
+
+
+def personal_prefix(conn: ImapConn) -> str:
+    """Personal namespace prefix (e.g. "INBOX." on Courier/Cyrus), otherwise ''."""
+    return namespaces(conn)[0][0]

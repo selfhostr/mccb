@@ -116,7 +116,7 @@ def test_accounts_crud_and_password_encrypted(client, env):
     assert r.status_code == 201, r.text
     a = r.json()
     assert a["has_password"] is True and a["status"] == "new" and a["job"] is None and a["pst_id"] is None
-    assert a["options"] == {"mail": True, "calendar": True, "contacts": True}
+    assert a["options"] == {"mail": True, "calendar": True, "contacts": True, "mirror": False}
     assert a["login"] == "jean@example.test"
     from app.server import db
     from app.server.security import decrypt

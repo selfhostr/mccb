@@ -43,6 +43,17 @@ class Settings:
         # 1 = allow link-local / metadata addresses (not recommended)
         self.fetch_allow_link_local = os.environ.get("FETCH_ALLOW_LINK_LOCAL", "0") == "1"
         self.fetch_parallel = max(1, _int("FETCH_PARALLEL", 2))
+        # mirror: days the copies kept before a final deletion stay in DATA_DIR/mirror-trash (0 = for ever)
+        self.mirror_trash_days = max(0, _int("MIRROR_TRASH_DAYS", 30))
+        # mirror: max_delete_percent applies only above this many deletions of a kind in one pass
+        self.mirror_min_delete_count = max(0, _int("MIRROR_MIN_DELETE_COUNT", 10))
+        # 1 = a CalDAV/CardDAV source also brings the collections other accounts share with it and the public ones
+        # (default: left out, each is migrated with the mailbox that owns it)
+        self.dav_include_shared = os.environ.get("DAV_INCLUDE_SHARED", "0") == "1"
+        # 1 = an IMAP source also brings the folders other mailboxes share with it (other users' namespace, e.g.
+        # SmarterMail "Shared Folders/<owner>/...") and the public ones, copied into it as its own folders
+        # (default: left out, each is migrated with the mailbox that owns it)
+        self.imap_include_shared = os.environ.get("IMAP_INCLUDE_SHARED", "0") == "1"
 
     @property
     def db_path(self) -> Path:

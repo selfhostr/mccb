@@ -187,19 +187,25 @@ def test_each_calendar_gets_its_collection_and_is_counted(client, mdaemon):
     assert len(rep["dav"]["calendar"]["collections"]) == 3
 
 
-def test_refused_creation_falls_back_to_the_default_collection(client, mdaemon):
+def test_refused_creation_is_one_folder_error_never_the_default_collection(client, mdaemon):
+    """The target refuses to create the collection of a source calendar: one line for the folder, its items in error
+    with that reason, nothing put into another collection (the calendars of the source stay apart)."""
+    from app.server import db
     mdaemon.refuse = True
-    jid = start(client, cal_account(client))
+    aid = cal_account(client)
+    jid = start(client, aid)
     j = run_job(client, jid)
     log = log_of(client, jid)
-    assert j["status"] == "done", log
-    assert "refused to create 'Jours fériés - France'" in log and "b64=Q2FsZW5kYXI" in log
-    assert len(mdaemon.by_name("Calendar")) == 4 and len(mdaemon.by_name("Travail")) == 2
+    assert j["status"] == "done_with_errors", log
+    want = "the target refuses to create calendars: create 'Jours fériés - France' in the webmail then rerun"
+    assert log.count(want) == 1 and "APPEND failure" not in log, log
+    assert len(mdaemon.by_name("Calendar")) == 1 and len(mdaemon.by_name("Travail")) == 2
+    # MKCALENDAR, then an extended MKCOL (RFC 5689), then nothing more
+    assert [m for m, _p in mdaemon.methods if m.startswith("MK")] == ["MKCALENDAR", "MKCOL"]
+    rows = db.q("SELECT status, error FROM items WHERE account_id=? AND folder='Jours fériés - France'", (aid,))
+    assert len(rows) == 3 and all(r["status"] == "error" and want in r["error"] for r in rows)
     rep = client.get(f"/api/jobs/{jid}/report").json()
-    default = next(c for c in rep["dav"]["calendar"]["collections"] if "Q2FsZW5kYXI" in c["url"])
-    # two source calendars share it: counted once, for both, with their own totals
-    assert default["sent"] == 4 and default["present"] == 4
-    assert sorted(default["folders"]) == ["Calendrier", "Jours fériés - France"]
+    assert all("Q2FsZW5kYXI" not in c["url"] or c["sent"] == 1 for c in rep["dav"]["calendar"]["collections"])
 
 
 def test_missing_items_count_in_the_final_summary(client, mdaemon):

@@ -41,6 +41,8 @@ def job_view(r) -> dict:
         # byte rate only alongside an item rate (rate is reset to NULL on pause/crash, rate_bytes may lag)
         "rate_bytes": (r["rate_bytes"] if "rate_bytes" in r.keys() else None) if r["rate"] is not None else None,
         "eta": r["eta"],
+        # bytes of mail imported from this source so far, every run counted (null: not counted yet)
+        "bytes_ok": r["bytes_ok"] if "bytes_ok" in r.keys() else None,
         "started_at": r["started_at"], "finished_at": r["finished_at"], "error": r["error"],
         "mode": r["mode"], "created_at": r["created_at"],
         # current pipeline sizes {mode: auto|manual, builders, connections, fallback} (None before the job starts)
@@ -50,6 +52,8 @@ def job_view(r) -> dict:
         "priority": r["priority"] if "priority" in r.keys() else 0,
         "batch_id": r["batch_id"] if "batch_id" in r.keys() else None,
         "pause_reason": r["pause_reason"] if "pause_reason" in r.keys() else None,
+        # mirror job: {options, <kind>: {added, updated, deleted, skipped_by_safety, errors}, blocked} (else null)
+        "mirror": db.jload(r["mirror"], None) if "mirror" in r.keys() else None,
     }
 
 
@@ -99,7 +103,13 @@ def target_view(r) -> dict:
             "has_secret": bool(r["target_secret_enc"])}
 
 
-def account_view(r, with_job: bool = True) -> dict:
+def _mirror_of(r) -> bool:
+    return bool(r["opt_mirror"]) if "opt_mirror" in r.keys() else False
+
+
+def account_view(r, with_job: bool = True, imported: int | None = None) -> dict:
+    """`imported`: bytes of mail already imported when the caller has them (list: one GROUP BY for every account)."""
+    from . import mailbox_size
     job = None
     if with_job:
         jr = latest_job_row(r["id"])
@@ -109,9 +119,34 @@ def account_view(r, with_job: bool = True) -> dict:
         "has_password": bool(r["password_enc"]), "status": r["status"], "last_test": r["last_test"],
         "last_test_result": db.jload(r["last_test_result"], None),
         "pst_id": r["pst_id"], "source": source_view(r), "target": target_view(r),
-        "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"])},
+        # mirror: the mirror mode is allowed for this account (docs/planning.md "Mirror"); also at the top level
+        "options": {"mail": bool(r["opt_mail"]), "calendar": bool(r["opt_calendar"]), "contacts": bool(r["opt_contacts"]),
+                    "mirror": _mirror_of(r)},
+        "mirror": _mirror_of(r),
+        **_source_reach(r),
+        # mail at the source {bytes, count, at, approx, computing} (bytes null: unknown) and bytes imported from it
+        "source_size": mailbox_size.view(r, imported if imported is not None else _imported(r)),
         "job": job,
     }
+
+
+def _imported(r) -> int | None:
+    from . import mailbox_size
+    try:
+        return mailbox_size.imported_bytes(r)
+    except Exception:  # noqa: BLE001 - an unreadable source (connector gone): nothing to show
+        return None
+
+
+def _source_reach(r) -> dict:
+    """source_carries: {calendar, contacts: the source can bring them} (None: unknown, PST and files); source_dav:
+    for an IMAP source, the server it is on and why its CalDAV/CardDAV is not read (see wiring.source_server)."""
+    from ..connectors import wiring
+    from ..connectors.base import ConnectorError
+    try:
+        return {"source_carries": wiring.source_carries(r), "source_dav": wiring.source_dav_view(r)}
+    except (ConnectorError, KeyError, IndexError, TypeError, ValueError):
+        return {"source_carries": None, "source_dav": None}
 
 
 def get_account(aid: int) -> dict | None:

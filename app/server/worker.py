@@ -288,6 +288,7 @@ class Worker:
         self.repairs.recover()
         self.dedups.recover()
         last_recover = time.time()
+        last_purge = 0.0
         log.info("worker %s started (concurrency %s)", self.id,
                  f"auto, {self.auto_limit()} now" if self.auto_concurrency else self.concurrency)
         while not self.stop_event.is_set():
@@ -296,6 +297,13 @@ class Worker:
                 if time.time() - last_recover > 15:
                     self.recover()
                     last_recover = time.time()
+                if time.time() - last_purge > 3600:  # copies kept by the mirror (MIRROR_TRASH_DAYS)
+                    last_purge = time.time()
+                    from . import mirror
+                    n = mirror.purge_backups()
+                    if n:
+                        log.info("mirror-trash: %d job folder(s) older than %d days removed", n,
+                                 settings.mirror_trash_days)
             except Exception:
                 log.exception("worker loop")
             self.stop_event.wait(poll)

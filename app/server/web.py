@@ -8,7 +8,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.background import BackgroundTask
@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from ..connectors.wiring import items_key_of_account, sync_files_source
-from . import crash, csvaccounts, csvimport, db, planning, preview, repo, runs, tokens, uploads
+from . import crash, csvaccounts, csvimport, db, mailbox_size, planning, preview, repo, runs, tokens, uploads
 from .api_connectors import router as connectors_router
 from .api_planning import router as planning_router
 from .api_dedup import router as dedup_router
@@ -57,6 +57,7 @@ async def lifespan(_app):
     log.info("mccb v%s starting (web)", get_version())
     settings.ensure_dirs()
     db.conn()
+    mailbox_size.reset_pending()
     _admin_startup()
     task = asyncio.get_running_loop().create_task(_prune_events())
     try:
@@ -80,6 +81,8 @@ async def auth_mw(request: Request, call_next):
             if not (header and await asyncio.to_thread(tokens.verify_header, header)):
                 return JSONResponse({"detail": "not authenticated"}, status_code=401)
             request.state.via = "token"
+            # the public part of the token (stored in clear, shown in the list of tokens): who asked, no secret
+            request.state.token_prefix = header.strip().partition(" ")[2].strip()[:tokens.PREFIX_LEN]
     return await call_next(request)
 
 
@@ -321,6 +324,7 @@ class AccountUpdate(BaseModel):
     login: str | None = None
     options: dict[str, bool] | None = None
     pst_id: int | None = None
+    mirror: bool | None = None  # same as options.mirror (docs/planning.md "Mirror")
 
 
 def _account_or_404(aid: int):
@@ -336,7 +340,8 @@ def list_accounts(server_id: int | None = None):
         rows = db.q("SELECT * FROM accounts WHERE server_id=? ORDER BY email", (server_id,))
     else:
         rows = db.q("SELECT * FROM accounts ORDER BY email")
-    return [repo.account_view(r) for r in rows]
+    imported = mailbox_size.imported_by_account(rows)
+    return [repo.account_view(r, imported=imported.get(r["id"])) for r in rows]
 
 
 @app.post("/api/accounts", status_code=201)
@@ -379,9 +384,11 @@ def update_account(aid: int, a: AccountUpdate):
         sets.append("password_enc=?"); vals.append(encrypt(a.password))
         sets.append("status='new'")
     if a.options is not None:
-        for k in ("mail", "calendar", "contacts"):
+        for k in ("mail", "calendar", "contacts", "mirror"):
             if k in a.options:
                 sets.append(f"opt_{k}=?"); vals.append(int(bool(a.options[k])))
+    if a.mirror is not None and not (a.options and "mirror" in a.options):
+        sets.append("opt_mirror=?"); vals.append(int(a.mirror))
     if "pst_id" in a.model_fields_set:
         if a.pst_id is not None and not repo.get_pst(a.pst_id):
             raise HTTPException(404, "unknown PST")
@@ -474,6 +481,16 @@ def test_account_row(r) -> dict:
 @app.post("/api/accounts/{aid:int}/test")
 def test_account(aid: int):
     return test_account_row(_account_or_404(aid))
+
+
+@app.post("/api/accounts/{aid:int}/size")
+def compute_account_size(aid: int):
+    """Measures the mail of the source again, in the background (source_size.computing until it ends). 422: the
+    source cannot be measured before a job (PST, uploaded files: their job's listing gives it)."""
+    _account_or_404(aid)
+    if not mailbox_size.start(aid):
+        raise HTTPException(422, "the size of this source is known once a migration listed it")
+    return repo.get_account(aid)
 
 
 @app.post("/api/accounts/import-csv")
@@ -574,12 +591,41 @@ class RunIn(BaseModel):
     # optional: a named batch groups the jobs started together (GET /api/batches); mode "delta" is the final resync
     # (what arrived since the previous pass); priority: higher runs first among the queued jobs
     name: str | None = Field(None, max_length=120)
-    mode: str = Field("full", pattern="^(full|delta)$")
+    mode: str = Field("full", pattern="^(full|delta|mirror)$")
     priority: int = 0
+    # mode "mirror" only (docs/planning.md "Mirror"): dry_run (the default) computes and writes nothing
+    dry_run: bool = True
+    max_delete_percent: int = Field(20, ge=0, le=100)
+    allow_large_delete: bool = False
+    # max_delete_percent applies only above this many deletions of a kind (default: MIRROR_MIN_DELETE_COUNT, 10)
+    min_delete_count: int | None = Field(None, ge=0)
+    # folder keys (as named by a source_empty block) whose empty listing is accepted: their items are deleted
+    allow_empty_folders: list[Annotated[str, Field(max_length=1024)]] = Field(default_factory=list, max_length=1000)
 
 
 @app.post("/api/runs")
-def create_runs(body: RunIn):
+def create_runs(body: RunIn, request: Request):
+    if body.mode == "mirror":
+        from . import mirror
+        opts = mirror.Options(body.max_delete_percent, body.allow_large_delete, body.min_delete_count,
+                              body.allow_empty_folders)
+        if body.dry_run:
+            # one comparison per mailbox, a few at a time: each lists its source and its target in full (the
+            # interface asks one mailbox per request, and shows each as it comes)
+            return {"accounts": mirror.preview_accounts(body.account_ids, opts)}
+        # audit trail of every real mirror request (it deletes on the targets), written BEFORE it runs: who, which
+        # mailboxes, which options. The client address is the one the rest of the app uses (uvicorn's proxy
+        # headers, see main()); the job log of each job created gets the same line.
+        via = getattr(request.state, "via", "session")
+        who = f"token {getattr(request.state, 'token_prefix', '?')}" if via == "token" else "session"
+        ip = request.client.host if request.client else "?"
+        options = " ".join(f"{k}={v}" for k, v in opts.view().items())
+        log.warning("AUDIT mirror run requested: accounts=%s %s via=%s (%s) from=%s", list(body.account_ids), options,
+                    via, who, ip)
+        out = mirror.start(body.account_ids, opts, body.name, body.priority, requested_by=f"{who} from {ip}")
+        log.warning("AUDIT mirror run answered: accounts=%s jobs=%s", list(body.account_ids),
+                    [j["id"] for j in out["jobs"]])
+        return out
     jobs, errors, _batch = runs.create_jobs(body.account_ids, body.name, body.mode, body.priority)
     if errors and not jobs:
         raise HTTPException(422, {"msg": "no job created", "errors": errors})

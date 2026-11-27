@@ -26,6 +26,7 @@
 		type SecretDrafts,
 		type Values
 	} from '../../lib/logic/connector.ts';
+	import { fmtBytes } from '../../lib/format.ts';
 	import { prefs } from '../../lib/prefs.svelte.ts';
 	import { connectors } from '../../lib/stores/connectors.svelte.ts';
 	import { sources } from '../../lib/stores/sources.svelte.ts';
@@ -184,6 +185,9 @@
 			{/if}
 		</div>
 		{#if probe}<p class="m-0 font-mono text-xs break-words text-ink-2">{prefs.text(probe.msg)}</p>{/if}
+		{#if probe?.ok && role === 'source' && 'size' in probe}
+			<p class="m-0 text-xs text-ink-2" data-testid="route-source-size">{probe.size ? m.migrations_size_probe({ size: `${probe.size.approx ? '≈ ' : ''}${fmtBytes(probe.size.bytes)}` }) : m.migrations_size_probe_later()}</p>
+		{/if}
 		{#if probeError}<p class="m-0 text-xs text-warning-ink" role="alert">{probeError}</p>{/if}
 	{:else if kind}
 		<!-- A kind the catalogue no longer has for this role: shown, not editable. -->

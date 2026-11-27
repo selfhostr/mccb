@@ -5,12 +5,15 @@
 	import { ApiError, errorText, get } from '../../lib/api/client.ts';
 	import type { JobStatus } from '../../lib/api/types.ts';
 	import { fmtNum } from '../../lib/format.ts';
+	import { mirrorReport, mirrorReportRows, mirrorSkipped } from '../../lib/logic/mirror.ts';
 	import Button from '../../lib/ui/Button.svelte';
 	import EmptyState from '../../lib/ui/EmptyState.svelte';
 	import ErrorNotice from '../../lib/ui/ErrorNotice.svelte';
+	import Notice from '../../lib/ui/Notice.svelte';
 	import Skeleton from '../../lib/ui/Skeleton.svelte';
 	import JobCompare from './JobCompare.svelte';
 	import LeftOut from './LeftOut.svelte';
+	import MirrorNotes from './MirrorNotes.svelte';
 
 	type Section = Record<string, number | undefined>;
 	type Report = Record<string, unknown> & { folders?: { path: string[] | string; name?: string; sent?: number; present?: number }[]; sample_check?: unknown };
@@ -45,6 +48,10 @@
 		const n = section?.total ?? section?.count;
 		return typeof n === 'number' ? n > 0 : true;
 	}
+
+	const mirror = $derived(mirrorReport(report));
+	const mirrorRows = $derived(mirror ? mirrorReportRows(mirror) : []);
+	const KIND = $derived({ mail: m.migrations_row_content_mail(), calendar: m.migrations_row_content_calendar(), contacts: m.migrations_row_content_contacts(), tasks: m.jobs_stream_tasks() });
 
 	const sections = $derived.by(() => {
 		if (!report) return [];
@@ -94,6 +101,48 @@
 			</table>
 		{:else}
 			<pre class="m-0 max-h-80 overflow-auto rounded-btn border border-line bg-canvas-deep p-2 font-mono text-xs whitespace-pre-wrap">{JSON.stringify(report, null, 2)}</pre>
+		{/if}
+		{#if mirror}
+			<div class="flex flex-col gap-2" data-testid="report-mirror">
+				<h3 class="m-0 text-sm font-semibold">{m.jobs_report_mirror()}</h3>
+				{#if mirrorRows.length}
+					<div class="overflow-x-auto">
+						<table class="w-full text-xs">
+							<thead>
+								<tr class="text-left text-ink-2">
+									<th class="py-1 pr-2 font-medium">{m.jobs_report_type()}</th>
+									<th class="py-1 pr-2 text-right font-medium">{m.jobs_report_mirror_added()}</th>
+									<th class="py-1 pr-2 text-right font-medium">{m.jobs_report_mirror_updated()}</th>
+									<th class="py-1 pr-2 text-right font-medium">{m.jobs_report_mirror_deleted()}</th>
+									<th class="py-1 pr-2 text-right font-medium">{m.jobs_report_mirror_skipped()}</th>
+									<th class="py-1 text-right font-medium">{m.jobs_report_errors()}</th>
+								</tr>
+							</thead>
+							<tbody class="font-mono">
+								{#each mirrorRows as row (row.kind)}
+									<tr class="border-t border-line" data-testid={`report-mirror-${row.kind}`}>
+										<td class="py-1 pr-2 font-sans">{KIND[row.kind]}</td>
+										<td class="py-1 pr-2 text-right">{fmtNum(row.added)}</td>
+										<td class="py-1 pr-2 text-right">{fmtNum(row.updated)}</td>
+										<td class="py-1 pr-2 text-right">{fmtNum(row.deleted)}</td>
+										<td class={`py-1 pr-2 text-right ${row.skipped ? 'text-advisory-ink' : ''}`}>{fmtNum(row.skipped)}</td>
+										<td class="py-1 text-right">{fmtNum(row.errors)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{:else if !mirror.blocked?.length}
+					<p class="m-0 text-ink-2">{m.migrations_mirror_uptodate()}</p>
+				{/if}
+				{#each mirror.blocked ?? [] as block (block.code + block.message)}
+					<Notice><p class="m-0" data-testid={`report-mirror-block-${block.code}`}>{block.message}</p></Notice>
+				{/each}
+				<MirrorNotes notes={mirror.notes} prefix="report-mirror-note" />
+				{#if mirrorSkipped(mirror)}
+					<Notice><p class="m-0" data-testid="report-mirror-skipped">{m.jobs_report_mirror_skipped_note({ count: fmtNum(mirrorSkipped(mirror)) })}</p></Notice>
+				{/if}
+			</div>
 		{/if}
 		{#if report.sample_check}
 			<p class="m-0 text-ink-2">{m.jobs_report_sample({ result: typeof report.sample_check === 'string' ? report.sample_check : JSON.stringify(report.sample_check) })}</p>

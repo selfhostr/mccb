@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS {name} (
 ITEMS_INDEXES = """
 CREATE INDEX IF NOT EXISTS items_status2 ON items(account_id, pst_key, kind, status);
 CREATE INDEX IF NOT EXISTS items_folder2 ON items(account_id, pst_key, kind, folder);
+CREATE INDEX IF NOT EXISTS items_bytes ON items(kind, status, account_id, pst_key, size);
 """
 ITEMS_COLS = ("id, account_id, pst_id, pst_key, kind, item_key, folder, target, status, error, warnings, subject, "
               "hash, size, job_id, updated_at")
@@ -357,9 +358,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # Only for a source_connections table created before the column (SCHEMA has it).
     _add_column(conn, "source_connections", "provisioned TEXT")
     _add_column(conn, "items", "source_ref TEXT")
+    # mirror mode (docs/planning.md "Mirror"): accounts.opt_mirror opts the account in; items.version is the version of
+    # the item at the source when it was last written (mail: its flags, others: etag or equivalent); items.stamp is the
+    # import id the item carries on the target when it differs from its key's (a mail the mirror moved); jobs.mirror
+    # holds the options and the counters of a mirror job (JSON)
+    _add_column(conn, "accounts", "opt_mirror INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "items", "version TEXT")
+    _add_column(conn, "items", "stamp TEXT")
+    _add_column(conn, "items", "src_ref TEXT")  # JSON of SourceItem.ref when written: for Source.exists() (mirror)
+    # version (DAV etag) of the item on the target as mccb last wrote it: changed there since, the mirror leaves it
+    _add_column(conn, "items", "target_etag TEXT")
+    _add_column(conn, "jobs", "mirror TEXT")
     _add_column(conn, "jobs", "rate_bytes REAL")  # bytes/s (sliding 60 s)
     _add_column(conn, "jobs", "tuning TEXT")      # JSON {mode, builders, connections, fallback}
+    _add_column(conn, "jobs", "bytes_ok INTEGER")  # bytes of mail imported for the source of the job, all runs
     _migrate_tuning(conn)
+    # size of the mail at the source (mailbox_size.py): bytes, messages, when, estimate (1) or exact (0), the source it
+    # was measured on (items.pst_key); pending: a computation started at that time (web process), NULL once it ended
+    for ddl in ("source_size_bytes INTEGER", "source_size_count INTEGER", "source_size_at REAL",
+                "source_size_approx INTEGER", "source_size_key TEXT", "source_size_pending REAL"):
+        _add_column(conn, "accounts", ddl)
     # server-side intake (drop folder, remote fetch): origin of a PST, fetch progress, encrypted fetch spec
     _add_column(conn, "psts", "source TEXT")             # 'upload' (NULL) | 'inbox' | 'fetch'
     _add_column(conn, "psts", "origin TEXT")             # display label (no secrets), e.g. host + file name

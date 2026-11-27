@@ -5,24 +5,29 @@ import hashlib
 import imaplib
 import json
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.parser import BytesHeaderParser
 from typing import Iterator
 
-from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, parse_list,
-                           personal_prefix, quote, wrap_exc)
+from ..server.imap import (SPECIAL_FLAGS, SPECIAL_NAMES, ImapConn, ImapError, ImapParams, Mailbox, _text, find_special,
+                           namespaces, parse_list, personal_prefix, quote, uid_sets, utf7_decode, wrap_exc)
 from . import oauth, registry
-from .base import (CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK,
-                   IMPORT_HEADER, MAIL, Changes, ConnectorError, FetchedItem, FolderPlan, OutgoingItem, Source,
-                   SourceFolder, SourceItem, Target, TargetSession, subject_of)
+from .base import (CAP_DELETE, CAP_FLAGS, CAP_FOLDERS, CAP_INCREMENTAL, CAP_INTERNAL_DATE, CAP_INVENTORY, CAP_MIRROR,
+                   CAP_MOVE, CAP_PARALLEL, CAP_QUOTA, CAP_READBACK, CAP_SET_FLAGS, DELETE_SOFT, DELETE_TRASH,
+                   IMPORT_HEADER, MAIL, MIRROR_DELETED_FLAG, Changes, ConnectorError, FetchedItem, FolderPlan, Listing,
+                   MailboxSize, OutgoingItem, RemoteItem, Source, SourceFolder, SourceItem, Target, TargetSession, subject_of)
 
-FETCH_CHUNK = 500  # UIDs per listing FETCH
+SIZE_CHUNK = 5000  # messages per FETCH (RFC822.SIZE FLAGS) of mailbox_size: the deadline is checked between them
+SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.I)
+STATUS_SIZE_RE = re.compile(r"\bSIZE\s+(\d+)", re.I)
 LIST_ITEMS = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
 # virtual folders showing messages that live elsewhere: copying them would duplicate the mailbox
 VIRTUAL_FLAGS = {"\\all", "\\flagged", "\\important"}
 SYSTEM_FLAGS = {"\\seen", "\\answered", "\\flagged", "\\draft"}  # \Recent is refused by APPEND, \Deleted not copied
 KEYWORD_RE = re.compile(r"^[A-Za-z0-9$_.+-]+$")
+KEY_RE = re.compile(r"^[0-9a-f]{8}-(\d+)-(\d+)$")  # "<folder hash>-<UIDVALIDITY>-<UID>" (see item_keys)
 MONTHS = {m: i + 1 for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
                                            "Nov", "Dec"))}
 INTERNALDATE_RE = re.compile(r"(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})")
@@ -112,7 +117,7 @@ def parse_fetch(data) -> list[dict]:
             recs.append({"meta": meta, "literal": literal})
         else:
             recs[-1]["meta"] += b" " + meta
-    out = []
+    by_uid: dict[int, dict] = {}
     for r in recs:
         meta = r["meta"].decode("utf-8", "replace")
         uid = re.search(r"\bUID (\d+)", meta)
@@ -124,9 +129,22 @@ def parse_fetch(data) -> list[dict]:
         mid = None
         if isinstance(r["literal"], bytes):
             mid = " ".join(str(BytesHeaderParser().parsebytes(r["literal"]).get("Message-ID") or "").split()) or None
-        out.append({"uid": int(uid.group(1)), "flags": flags.group(1).split() if flags else [],
-                    "size": int(size.group(1)) if size else None,
-                    "date": parse_internaldate(date.group(1)) if date else None, "message_id": mid})
+        rec = {"uid": int(uid.group(1)), "flags": flags.group(1).split() if flags else None,
+               "size": int(size.group(1)) if size else None,
+               "date": parse_internaldate(date.group(1)) if date else None, "message_id": mid}
+        # a server may answer for one message in several FETCH responses (the FLAGS apart, an unsolicited update
+        # carrying the UID): one record, its attributes taken where they are, never a second copy without flags
+        old = by_uid.get(rec["uid"])
+        if old is None:
+            by_uid[rec["uid"]] = rec
+        else:
+            for k, v in rec.items():
+                if v is not None and (old[k] is None or k == "flags"):
+                    old[k] = v
+    out = list(by_uid.values())
+    for rec in out:
+        if rec["flags"] is None:
+            rec["flags"] = []
     return out
 
 
@@ -160,9 +178,41 @@ def item_keys(path: list[str], uidvalidity: int, recs: list[dict]) -> list[str]:
     return keys
 
 
-def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFolder]:
+def foreign_reason(raw: str, foreign: dict[str, str]) -> str | None:
+    """Why a mailbox (raw name) is not the account's own: it is under one of the `foreign` namespace prefixes
+    {prefix: reason} (other users', shared), or is the root of one. None: the account's own."""
+    for pre, why in foreign.items():
+        if pre and (raw.startswith(pre) or raw == pre.rstrip("/.")):
+            return why
+    return None
+
+
+def foreign_namespaces(other: list[str], shared: list[str]) -> dict[str, str]:
+    """{namespace prefix: why its folders are left out} for the other users' and shared namespaces of NAMESPACE."""
+    out: dict[str, str] = {}
+    for pre in shared:
+        if pre:
+            out[pre] = (f"public or shared folder (namespace '{utf7_decode_safe(pre)}'), not this mailbox's own: "
+                        "left out (IMAP_INCLUDE_SHARED=1 copies it into this mailbox)")
+    for pre in other:
+        if pre:
+            out[pre] = (f"folder of another mailbox shared with this one (namespace '{utf7_decode_safe(pre)}'): "
+                        "migrated with its owner's mailbox, not copied into this one (IMAP_INCLUDE_SHARED=1 does)")
+    return out
+
+
+def utf7_decode_safe(raw: str) -> str:
+    try:
+        return utf7_decode(raw)
+    except Exception:  # noqa: BLE001 - a label only
+        return raw
+
+
+def folders_of(boxes: list[Mailbox], delim: str, prefix: str, foreign: dict[str, str] | None = None
+               ) -> list[SourceFolder]:
     """Source folders of a LIST: namespace prefix removed, virtual and unselectable folders dropped, special
-    folders from SPECIAL-USE, then from the usual names for servers that do not have it."""
+    folders from SPECIAL-USE, then from the usual names for servers that do not have it. A folder under a
+    `foreign` namespace (foreign_namespaces: shared by another mailbox, public) is listed with `skip`, no role."""
     out: list[SourceFolder] = []
     taken: set[str] = set()
     seen: set[str] = set()
@@ -179,8 +229,10 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
             if prefix and name.startswith(prefix):
                 name = name[len(prefix):]
             path = [p for p in (name.split(d) if d else [name]) if p] or [name]
-        f = SourceFolder(path=path, kind=MAIL, ref=b.name)
-        if path == ["INBOX"]:
+        f = SourceFolder(path=path, kind=MAIL, ref=b.name, skip=foreign_reason(b.name, foreign or {}))
+        if f.skip:
+            pass
+        elif path == ["INBOX"]:
             f.special = "inbox"
         else:
             for sp, flag in SPECIAL_FLAGS.items():
@@ -192,7 +244,8 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
                 taken.add(f.special)
         out.append(f)
     for f in out:  # no SPECIAL-USE: by name, without stealing a role a flag already gave
-        if f.special is not None or (len(f.path) > 1 and not (len(f.path) == 2 and f.path[0].upper() == "INBOX")):
+        nested = len(f.path) > 1 and not (len(f.path) == 2 and f.path[0].upper() == "INBOX")
+        if f.special is not None or f.skip or nested:
             continue
         low = f.path[-1].lower()
         for sp, names in SPECIAL_NAMES.items():
@@ -201,6 +254,10 @@ def folders_of(boxes: list[Mailbox], delim: str, prefix: str) -> list[SourceFold
                 taken.add(sp)
                 break
     return out
+
+
+class _OverBudget(Exception):
+    """mailbox_size: the deadline passed."""
 
 
 # ------------------------------------------------------------------ source
@@ -246,9 +303,14 @@ class ImapSource(Source):
         with _guard():
             boxes = self._list_boxes()
             delim = c.delimiter()
-            prefix = personal_prefix(c)
-            out = folders_of(boxes, delim, prefix if prefix.endswith(delim) else "")
+            personal, other, shared = namespaces(c)
+            prefix = personal[0]
+            from ..server.config import settings
+            foreign = {} if settings.imap_include_shared else foreign_namespaces(other, shared)
+            out = folders_of(boxes, delim, prefix if prefix.endswith(delim) else "", foreign)
             for f in out:
+                if f.skip:
+                    continue
                 try:
                     f.count = c.status_messages(f.ref)
                 except ImapError as e:
@@ -282,22 +344,118 @@ class ImapSource(Source):
     def _records(self, uids: list[int]) -> list[dict]:
         c = self._c()
         recs: list[dict] = []
-        for i in range(0, len(uids), FETCH_CHUNK):
-            chunk = ",".join(str(u) for u in uids[i:i + FETCH_CHUNK])
-            typ, data = c._m().uid("FETCH", chunk, LIST_ITEMS)
+        for _chunk, uset in uid_sets(uids):
+            typ, data = c._m().uid("FETCH", uset, LIST_ITEMS)
             recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
-        return [r for r in recs if "\\deleted" not in {f.lower() for f in r["flags"]}]
+        asked = set(uids)  # an unsolicited FETCH may name another message
+        return [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
 
     def _items(self, folder: SourceFolder, uv: int, recs: list[dict]) -> list[SourceItem]:
         keys = item_keys(folder.path, uv, recs)
         return [SourceItem(key=k, alt_key=alt_key_of(r), date=r["date"], size=r["size"], flags=keep_flags(r["flags"]),
                            ref=(uv, r["uid"])) for k, r in zip(keys, recs)]
 
+    def mailbox_size(self, folders: list[SourceFolder], deadline: float) -> MailboxSize | None:
+        """STATUS (MESSAGES SIZE) per folder when the server has STATUS=SIZE (RFC 8438), else the sum of RFC822.SIZE
+        (FETCH of sizes and flags only, folder opened with EXAMINE, \\Deleted messages left out as in the listing).
+        Past the deadline: the quota usage of the account (every folder, so approx), or None."""
+        c = self._c()
+        mail = [f for f in folders if f.kind == MAIL and not f.skip]
+        total = count = 0
+        try:
+            with _guard():
+                for f in mail:
+                    if time.monotonic() > deadline:
+                        raise _OverBudget
+                    got = self._status_size(f) if "STATUS=SIZE" in c.caps else None
+                    if got is not None:
+                        total, count = total + got[0], count + got[1]
+                        continue
+                    b, n = self._folder_bytes(f, deadline)
+                    total, count = total + b, count + n
+        except ConnectorError as e:
+            if not isinstance(e.__cause__, _OverBudget):
+                raise
+            return self._quota_size()
+        finally:
+            self._leave_selected()
+        return MailboxSize(total, count)
+
+    def _leave_selected(self) -> None:
+        """INBOX opened (read-only) last: some servers (GreenMail) keep a folder opened by a session that logged out
+        busy, and then fail to delete it."""
+        c = self.conn
+        if c is None or c.selected in (None, "INBOX"):
+            return
+        try:
+            c.select("INBOX", readonly=True)
+        except Exception:  # noqa: BLE001 - only a courtesy
+            pass
+
+    def _status_size(self, folder: SourceFolder) -> tuple[int, int] | None:
+        """(bytes, messages) by STATUS (MESSAGES SIZE), None when the server answers without them (then FETCH)."""
+        c = self._c()
+        try:
+            typ, data = c._m().status(quote(folder.ref), "(MESSAGES SIZE)")
+        except imaplib.IMAP4.abort:
+            raise
+        except imaplib.IMAP4.error:
+            return None
+        if typ != "OK":
+            return None
+        t = _text(data)
+        ms, mn = STATUS_SIZE_RE.search(t), re.search(r"MESSAGES\s+(\d+)", t, re.I)
+        return (int(ms.group(1)), int(mn.group(1))) if ms and mn else None
+
+    def _folder_bytes(self, folder: SourceFolder, deadline: float) -> tuple[int, int]:
+        c = self._c()
+        exists = c.select(folder.ref, readonly=True)
+        self._uv.pop(folder.ref, None)  # selected here: _select reads UIDVALIDITY again
+        total = n = 0
+        for lo in range(1, exists + 1, SIZE_CHUNK):
+            if time.monotonic() > deadline:
+                raise _OverBudget
+            hi = min(exists, lo + SIZE_CHUNK - 1)
+            typ, data = c._m().fetch(f"{lo}:{hi}", "(RFC822.SIZE FLAGS)")
+            for d in c._check(typ, data, "FETCH") or []:
+                line = d[0] if isinstance(d, tuple) else d
+                if not isinstance(line, bytes):
+                    continue
+                m = SIZE_RE.search(line)
+                if m and b"\\deleted" not in line.lower():
+                    total, n = total + int(m.group(1)), n + 1
+        return total, n
+
+    def _quota_size(self) -> MailboxSize | None:
+        try:
+            q = self._c().quota()
+        except Exception:  # noqa: BLE001 - an estimate only
+            return None
+        used = (q or {}).get("used")
+        return MailboxSize(int(used), None, approx=True) if used is not None else None
+
     def iter_items(self, folder: SourceFolder) -> Iterator[SourceItem]:
         with _guard():
             uv = self._select(folder)
             items = self._items(folder, uv, self._records(self._uids(("ALL",))))
         yield from items
+
+    def flags_of(self, folder: SourceFolder) -> dict[str, list[str]]:
+        """{key: flags} of the whole folder for a pass that did not list it all (delta): UID FETCH (UID FLAGS) only,
+        no header, read only as everywhere here. A server without UIDVALIDITY needs the Message-ID for its keys."""
+        with _guard():
+            uv = self._select(folder)
+            uids = self._uids(("ALL",))
+            if not uv:
+                recs = self._records(uids)
+            else:
+                c, recs = self._c(), []
+                for _chunk, uset in uid_sets(uids):
+                    typ, data = c._m().uid("FETCH", uset, "(UID FLAGS)")
+                    recs.extend(parse_fetch(c._check(typ, data, "FETCH")))
+                asked = set(uids)
+                recs = [r for r in recs if r["uid"] in asked and "\\deleted" not in {f.lower() for f in r["flags"]}]
+        return {k: keep_flags(r["flags"]) for k, r in zip(item_keys(folder.path, uv, recs), recs)}
 
     def changed_since(self, folder: SourceFolder, cursor: str | None) -> Changes:
         """New messages since the cursor (UIDs are ascending). Flag changes and deletions are not reported."""
@@ -315,6 +473,37 @@ class ImapSource(Source):
             recs = self._records(uids)
         high = max(uids, default=last)
         return Changes(self._items(folder, uv, recs), json.dumps({"uv": uv, "uid": high}), reset=not valid)
+
+    # ---- mirror: EXAMINE, SEARCH and FETCH (BODY.PEEK) only, as everywhere in this source
+    def mirror_listing(self, folder: SourceFolder) -> Listing:
+        """The whole folder (UID SEARCH ALL + FETCH): complete, or an error. Messages flagged \\Deleted are gone."""
+        with _guard():
+            uv = self._select(folder)
+            items = self._items(folder, uv, self._records(self._uids(("ALL",))))
+        return Listing(items, complete=True, epoch=str(uv) if uv else None)
+
+    def key_epoch(self, key: str) -> str | None:
+        m = KEY_RE.match(key)
+        return m.group(1) if m else None
+
+    def exists(self, folder: SourceFolder, keys: list[str], refs: dict | None = None) -> dict[str, bool]:
+        """UID SEARCH UID <uid> UNDELETED in the folder opened read-only, for keys of THIS folder (its folder hash)
+        and of the current UIDVALIDITY. Any other key (another folder, another UIDVALIDITY, no UID in it) cannot be
+        checked here: answered True (kept)."""
+        out = {k: True for k in keys}
+        fh = folder_hash(list(folder.path))
+        with _guard():
+            uv = self._select(folder)
+            wanted = {}
+            for k in keys:
+                m = KEY_RE.match(k)
+                if m and uv and int(m.group(1)) == uv and k.split("-", 1)[0] == fh:
+                    wanted[int(m.group(2))] = k
+            for chunk, uset in uid_sets(wanted):
+                found = set(self._uids(("UID", uset, "UNDELETED")))
+                for u in chunk:
+                    out[wanted[u]] = u in found
+        return out
 
     def fetch(self, folder: SourceFolder, item: SourceItem, import_id: str) -> FetchedItem | None:
         uv, uid = item.ref
@@ -394,6 +583,15 @@ class ImapSession(TargetSession):
         with _guard():
             return self.conn.count_import_prefix(folder, IMPORT_HEADER, f"{namespace}-")
 
+    def add_missing_flags(self, folder: str, namespace: str, wanted: dict[str, list[str]]) -> tuple[int, int, int]:
+        with _guard():
+            try:
+                return self.conn.add_missing_flags(folder, IMPORT_HEADER, f"{namespace}-", wanted)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    return 0, 0, 0  # the folder is gone from the target: nothing of ours left in it
+                raise
+
     def read(self, folder: str, remote_id: str) -> bytes | None:
         with _guard():
             return self.conn.fetch_raw(folder, str(remote_id))
@@ -413,9 +611,87 @@ class ImapSession(TargetSession):
     def has_folder(self, name: str) -> bool | None:
         return name.upper() == "INBOX" or name in self._existing
 
+    # ---- mirror: only messages carrying one of our import ids, one UID at a time
+    def inventory(self, folder: str, namespace: str, names: set[str] | None = None) -> dict[str, list[RemoteItem]]:
+        """{"<namespace-key>": [RemoteItem(uid, flags)]}: SEARCH HEADER for the namespace, then the header of each
+        candidate compared exactly. Messages flagged \\Deleted are not listed (deleted already)."""
+        prefix = f"{namespace}-"
+        out: dict[str, list[RemoteItem]] = {}
+        with _guard():
+            try:
+                cands = self.conn.search_header(folder, IMPORT_HEADER, prefix)
+            except ImapError as e:
+                if e.kind == "trycreate" or "NONEXISTENT" in str(e).upper():
+                    return {}
+                raise
+            for uid, (flags, vals) in self.conn.flags_and_header(folder, cands, IMPORT_HEADER).items():
+                if "\\deleted" in {f.lower() for f in flags}:
+                    continue
+                for v in vals:
+                    bare = v[1:-1] if v.startswith("<") and v.endswith(">") else v
+                    if bare.startswith(prefix):
+                        out.setdefault(f"<{bare}>", []).append(RemoteItem(uid, keep_flags(flags)))
+        return out
+
+    def _trash(self) -> str | None:
+        if getattr(self, "_trash_name", 0) == 0:
+            with _guard():
+                self._trash_name = find_special(self.conn.list(), "trash")
+        return self._trash_name
+
+    def delete_mode(self, folder: str) -> str:
+        trash = self._trash()
+        return DELETE_TRASH if trash and trash != folder else DELETE_SOFT
+
+    def _check_expected(self, folder: str, uid: str, expected: str | None) -> bool:
+        """True when the message is there and carries `expected` (exactly); False when it is gone."""
+        got = self.conn.flags_and_header(folder, [uid], IMPORT_HEADER)
+        if uid not in got:
+            return False
+        if expected is not None:
+            bare = expected[1:-1] if expected.startswith("<") else expected
+            if not any(v in (bare, f"<{bare}>") for v in got[uid][1]):
+                raise ConnectorError(f"UID {uid} of '{folder}' does not carry {expected}: not deleted",
+                                     ConnectorError.REJECTED)
+        return True
+
+    def delete(self, folder: str, ref: str, expected_import_id: str | None = None) -> str:
+        """To the trash of the target (MOVE, or COPY + \\Deleted + UID EXPUNGE of this UID only), marked
+        $MccbMirrorDeleted. In the trash itself, or without one: flagged \\Deleted + mark, never expunged."""
+        mode = self.delete_mode(folder)
+        with _guard():
+            if not self._check_expected(folder, ref, expected_import_id):
+                return mode  # gone already
+            try:
+                self.conn.uid_store(folder, [ref], "+", [MIRROR_DELETED_FLAG])
+            except ImapError as e:
+                if e.kind != "perm":  # a server refusing keywords: the deletion matters more than the mark
+                    raise
+            if mode == DELETE_TRASH:
+                self.conn.uid_move(folder, [ref], self._trash())
+            else:
+                self.conn.uid_store(folder, [ref], "+", ["\\Deleted"])
+        return mode
+
+    def set_flags(self, folder: str, ref: str, add: list[str], remove: list[str]) -> None:
+        with _guard():
+            for op, flags in (("+", add), ("-", remove)):
+                try:
+                    self.conn.uid_store(folder, [ref], op, flags)
+                except ImapError as e:
+                    system = [f for f in flags if f.startswith("\\")]
+                    if e.kind != "perm" or len(system) == len(flags):
+                        raise
+                    self.conn.uid_store(folder, [ref], op, system)  # keywords refused by this server
+
+    def move(self, folder: str, ref: str, to_folder: str) -> str | None:
+        with _guard():
+            return self.conn.uid_move(folder, [ref], to_folder)
+
 
 class ImapTarget(Target):
-    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK})
+    capabilities = frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_QUOTA, CAP_PARALLEL, CAP_READBACK,
+                              CAP_INVENTORY, CAP_DELETE, CAP_SET_FLAGS, CAP_MOVE})
     make_params = staticmethod(params_of)
 
     def __init__(self, config: dict, secrets: dict, ctx: dict | None = None):
@@ -459,7 +735,8 @@ _OAUTH_CONNECTION = _SERVER + (
 
 registry.register(registry.ConnectorSpec(
     kind="imap", label="IMAP", description="Any IMAP mailbox, read without altering it or written to.",
-    source=registry.Role(ImapSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+    source=registry.Role(ImapSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL,
+                                                     CAP_MIRROR}),
                          _CONNECTION, identity),
     target=registry.Role(ImapTarget, (MAIL,), ImapTarget.capabilities,
                          _CONNECTION + (registry.Field("root_folder", "Root folder",
@@ -467,7 +744,8 @@ registry.register(registry.ConnectorSpec(
 ))
 registry.register(registry.ConnectorSpec(
     kind="imap_oauth2", label="IMAP (OAuth2)", description="An IMAP mailbox reached with an OAuth2 token (XOAUTH2).",
-    source=registry.Role(ImapOAuthSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL}),
+    source=registry.Role(ImapOAuthSource, (MAIL,), frozenset({CAP_FOLDERS, CAP_FLAGS, CAP_INTERNAL_DATE, CAP_INCREMENTAL,
+                                                     CAP_MIRROR}),
                          _OAUTH_CONNECTION, identity),
     target=registry.Role(ImapOAuthTarget, (MAIL,), ImapOAuthTarget.capabilities,
                          _OAUTH_CONNECTION + (registry.Field("root_folder", "Root folder",

@@ -28,7 +28,7 @@ function emptyProgress() {
 }
 
 function makeAccount(id, email, serverId, over = {}) {
-	return { id, server_id: serverId, email, login: email, has_password: true, status: 'new', last_test: null, last_test_result: null, pst_id: null, source: undefined, target: { kind: null, config: {}, has_secret: false }, options: { mail: true, calendar: true, contacts: true }, job: null, ...over };
+	return { id, server_id: serverId, email, login: email, has_password: true, status: 'new', last_test: null, last_test_result: null, pst_id: null, source: undefined, target: { kind: null, config: {}, has_secret: false }, options: { mail: true, calendar: true, contacts: true, mirror: false }, job: null, ...over };
 }
 
 // Same contract as app/connectors/registry.py catalogue() (sorted by kind): the UI draws forms from it.
@@ -294,6 +294,10 @@ export function reset(options = {}) {
 		reorderCalls: [],
 		deltaCalls: [],
 		compareCalls: [],
+		// Mirror mode: what a comparison finds per mailbox (set by tests), the comparisons asked, what finished runs report.
+		mirrorScenarios: new Map(),
+		mirrorCalls: [],
+		mirrorOutcomes: new Map(),
 		next2: { plan: 1, compare: 1, batch: 1, token: 1 },
 		// The demo runs jobs slowly enough to watch them.
 		demo: options.demo === true
@@ -307,11 +311,105 @@ function publish(kind, data) {
 	for (const fn of listeners) fn(kind, data);
 }
 
+const MIRROR_KINDS = ['mail', 'calendar', 'contacts', 'tasks'];
+const MIRROR_DEFAULT = { add: { mail: 12, calendar: 1 }, update: { mail: 3 }, delete: { mail: 5, contacts: 2 }, holds: 200 };
+const MIRROR_MESSAGES = {
+	mirror_off: 'Mirror mode is off for this mailbox',
+	source_unlistable: 'The source could not be listed',
+	too_many_deletes: 'More deletions than the safety limit allows',
+	source_empty: 'Folder "Projects" is empty at the source and not at the destination',
+	no_prior_run: 'No migration has run for this mailbox',
+	uidvalidity_changed: 'The source folders changed identity since the last run',
+	target_unreachable: 'The destination did not answer',
+	job_active: 'A job of this mailbox is not over yet',
+	unknown_account: 'unknown mailbox'
+};
+const countOf = (counts) => MIRROR_KINDS.reduce((n, k) => n + (counts?.[k] ?? 0), 0);
+const fullCounts = (counts) => Object.fromEntries(MIRROR_KINDS.map((k) => [k, counts?.[k] ?? 0]));
+
+/** What a mirror run would do to one mailbox, with the same blocks as the API. Nothing is written. */
+function mirrorPlanOf(account, { maxPercent, minCount, allowLarge, allowEmpty }) {
+	const scenario = { ...MIRROR_DEFAULT, ...(state.mirrorScenarios.get(account.id) ?? {}) };
+	const last = [...state.jobs.values()].filter((j) => j.account_id === account.id).pop();
+	const blocked = [];
+	const block = (code, message) => blocked.push({ code, message: message ?? MIRROR_MESSAGES[code] });
+	if (!account.options.mirror) block('mirror_off');
+	if (!last) block('no_prior_run');
+	if (scenario.block) block(scenario.block);
+	// Folders empty at the source (scenario.emptyFolders: [{ kind, folder, count }]): blocked, as the server does, until their key is in allow_empty_folders (or allow_large_delete); then their items are deleted.
+	const toDelete = { ...(scenario.delete ?? {}) };
+	for (const { kind = 'mail', folder, count } of scenario.emptyFolders ?? []) {
+		if (allowLarge || allowEmpty.includes(folder)) toDelete[kind] = (toDelete[kind] ?? 0) + count;
+		else blocked.push({ code: 'source_empty', kind, folder, message: `${kind} folder '${folder}': the source lists nothing while ${count} item(s) were migrated; if it was emptied on purpose, run again with allow_empty_folders: ["${folder}"]` });
+	}
+	const deletes = countOf(toDelete);
+	// As the server: the percentage only applies above min_delete_count deletions; the block says which percentage would let them through.
+	if (deletes > minCount && (deletes / Math.max(1, scenario.holds)) * 100 > maxPercent && !allowLarge) blocked.push({ code: 'too_many_deletes', kind: 'mail', needed_percent: Math.ceil((deletes * 100) / Math.max(1, scenario.holds)), message: `${deletes} of ${scenario.holds} items (${Math.round((deletes / scenario.holds) * 100)}%) would be deleted, the limit is ${maxPercent}%` });
+	const lines = scenario.sample ?? 25;
+	const actions = [['delete', 'delete'], ['update', 'update'], ['add', 'add']];
+	const sample = [];
+	for (const [action, key] of actions) {
+		for (const kind of MIRROR_KINDS) {
+			for (let i = 0; i < ((key === 'delete' ? toDelete : scenario[key])?.[kind] ?? 0) && sample.length < lines; i++) {
+				sample.push({ kind, action, folder: kind === 'mail' ? 'Inbox' : kind === 'calendar' ? 'Calendar' : kind === 'contacts' ? 'Contacts' : 'Tasks', subject: `${action === 'delete' ? 'Removed at source' : action === 'update' ? 'Changed at source' : 'New at source'} #${i + 1}`, date: '2026-03-14T09:30:00Z' });
+			}
+		}
+	}
+	return { account_id: account.id, email: account.email, ready: blocked.length === 0, to_add: fullCounts(scenario.add), to_update: fullCounts(scenario.update), to_delete: fullCounts(toDelete), blocked, sample, notes: scenario.notes ?? [] };
+}
+
+/** Same contract as mailbox_size.view: a measure of the current source, else the file's size as an estimate. */
+const MEASURABLE = new Set(['imap', 'imap_oauth2']);
+const MAIL_AVG = 90_000;
+function sizeView(a, job) {
+	const kind = a.source?.kind ?? 'pst';
+	let size = { bytes: null, count: null, at: null, approx: false, basis: null };
+	if (a.size) size = { ...size, ...a.size };
+	else if ((kind === 'pst' || kind === 'files') && a.pst_id != null) {
+		const p = state.psts.get(a.pst_id);
+		if (p?.status === 'valid' && p.size) size = { ...size, bytes: p.size, approx: true, basis: 'file' };
+	}
+	return { ...size, computing: !!a.sizing, measurable: MEASURABLE.has(kind), imported: job?.bytes_ok ?? 0 };
+}
+
+/** Bytes of a mail of this account, for the imported count of its jobs. */
+function mailAvg(accountId) {
+	const p = state.psts.get(state.accounts.get(accountId)?.pst_id);
+	return p?.size && p.scan?.totals?.mail ? p.size / p.scan.totals.mail : MAIL_AVG;
+}
+
+/** Background measure of the source, as mailbox_size.start: "calculating" first, the value a moment later. */
+function measure(account) {
+	account.size = undefined;
+	account.sizing = true;
+	timers.add(
+		setTimeout(() => {
+			account.sizing = false;
+			account.size = { bytes: 1_850_000_000 + account.id * 37_000_000, count: 12_400 + account.id * 210, at: Date.now() / 1000 };
+			publish('account', accountView(account));
+		}, state.demo ? 1500 : state.jobTick)
+	);
+}
+
 function accountView(a) {
 	const job = [...state.jobs.values()].filter((j) => j.account_id === a.id).sort((x, y) => y.id - x.id)[0] ?? null;
-	const { srcSecrets, tgtSecrets, ...rest } = a;
+	const { srcSecrets, tgtSecrets, size: _size, sizing: _sizing, ...rest } = a;
 	const source = a.source ?? { kind: 'pst', config: { pst_id: a.pst_id }, has_secret: false };
-	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, job };
+	return { ...rest, source: a.source ? { ...a.source, has_secret: !!Object.keys(srcSecrets ?? {}).length || !!a.source.connection } : { ...source, config: { pst_id: a.pst_id } }, target: { ...a.target, has_secret: !!Object.keys(tgtSecrets ?? {}).length }, ...sourceReach(a), source_size: sizeView(a, job), job };
+}
+
+/** Same rules as wiring.source_carries and wiring.source_server: an IMAP source reads the CalDAV/CardDAV of the saved server of its host and port. */
+function sourceReach(a) {
+	const kind = a.source?.kind ?? 'pst';
+	if (kind === 'pst' || kind === 'files') return { source_carries: null, source_dav: null };
+	const items = CATALOGUE.find((c) => c.kind === kind)?.source?.items ?? [];
+	if (kind !== 'imap') return { source_carries: { calendar: items.includes(CALENDAR), contacts: items.includes(CONTACTS) }, source_dav: null };
+	const cfg = { ...(a.source.config ?? {}), ...(a.source.connection ? (state.sourceConnections.get(a.source.connection.id)?.config ?? {}) : {}) };
+	const host = String(cfg.host ?? '').trim().toLowerCase();
+	const port = Number(cfg.port ?? 993);
+	const srv = [...state.servers.values()].find((s) => s.imap_host.trim().toLowerCase() === host && s.imap_port === port && s.id !== a.server_id);
+	const problem = !srv ? 'no_server' : srv.dav_enabled ? null : 'dav_off';
+	return { source_carries: { calendar: !problem, contacts: !problem }, source_dav: { server_id: srv?.id ?? null, problem } };
 }
 
 /** Same rules as registry.normalize_config and merge_secrets. Returns [config, secrets] or throws a message. */
@@ -368,7 +466,7 @@ function startJob(account) {
 	const progress = emptyProgress();
 	const totals = state.psts.get(account.pst_id)?.scan?.totals ?? { mail: 900, calendar: 120, contacts: 80 };
 	for (const k of Object.keys(progress)) progress[k].total = totals[k] ?? 0;
-	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null, priority: 0, batch_id: null, pause_reason: null };
+	const job = { id, account_id: account.id, status: 'queued', phase: 'precheck', progress, current_folder: null, rate: null, rate_bytes: null, bytes_ok: null, eta: null, started_at: null, finished_at: null, error: null, mode: 'full', created_at: Date.now() / 1000, tuning: null, priority: 0, batch_id: null, pause_reason: null };
 	state.jobs.set(id, job);
 	state.logs.set(id, []);
 	log(job, 'info', 'Job queued');
@@ -404,6 +502,7 @@ function run(job) {
 			job.phase = kind;
 			const p = job.progress[kind];
 			p.done = Math.min(p.total, p.done + Math.max(1, Math.ceil(p.total * (slow?.frac ?? 0.25))));
+			job.bytes_ok = Math.round(job.progress.mail.done * mailAvg(job.account_id));
 			job.current_folder = kind === 'mail' ? 'Inbox' : kind;
 			if (slow) {
 				// Items per second implied by the pace, with a little life in it.
@@ -558,7 +657,17 @@ export async function control(path, body) {
 		reset(body);
 		return send(200, { ok: true });
 	}
-	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, provisionCalls: state.provisionCalls, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/state') return send(200, { testCalls: state.testCalls, runCalls: state.runCalls, uploadOrder: state.uploadOrder, intake: state.intake, intakePuts: state.intakePuts, notifyTests: state.notifyTests, routeCalls: state.routeCalls, probeCalls: state.probeCalls, fetchCalls: state.fetchCalls, cancelCalls: state.cancelCalls, retryCalls: state.retryCalls, accounts: [...state.accounts.values()].map(accountView), runBodies: state.runBodies, reorderCalls: state.reorderCalls, deltaCalls: state.deltaCalls, compareCalls: state.compareCalls, mirrorCalls: state.mirrorCalls, tokens: state.tokens, linkCalls: state.linkCalls, sourceTests: state.sourceTests, provisionCalls: state.provisionCalls, policies: { server: Object.fromEntries(state.policies.server), account: Object.fromEntries(state.policies.account) } });
+	if (path === '/__mock/mirror') {
+		// What the next mirror comparisons find, per mailbox id: { add, update, delete } by kind, `holds` (what the
+		// destination holds, the base of the safety limit), `block` (a code that stops the mailbox whatever the rest),
+		// `sample` (the number of lines), `fail` (the comparison answers an error), `notes` ([{ code, message }] shown by the
+		// comparison and kept in the report of the run), `emptyFolders` ([{ kind, folder, count }]: folders empty at the source,
+		// blocked as `source_empty` with their key until the request has it in `allow_empty_folders`; then `count` deletions are added).
+		// `min_delete_count` of the request is the number of deletions under which the percentage never blocks.
+		state.mirrorScenarios = new Map(Object.entries(body.scenarios ?? {}).map(([id, scenario]) => [Number(id), scenario]));
+		return send(200, { ok: true });
+	}
 	if (path === '/__mock/provision') {
 		// How the next "Connect with Microsoft" flows end: null, 'admin' (not an administrator), 'expired' (code expired),
 		// 'propagation' (saved, permissions not active yet) or 'lost' (404 from the second poll, as after a restart).
@@ -696,7 +805,7 @@ export async function handle(req) {
 		const host = String(body.config?.host ?? body.config?.server ?? body.config?.mailbox ?? '');
 		if (host.startsWith('bad')) return send(200, { ok: false, error_kind: 'unreachable', msg: `cannot connect to ${host}` });
 		if (host.startsWith('wrong')) return send(200, { ok: false, error_kind: 'auth', msg: 'LOGIN failed for jane@example.com' });
-		return body.role === 'target' ? send(200, { ok: true, msg: 'connection successful', quota: null }) : send(200, { ok: true, msg: '3 folder(s) found', folders: [{ path: 'INBOX', kind: 'mail', special: 'inbox', count: 12 }] });
+		return body.role === 'target' ? send(200, { ok: true, msg: 'connection successful', quota: null }) : send(200, { ok: true, msg: '3 folder(s) found', folders: [{ path: 'INBOX', kind: 'mail', special: 'inbox', count: 12 }], ...(MEASURABLE.has(parts[1]) ? { size: { bytes: 1_240_000, count: 12, approx: false } } : {}) });
 	}
 
 	if (path === '/intake/settings') {
@@ -819,10 +928,18 @@ export async function handle(req) {
 					const [config, secrets] = checkEndpoint(body.kind, role, body.config, same ? account[key] : {}, body.secrets);
 					account[role] = { kind: body.kind, config, has_secret: false };
 					account[key] = secrets;
+					if (role === 'source' && MEASURABLE.has(body.kind)) measure(account);
 				} catch (error) {
 					return fail(422, error.message);
 				}
 			}
+			if (role === 'source' && !MEASURABLE.has(body.kind)) Object.assign(account, { size: undefined, sizing: false });
+			publish('account', accountView(account));
+			return send(200, accountView(account));
+		}
+		if (parts[2] === 'size' && m === 'POST') {
+			if (!MEASURABLE.has(account.source?.kind ?? 'pst')) return fail(422, 'the size of this source is known once a migration listed it');
+			measure(account);
 			publish('account', accountView(account));
 			return send(200, accountView(account));
 		}
@@ -927,6 +1044,39 @@ export async function handle(req) {
 		if (!plan) return fail(404, 'unknown plan');
 		return send(200, planView(plan));
 	}
+	if (path === '/runs' && m === 'POST' && json().mode === 'mirror') {
+		const body = json();
+		const ids = body.account_ids ?? [];
+		const options = { maxPercent: body.max_delete_percent ?? 20, minCount: body.min_delete_count ?? 10, allowLarge: body.allow_large_delete === true, allowEmpty: body.allow_empty_folders ?? [] };
+		const failing = ids.find((id) => state.mirrorScenarios.get(id)?.fail);
+		if (failing) return fail(502, state.mirrorScenarios.get(failing).fail);
+		// As the server: an unknown mailbox is a blocked one (no_prior_run), not an error.
+		const plans = ids.map((id) => (state.accounts.has(id) ? mirrorPlanOf(state.accounts.get(id), options) : { account_id: id, email: null, ready: false, to_add: fullCounts(), to_update: fullCounts(), to_delete: fullCounts(), blocked: [{ code: 'no_prior_run', message: 'unknown mailbox' }], sample: [] }));
+		state.mirrorCalls.push(body);
+		// A comparison writes nothing, and is the default: only dry_run false runs.
+		if (body.dry_run !== false) return send(200, { accounts: plans });
+		// A run starts a job for each mailbox that may run (200); the others come back blocked, without a job.
+		state.runBodies.push(body);
+		const started = plans.filter((p) => p.ready);
+		if (started.length) state.runCalls.push(started.map((p) => p.account_id));
+		const jobs = started.map((plan) => {
+			const job = startJob(state.accounts.get(plan.account_id));
+			job.mode = 'mirror';
+			const scenario = state.mirrorScenarios.get(plan.account_id) ?? {};
+			// The report of the server: the options, what stopped the run, then the counters keyed by kind.
+			const skipped = fullCounts(scenario.skipped);
+			const errors = fullCounts(scenario.errors);
+			const outcome = { options: { max_delete_percent: options.maxPercent, min_delete_count: options.minCount, allow_large_delete: options.allowLarge, allow_empty_folders: options.allowEmpty }, blocked: [], notes: scenario.notes ?? [], ...Object.fromEntries(MIRROR_KINDS.map((k) => [k, { added: plan.to_add[k], updated: plan.to_update[k], deleted: plan.to_delete[k], skipped_by_safety: skipped[k], errors: errors[k] }])) };
+			state.mirrorOutcomes.set(job.id, outcome);
+			job.mirror = outcome;
+			// The destination now matches the source.
+			state.mirrorScenarios.set(plan.account_id, { ...scenario, add: {}, update: {}, delete: {}, emptyFolders: undefined, skipped: undefined });
+			publish('job', job);
+			return job;
+		});
+		const jobOf = new Map(jobs.map((j) => [j.account_id, j.id]));
+		return send(200, { accounts: plans.map((p) => ({ account_id: p.account_id, email: p.email, ready: p.ready, blocked: p.blocked, ...(jobOf.has(p.account_id) ? { job_id: jobOf.get(p.account_id) } : {}) })), jobs });
+	}
 	if (path === '/runs' && m === 'POST') {
 		const body = json();
 		const ids = body.account_ids ?? [];
@@ -1025,7 +1175,7 @@ export async function handle(req) {
 		} else if (action === 'report') {
 			if (!['done', 'done_with_errors', 'stopped', 'failed'].includes(job.status)) return fail(404, 'report not available yet');
 			const part = (k) => ({ sent: job.progress[k].done, present: job.progress[k].done, errors: job.progress[k].errors });
-			return send(200, { job_id: job.id, mail: part('mail'), calendar: part('calendar'), contacts: part('contacts'), sample_check: '20/20 mails read back', filtered: { total: 1, reasons: { date: 1 } }, oversized: { count: 1, bytes: 52_428_800 } });
+			return send(200, { job_id: job.id, mail: part('mail'), calendar: part('calendar'), contacts: part('contacts'), sample_check: '20/20 mails read back', filtered: { total: 1, reasons: { date: 1 } }, oversized: { count: 1, bytes: 52_428_800 }, ...(state.mirrorOutcomes.has(job.id) ? { mirror: state.mirrorOutcomes.get(job.id) } : {}) });
 		}
 		publish('job', job);
 		return send(200, job);
@@ -1097,7 +1247,7 @@ function seedDemo() {
 		const t = state.psts.get(accountId).scan.totals;
 		const progress = emptyProgress();
 		for (const k of Object.keys(progress)) progress[k] = { done: Math.round(t[k] * (done[k] ?? 0)), total: t[k], errors: over.errors?.[k] ?? 0 };
-		const j = { id, account_id: accountId, status, phase: over.phase ?? 'verify', progress, current_folder: null, rate: null, rate_bytes: null, eta: null, started_at: ago(over.started ?? 300), finished_at: null, error: null, mode: 'full', created_at: ago((over.started ?? 300) + 5), tuning, priority: 0, batch_id: 1, pause_reason: null };
+		const j = { id, account_id: accountId, status, phase: over.phase ?? 'verify', progress, current_folder: null, rate: null, rate_bytes: null, bytes_ok: Math.round(progress.mail.done * (state.psts.get(accountId).size / t.mail)), eta: null, started_at: ago(over.started ?? 300), finished_at: null, error: null, mode: 'full', created_at: ago((over.started ?? 300) + 5), tuning, priority: 0, batch_id: 1, pause_reason: null };
 		state.jobs.set(id, j);
 		state.logs.set(id, []);
 		const lines = [['info', 'Job queued'], ['info', 'Precheck: IMAP, CalDAV and CardDAV reachable, quota sufficient']];
