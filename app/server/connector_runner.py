@@ -399,7 +399,8 @@ class ConnectorJobRunner(JobRunner):
 
     # ------------------------------------------------------------ one phase
     def _rows(self, kind: str, fkey: str, path: list[str]) -> dict[str, dict]:
-        rows = db.q("SELECT id, item_key, status, target, hash, error, source_ref, stamp FROM items WHERE account_id=? AND "
+        rows = db.q("SELECT id, item_key, status, target, hash, error, source_ref, stamp, warnings FROM items WHERE "
+                    "account_id=? AND "
                     "pst_key=? AND kind=? AND folder IN (?, ?)",
                     (self.account_id, self.pst_key, kind, fkey, legacy_folder_key(path)))
         return {r["item_key"]: dict(r) for r in rows}
@@ -431,6 +432,39 @@ class ConnectorJobRunner(JobRunner):
             elif r["status"] == "inflight":
                 self.set_item(r["id"], "pending")
                 r["status"] = "pending"
+
+    def _recheck_sent(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str]) -> None:
+        """DAV: the items recorded as sent that their collection does not list (a server that took the PUT and
+        dropped the object, or a copy deleted there since) are sent again, said in the log; one listing per
+        collection. Not those another item of their collection shares the UID with (SAME_UID: a server that keeps
+        one per UID keeps either), nor items the source no longer has."""
+        if kind == MAIL or not hasattr(session, "missing_ours"):
+            return
+        by_target: dict[str, list[dict]] = {}
+        for r in rows.values():
+            if r["status"] != "ok" or not r["target"] or not r["hash"] or r["item_key"] not in seen:
+                continue
+            if any(isinstance(w, str) and w.startswith(SAME_UID) for w in db.jload(r.get("warnings"), []) or []):
+                continue
+            by_target.setdefault(r["target"], []).append(r)
+        for target, group in by_target.items():
+            self.check()
+            try:
+                missing = self._on_session(session, lambda: session.missing_ours(target, {r["hash"] for r in group}))
+            except ConnectorError as e:
+                self.log(f"Cannot list {target} to check the items already sent there: {e}", "warning")
+                continue
+            if not missing:
+                continue
+            gone = {m.casefold() for m in missing}
+            again = [r for r in group if r["hash"].casefold() in gone]
+            for r in again:
+                self.set_item(r["id"], "pending")
+                r["status"] = "pending"
+            shown = ", ".join(f"'{r['hash']}'" for r in again[:10])
+            self.log(f"Folder '{fkey}' -> {target}: {len(again)} item(s) recorded as sent are not on the target "
+                     f"(dropped by the server or deleted there), sent again: {shown}"
+                     + (f" and {len(again) - 10} more" if len(again) > 10 else ""), "warning")
 
     def _relocate(self, session, kind: str, fkey: str, rows: dict[str, dict], seen: set[str], plan_name: str) -> None:
         """DAV: the items an earlier run copied into another collection than the one the plan now gives their folder
@@ -506,6 +540,8 @@ class ConnectorJobRunner(JobRunner):
             if not partial and r["item_key"] not in seen and r["source_ref"]:
                 orphans.setdefault(r["source_ref"], []).append(r)
         self._relocate(session, kind, fkey, rows, seen, plan_name)
+        if not partial:
+            self._recheck_sent(session, kind, fkey, rows, seen)
         entries = []
         filtered: dict[str, list[tuple]] = {}
         for it in listing:

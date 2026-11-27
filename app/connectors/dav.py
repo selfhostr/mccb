@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from typing import Iterator
 from urllib.parse import unquote
@@ -234,10 +235,17 @@ class DavSession(TargetSession):
         500 again: when the collection does not answer either, the server is in trouble (TRANSIENT: the runner
         retries as usual); when it does, the object is the problem: an object of the same UID elsewhere in the
         account is looked for (a clear reason, REJECTED), else the object is written in a plainer form (davfix:
-        `last_note` says which), else REJECTED at once instead of the long retries of a server in trouble."""
+        `last_note` says which), else REJECTED at once instead of the long retries of a server in trouble.
+
+        Learned per collection (Breaker): the form that got an object written is tried first for the next ones, at
+        once (a server refusing every card with a website: one PUT more per card, not a dozen requests and seconds);
+        once a few objects were refused in every form, the moment before the retry is not waited for any more."""
         c = self._c()
         what = self._what()
-        time.sleep(self.ITEM_RETRY_DELAY)
+        forms = davfix.forms(self.dav_kind, text)
+        known = self.breaker.remedy(folder)
+        if not (known and any(f[0] == known for f in forms)) and not self.breaker.hopeless(folder):
+            time.sleep(self.ITEM_RETRY_DELAY)  # a moment, unless this collection's refusals are known by now
         try:
             state = c.state_of(folder, name)
         except DavError as e:
@@ -258,6 +266,18 @@ class DavSession(TargetSession):
             self._remember(folder, name, mark)
             return True
 
+        def written(label: str, body: str, notes: list[str]) -> bool:
+            if not attempt(body):
+                return False
+            self.breaker.learn(folder, label)
+            self.last_note = (f"the server answered HTTP 500 to this {what} as it is: written in a {label} form"
+                              + (f" ({'; '.join(notes)})" if notes else ""))
+            return True
+
+        if known and state is None:  # the form that got the ones before written: first (never over a resource)
+            for label, body, notes in forms:
+                if label == known and written(label, body, notes):
+                    return
         if attempt(text):
             return
         status = c._probe(self.dav_kind, folder)
@@ -272,12 +292,10 @@ class DavSession(TargetSession):
             err = ConnectorError(f"{first}: {why}", ConnectorError.REJECTED)
             err.explained = True  # type: ignore[attr-defined]  # a reason of its own: not the collection's fault
             raise err
-        forms = davfix.forms(self.dav_kind, text)
         for label, body, notes in forms:
-            if attempt(body):
-                self.last_note = (f"the server answered HTTP 500 to this {what} as it is: written in a {label} form"
-                                  + (f" ({'; '.join(notes)})" if notes else ""))
+            if label != known and written(label, body, notes):
                 return
+        self.breaker.refused(folder)
         raise ConnectorError(f"{first}: the server refuses this {what} (HTTP 500 again a moment later"
                              + (f", and for its {' and '.join(f[0] for f in forms)} form" if forms else "")
                              + ") while the collection answers", ConnectorError.REJECTED)
@@ -288,7 +306,9 @@ class DavSession(TargetSession):
     def _uid_conflict(self, folder: str, name: str, text: str) -> str | None:
         """Why the server may refuse this object: one of the same UID already in the account (SmarterMail keeps one
         per UID: the copies an earlier run made in a second "Contacts"), None when none is found. Best effort: a
-        request that fails says nothing."""
+        request that fails says nothing. An object is named only once read (GET) with that very UID: a server may
+        answer an addressbook-query with every card of the collection (MDaemon ignores its filter), which a query
+        for a UID no object has shows first (that collection is then not asked)."""
         uid = davfix.object_uid(text)
         c = self._c()
         what = self._what()
@@ -313,6 +333,15 @@ class DavSession(TargetSession):
                        f"Delete that copy (or '{label}' if it is a duplicate {word}) in the webmail, then rerun"))
 
         others = [(u, label) for u, label in diag["colls"] if url_key(u) != here]
+
+        def holds(url: str, res: str) -> bool:
+            """The resource really has this UID (GET): never blamed on a name or on a server's answer alone."""
+            try:
+                raw = c.get_bytes(url, res)
+            except DavError:
+                return False
+            return raw is not None and (uid is None or davfix.object_uid(raw) == uid)
+
         for url, label in others:  # the same resource name (mccb names an object after its UID)
             names = diag["names"].get(url)
             if names is None:
@@ -321,17 +350,24 @@ class DavSession(TargetSession):
                 except DavError:
                     names = set()
                 diag["names"][url] = names
-            if name.casefold() in names:
+            if name.casefold() in names and holds(url, name):
                 return said(url, label, url + name)
         if not uid or not diag["query"]:
             return None
+        filters = diag.setdefault("filters", {})
         for url, label in [(folder, mine or folder), *others]:  # the same UID under another name
             try:
+                if url_key(url) not in filters:  # a UID no object has: a server that ignores the filter says so
+                    filters[url_key(url)] = not c.find_uid(self.dav_kind, url, f"mccb-none-{uuid.uuid4().hex}",
+                                                           self.component)
+                if not filters[url_key(url)]:
+                    continue  # it lists every object whatever the UID asked (MDaemon): it tells nothing
                 hrefs = c.find_uid(self.dav_kind, url, uid, self.component)
             except DavError:
                 diag["query"] = False  # the server does not do it: not asked again for every item
                 return None
             hrefs = [h for h in hrefs if not (url_key(url) == here and _last(h).casefold() == name.casefold())]
+            hrefs = [h for h in hrefs[:5] if holds(h.rsplit("/", 1)[0] + "/", _last(h))]
             if hrefs:
                 if url_key(url) == here:
                     return (f"a {what} with the UID '{uid}' is already in this {word} under another name ({hrefs[0]}): "
@@ -524,6 +560,8 @@ class Breaker:
     def __init__(self):
         self.lock = threading.Lock()
         self.state: dict[str, dict] = {}
+        self.forms: dict[str, str] = {}  # collection -> the davfix form that got an object written after a 500
+        self.hopeless_n: dict[str, int] = {}  # collection -> objects refused in every form
 
     def blocked(self, folder: str) -> str | None:
         with self.lock:
@@ -545,6 +583,26 @@ class Breaker:
             st["streak"] += 1
             st["why"] = why[:400]
             return st["streak"] == self.LIMIT
+
+    HOPELESS = 3  # objects of a collection refused in every form, after which no moment is waited before a retry
+
+    def remedy(self, folder: str) -> str | None:
+        """The form (davfix) that last got an object of this collection written after a 500."""
+        with self.lock:
+            return self.forms.get(url_key(folder))
+
+    def learn(self, folder: str, label: str) -> None:
+        with self.lock:
+            self.forms[url_key(folder)] = label
+
+    def refused(self, folder: str) -> None:
+        """One more object refused in every form while the collection answers."""
+        with self.lock:
+            self.hopeless_n[url_key(folder)] = self.hopeless_n.get(url_key(folder), 0) + 1
+
+    def hopeless(self, folder: str) -> bool:
+        with self.lock:
+            return self.hopeless_n.get(url_key(folder), 0) >= self.HOPELESS
 
     def ok(self, folder: str) -> None:
         with self.lock:

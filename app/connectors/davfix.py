@@ -6,6 +6,10 @@ SmarterMail). Only used after that refusal: the object as the source has it is a
   PRODID and a DTSTAMP in each component, and an oversized inline attachment left out.
 - `minimal`: also without the X- properties (the members of a contact group kept) and the binary properties
   (photos, logos, sounds, keys, attachments).
+- for a vCard with a URL (a server based on MDaemon answers 500 to every card with a website, whatever its form),
+  after the normalized form: its URLs without parameters (`plain-URL`), then its URLs moved into the NOTE
+  (`URL-in-note`: nothing is lost, the website is in the note's text), before the minimal forms (`minimal`, then
+  `minimal URL-in-note`).
 
 Each returns (text, notes): what was changed, in words, for the log and the item's warnings."""
 from __future__ import annotations
@@ -61,8 +65,10 @@ def object_uid(raw: bytes | str) -> str | None:
 
 
 # ------------------------------------------------------------------ vCard
-def vcard(text: str, minimal: bool = False) -> tuple[str, list[str]]:
+def vcard(text: str, minimal: bool = False, url: str | None = None) -> tuple[str, list[str]]:
+    """`url`: None (URL kept as it is), "plain" (without its parameters), "note" (moved into the NOTE)."""
     notes: list[str] = []
+    urls: list[str] = []
     lines = unfold(text)
     if sum(1 for ln in lines if ln.upper() == "BEGIN:VCARD") != 1:
         return text, []  # not one card: left as it is
@@ -99,6 +105,13 @@ def vcard(text: str, minimal: bool = False) -> tuple[str, list[str]]:
             if len(value) > BIG:
                 notes.append(f"{name.lower()} of {len(value) * 3 // 4 // 1024} KB left out")
                 continue
+        if name == "URL" and url == "plain" and params:
+            params = []
+            notes.append("URL parameters left out")
+        elif name == "URL" and url == "note":
+            if value.strip():
+                urls.append(value.strip())
+            continue
         if name == "FN":
             fn = value
         elif name == "N":
@@ -120,10 +133,19 @@ def vcard(text: str, minimal: bool = False) -> tuple[str, list[str]]:
         n = f"{words[-1]};{' '.join(words[:-1])};;;" if len(words) > 1 else f"{fn};;;;"
         out.insert(1, _join("N", [], n))
         notes.append("N added")
+    if urls:
+        add = "\\n".join(u.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;") for u in urls)
+        i = next((i for i, ln in enumerate(out) if _split(ln)[0] == "NOTE"), None)
+        if i is None:
+            out.append(_join("NOTE", [], add))
+        else:
+            name, params, value = _split(out[i])
+            out[i] = _join(name, params, f"{value}\\n{add}" if value.strip() else add)
+        notes.append(f"URL moved into the note ({len(urls)})")
     if dropped:
         notes.append("left out: " + ", ".join(sorted(dropped)))
     body = ["BEGIN:VCARD", "VERSION:3.0", *out, "END:VCARD"]
-    return "".join(fold(ln) + "\r\n" for ln in body), notes
+    return "".join(fold(ln) + "\r\n" for ln in body), list(dict.fromkeys(notes))
 
 
 # ------------------------------------------------------------------ iCalendar
@@ -181,11 +203,19 @@ def ical(text: str, minimal: bool = False) -> tuple[str, list[str]]:
 
 def forms(dav_kind: str, text: str) -> list[tuple[str, str, list[str]]]:
     """[(name of the form, text, notes)] to try after the object as it is, each different from the one before."""
-    fix = vcard if dav_kind == "carddav" else ical
     out = []
     seen = {text}
-    for label, minimal in (("normalized", False), ("minimal", True)):
-        t, notes = fix(text, minimal)
+    if dav_kind == "carddav":
+        steps = [("normalized", False, None)]
+        if any(_split(ln)[0] == "URL" for ln in unfold(text)):
+            steps += [("plain-URL", False, "plain"), ("URL-in-note", False, "note")]
+        steps += [("minimal", True, None)]
+        if len(steps) > 2:
+            steps += [("minimal URL-in-note", True, "note")]
+    else:
+        steps = [("normalized", False, None), ("minimal", True, None)]
+    for label, minimal, url in steps:
+        t, notes = vcard(text, minimal, url) if dav_kind == "carddav" else ical(text, minimal)
         if t not in seen:
             seen.add(t)
             out.append((label, t, notes))

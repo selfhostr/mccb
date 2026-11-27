@@ -60,6 +60,9 @@ class FakeSmarterMail:
         self.etag = 0
         self.refuse: set[str] = set()  # paths whose PUT gets 500, whatever is sent
         self.ctype: str | None = None  # Content-Type of a GET of an object (None: none, as SmarterMail may do)
+        self.query_all = False  # REPORT: every object of the collection, whatever the filter (MDaemon)
+        self.refuse_url: str | None = None  # "any": 500 to a vCard with a URL; "params": to a URL with parameters
+        self.drop: set[str] = set()  # UIDs whose PUT gets 201 and is not kept
 
     def add(self, slug, name, kind="card", comp=None, owner=ME, shared=False, items=None):
         path = self.HOME + slug + "/"
@@ -156,7 +159,7 @@ class FakeSmarterMail:
                     return httpx.Response(400)
                 uid = m.group(1).decode()
                 return self._ms([self._row(path + n, '<d:getetag>"1"</d:getetag>')
-                                 for n, b in col["items"].items() if _uid(b) == uid])
+                                 for n, b in col["items"].items() if self.query_all or _uid(b) == uid])
             folder, _, name = path.rpartition("/")
             col = self.cols.get(folder + "/")
             if req.method == "DELETE":
@@ -182,7 +185,11 @@ class FakeSmarterMail:
                     return httpx.Response(500 if self.inm_500 else 412)
                 if b"POISON" in body or b"VERSION:4.0" in body or b"X-BOOM" in body:
                     return httpx.Response(500)
+                if self.refuse_url and re.search(rb"^URL[;:]" if self.refuse_url == "any" else rb"^URL;", body, re.M):
+                    return httpx.Response(500)
                 uid = _uid(body)
+                if uid in self.drop:
+                    return httpx.Response(201, headers={"ETag": '"dropped"'})
                 held = self._holder(col["kind"], uid) if uid else None
                 if held is not None and held != (folder + "/", name):
                     if self.collapse and held[0] == folder + "/":
@@ -358,6 +365,93 @@ def test_a_uid_already_in_another_address_book_is_named(sm):
     assert "already exists in the address book 'Perso' (https://dst.test/dav/me/perso/other-name.vcf)" in str(e.value)
     assert not any(c["name"] == "Contacts" and "c1.vcf" in c["items"] and b"Someone" in c["items"]["c1.vcf"]
                    for c in dst.cols.values())
+
+
+def test_a_server_answering_every_query_with_the_whole_collection_blames_no_card(sm):
+    """MDaemon answers an addressbook-query with every card of the collection: the first one was named as holding
+    the UID of every refused card. A query for a UID no object has shows it; nothing is named then."""
+    _src, dst = sm
+    dst.query_all = True
+    col = "https://dst.test" + dst.add("b64=Q29udGFjdHM", "Contacts", items={"first.vcf": vcf("first", "First")})
+    s = session_on(dst)
+    for i in range(3):
+        with pytest.raises(ConnectorError) as e:
+            put(s, col, f"p{i}", vcf(f"p{i}", "POISON"))
+        assert "first.vcf" not in str(e.value) and "already" not in str(e.value)
+        assert "refuses this contact (HTTP 500 again a moment later) while the collection answers" in str(e.value)
+    assert sum(m == "REPORT" for m, _p in dst.methods) == 1  # the collection is tried once, then not asked
+    dst.query_all = False
+    dst.add("perso", "Perso", items={"other-name.vcf": vcf("c2", "Elsewhere")})
+    s = session_on(dst)
+    with pytest.raises(ConnectorError) as e:  # a server that filters: the card is read before it is named
+        put(s, col, "c2", vcf("c2", "Someone else"))
+    assert "already exists in the address book 'Perso' (https://dst.test/dav/me/perso/other-name.vcf)" in str(e.value)
+    assert ("GET", "/dav/me/perso/other-name.vcf") in dst.methods
+
+
+def test_cards_with_a_website_refused_are_written_with_it_in_the_note_then_at_once(sm):
+    """The target answers 500 to every vCard with a URL (seen on MDaemon): the URL goes into the note, and the
+    next cards of the collection get that form at once (one PUT more, no wait, no other form tried)."""
+    _src, dst = sm
+    dst.refuse_url = "any"
+    col = "https://dst.test" + dst.add("b64=Q29udGFjdHM", "Contacts")
+    s = session_on(dst)
+    put(s, col, "w1", vcf("w1", "Web One",
+                          "NOTE:hello\r\nURL;PREF=1;TYPE=WORK:www.one.test\r\nPHOTO;ENCODING=b;TYPE=JPEG:AAAA\r\n"))
+    assert "written in a URL-in-note form" in s.last_note and "URL moved into the note (1)" in s.last_note
+    body = dst.cols[dst.HOME + "b64=Q29udGFjdHM/"]["items"]["w1.vcf"].decode()
+    assert "NOTE:hello\\nwww.one.test\r\n" in body and "\nURL" not in body and "PHOTO" in body  # photo kept
+    n = len(dst.methods)
+    t0 = time.monotonic()
+    for i in range(2, 6):
+        put(s, col, f"w{i}", vcf(f"w{i}", f"Web {i}", f"URL;TYPE=HOME:https://w{i}.test/a,b\r\n"))
+        assert "URL-in-note" in s.last_note
+    assert time.monotonic() - t0 < 1  # no moment waited
+    assert [m for m, _p in dst.methods[n:]].count("PUT") == 4 * 2  # as it is, then the form learnt: nothing else
+    body = dst.cols[dst.HOME + "b64=Q29udGFjdHM/"]["items"]["w5.vcf"].decode()
+    assert "NOTE:https://w5.test/a\\,b\r\n" in body
+    put(s, col, "plain", vcf("plain", "No website"))  # a card the server takes as it is: as it is
+    assert s.last_note == "" and "URL" not in dst.cols[dst.HOME + "b64=Q29udGFjdHM/"]["items"]["plain.vcf"].decode()
+    dst.refuse_url = "params"  # a server refusing only the parameters: the URL itself is kept
+    put(s, dst_col := "https://dst.test" + dst.add("other", "Other"), "p1",
+        vcf("p1", "Params", "URL;TYPE=WORK:www.p.test\r\n"))
+    assert "plain-URL form (URL parameters left out)" in s.last_note
+    assert "\r\nURL:www.p.test\r\n" in dst.cols[dst.HOME + "other/"]["items"]["p1.vcf"].decode(), dst_col
+
+
+def test_contacts_with_a_website_end_to_end(client, sm):
+    src, dst = sm
+    dst.refuse_url = "any"
+    src.add("b64=Q29udGFjdHM", "Contacts", items={
+        **{f"w{i}.vcf": vcf(f"w{i}", f"Web {i}", f"URL;TYPE=WORK:www.w{i}.test\r\n") for i in range(30)},
+        **{f"n{i}.vcf": vcf(f"n{i}", f"Plain {i}") for i in range(5)}})
+    dst.add("b64=Q29udGFjdHM", "Contacts")
+    aid = account(client)
+    job, rep, log = run(client, aid)
+    assert job["status"] == "done", log
+    got = dst.by_name("Contacts")
+    assert len(got) == 35 and all(b"www.w" in got[f"w{i}.vcf"] for i in range(30))
+    assert "already" not in log and "not sent" not in log
+
+
+def test_an_event_sent_but_dropped_by_the_server_is_sent_again_on_the_next_run(client, sm):
+    src, dst = sm
+    src.add("b64=Q2FsZW5kYXI", "Calendrier", kind="cal", items={
+        "a.ics": ics("ev-a", "Kept"), "b.ics": ics("ev-b", "Web Meeting: test")})
+    dst.add("b64=Q2FsZW5kYXI", "Calendrier", kind="cal")
+    dst.drop = {"ev-b"}  # 201 to its PUT, not kept
+    aid = account(client, "caldav")
+    job, rep, log = run(client, aid)
+    assert "1 present < 2 sent" in log and "missing on the target: 'Web Meeting: test'" in log, log
+    assert items(aid)["Web Meeting: test"]["status"] == "ok"
+    dst.drop = set()
+    job, rep, log = run(client, aid)
+    assert "1 item(s) recorded as sent are not on the target (dropped by the server or deleted there), sent again: " \
+           "'ev-b.ics'" in log, log
+    assert job["status"] == "done", log
+    assert sorted(dst.by_name("Calendrier")) == ["ev-a.ics", "ev-b.ics"]
+    job, rep, log = run(client, aid)  # nothing missing any more: nothing sent again
+    assert "sent again" not in log and job["status"] == "done", log
 
 
 def test_500_to_if_none_match_over_an_existing_resource_writes_it_over(sm):
