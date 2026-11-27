@@ -180,6 +180,8 @@ def wants(row: dict | None) -> bool:
     err = row.get("error") or ""
     if st == "error" and (err.startswith(crash.CRASH_MSG) or err.startswith(pol.OVERSIZE_PREFIX)):
         return False
+    if st == "skipped" and err == GAVE_UP:
+        return True  # given up while the source did not list it, listed again: it was never written
     return st not in ("ok", "skipped", pol.FILTERED)
 
 
